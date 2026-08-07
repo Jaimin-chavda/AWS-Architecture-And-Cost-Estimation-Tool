@@ -64,9 +64,40 @@
 
 ## Traceability
 
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| INPT-01 | Phase 2 — Real Inputs | Pending |
+| INPT-02 | Phase 2 — Real Inputs | Pending |
+| INPT-03 | Phase 2 — Real Inputs | Pending |
+| INF-01 | Phase 3 — Rule Engine | Pending |
+| INF-02 | Phase 3 — Rule Engine | Pending |
+| INF-03 | Phase 4 — LLM Enhancement | Pending |
+| INF-04 | Phase 4 — LLM Enhancement | Pending |
+| INF-05 | Phase 3 — Rule Engine | Pending |
+| DIAG-01 | Phase 1 — Pipeline Skeleton | Pending |
+| DIAG-02 | Phase 1 — Pipeline Skeleton | Pending |
+| DIAG-03 | Phase 1 — Pipeline Skeleton | Pending |
+| DIAG-04 | Phase 1 — Pipeline Skeleton | Pending |
+| COST-01 | Phase 5 — Cost Engine | Pending |
+| COST-02 | Phase 5 — Cost Engine | Pending |
+| COST-03 | Phase 5 — Cost Engine | Pending |
+| COST-04 | Phase 5 — Cost Engine | Pending |
+| SIM-01 | Phase 5 — Cost Engine | Pending |
+| SIM-02 | Phase 5 — Cost Engine | Pending |
+| AUTH-01 | Phase 6 — Auth + History | Pending |
+| AUTH-02 | Phase 6 — Auth + History | Pending |
+| AUTH-03 | Phase 6 — Auth + History | Pending |
+
+**Coverage: 21/21 v1 requirements mapped** (no orphans, no duplicates)
+
 | Phase | Requirements | Status |
 |-------|--------------|--------|
-| (pending roadmap) | | |
+| 1. Pipeline Skeleton (Canned Input + Foundation) | DIAG-01, DIAG-02, DIAG-03, DIAG-04 | Pending |
+| 2. Real Inputs (Repo + Freeform) | INPT-01, INPT-02, INPT-03 | Pending |
+| 3. Rule Engine (Deterministic Inference) | INF-01, INF-02, INF-05 | Pending |
+| 4. LLM Enhancement + Diagram Polish | INF-03, INF-04 | Pending |
+| 5. Cost Engine | COST-01, COST-02, COST-03, COST-04, SIM-01, SIM-02 | Pending |
+| 6. Auth + History (Optional) | AUTH-01, AUTH-02, AUTH-03 | Pending |
 
 ---
 *Last updated: 2026-08-07 after research + scoping*
