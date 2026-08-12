@@ -1,0 +1,85 @@
+<mxfile host="app.diagrams.net" agent="AWS Architect SGP" version="24.7.17">
+  <diagram id="system-design-usecase" name="Use Case">
+    <mxGraphModel dx="1150" dy="700" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1200" pageHeight="720" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="actorUser" value="Logged-in User" style="shape=actor;whiteSpace=wrap;html=1;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="100" y="110" width="80" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="actorGuest" value="Guest" style="shape=actor;whiteSpace=wrap;html=1;fontSize=14;" vertex="1" parent="1">
+          <mxGeometry x="110" y="520" width="60" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="boundary" value="AWS Architect Webapp" style="rounded=0;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#000000;dashed=1;verticalAlign=top;fontStyle=1;fontSize=14;spacingTop=12;" vertex="1" parent="1">
+          <mxGeometry x="320" y="40" width="820" height="580" as="geometry"/>
+        </mxCell>
+        <mxCell id="lblShared" value="Shared — guest &amp; logged-in" style="text;html=1;align=center;fontStyle=2;fontSize=13;" vertex="1" parent="boundary">
+          <mxGeometry x="20" y="35" width="250" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="lblLogged" value="Logged-in only (saved history)" style="text;html=1;align=center;fontStyle=2;fontSize=13;" vertex="1" parent="boundary">
+          <mxGeometry x="100" y="405" width="260" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="uc1" value="Generate diagram + cost from repo URL" style="ellipse;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="boundary">
+          <mxGeometry x="20" y="70" width="180" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="uc2" value="Generate from freeform description" style="ellipse;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="boundary">
+          <mxGeometry x="220" y="70" width="180" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="uc3" value="Download .drawio file" style="ellipse;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="boundary">
+          <mxGeometry x="420" y="70" width="180" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="uc4" value="Adjust region / scale slider" style="ellipse;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="boundary">
+          <mxGeometry x="620" y="70" width="180" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="uc5" value="Save analysis to history" style="ellipse;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="boundary">
+          <mxGeometry x="20" y="440" width="180" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="uc6" value="List / re-open own analyses" style="ellipse;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="boundary">
+          <mxGeometry x="220" y="440" width="180" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="uc7" value="Delete own analyses" style="ellipse;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="boundary">
+          <mxGeometry x="420" y="440" width="180" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="eG1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=none;rounded=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="actorGuest" target="uc1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eG2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=none;rounded=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="actorGuest" target="uc2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eG3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=none;rounded=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="actorGuest" target="uc3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eG4" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=none;rounded=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="actorGuest" target="uc4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eU1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=none;rounded=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="actorUser" target="uc1">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eU2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=none;rounded=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="actorUser" target="uc2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eU3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=none;rounded=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="actorUser" target="uc3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eU4" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=none;rounded=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="actorUser" target="uc4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eU5" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=none;rounded=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="actorUser" target="uc5">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eU6" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=none;rounded=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="actorUser" target="uc6">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eU7" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=none;rounded=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" edge="1" parent="1" source="actorUser" target="uc7">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="eGen" value="generalizes" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=0;rounded=1;fontSize=12;exitX=0.5;exitY=1;entryX=0.5;entryY=0;labelBackgroundColor=#ffffff;" edge="1" parent="1" source="actorUser" target="actorGuest">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="note1" value="Key rule: guest use cases never depend on login.&#10;System boundary = POST /api/analyze, POST /api/prices, auth routes, history routes." style="shape=note;whiteSpace=wrap;html=1;backgroundOutline=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="330" y="650" width="460" height="50" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
