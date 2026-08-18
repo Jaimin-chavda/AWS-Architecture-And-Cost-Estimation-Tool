@@ -82,4 +82,31 @@ Every decision made for this project, with the "why". Source of truth: `.plannin
 <!-- GSD:decision-end -->
 
 ---
-*Last updated: 2026-08-12 — consolidated from PROJECT.md Key Decisions, research/**, and flaw resolutions 1–8.*
+
+## Implementation Log
+
+### Stage 1 — Rules-based inference (BuildOrder step 1) · 2026-08-18
+
+| # | Decision | Why |
+|---|----------|-----|
+| I-1 | **`type: "module"` added to `aws-architect/package.json`** | Node 26 ESM resolution requires explicit module type when using `--experimental-strip-types` for test-running `.ts` files directly. Next.js is unaffected (it has its own bundler). |
+| I-2 | **Test runner = Node built-in `node:test` + `--experimental-strip-types`** | Zero extra dependencies for Stage 1 tests. Works on Node 26. `import type` must be used for TypeScript type-only exports or strip-types will error at runtime. |
+| I-3 | **`src/lib/schema.ts` is the single ServicePlan contract module** | Matches Decision 2 (one contract). All pipeline stages import from here. The two `.refine()` guards (catalog allowlist gate + 12-service cap) run on every `safeParse` call. |
+| I-4 | **`src/lib/ruleEngine.ts` — pattern scoring via additive keyword scoring, highest score wins** | Deterministic, testable, zero external calls. Ties broken by specificity order (more-specific patterns listed first). A floor of 0 for `generic` ensures it is always available as last resort. |
+| I-5 | **`/api/analyze` route stubs Stage 2 (RepoFetcher) with empty `fileContent`/`fileNames`** | Stage 2 is not built yet. The route is functional end-to-end for freeform descriptions and gives a basis for integration testing. The stub is clearly marked with a comment so Stage 2 knows where to wire in. |
+| I-6 | **Route returns `diagram_xml: null` and `cost_rows: null` for Stages 4–5 not yet built** | Explicit nulls instead of omitting the fields keeps the response shape stable — the frontend can always destructure without defensive checks for field presence vs. null. |
+
+### Stage 2 — LLM inference + schema gate + evidence extraction (BuildOrder step 2) · 2026-08-18
+
+| # | Decision | Why |
+|---|----------|-----|
+| I-7 | **RepoFetcher included in Stage 2 (not a separate stage)** | LLM inference is useless without real repo content; both are needed before the pipeline produces meaningful results for the github_url path. BuildOrder stage 2 ("LLM inference + schema gate") implicitly requires evidence extraction. |
+| I-8 | **`LlmOutputSchema` for `generateObject` excludes `.refine()` guards; full `ServicePlanSchema.safeParse()` is the explicit gate** | `generateObject` retries on shape errors (wrong types, missing fields). Catalog violations are our explicit gate — we don't want the LLM to burn retries on them. Separation is cleaner: LLM handles shape, gate handles semantics. |
+| I-9 | **Provider chain: DeepSeek → Google Gemini Flash → Groq; first env key wins** | Matches Decision 18. `resolveProvider()` checks env vars in priority order; if none set, `llmConfigured()` returns false and LLM is silently skipped (Decision 5). |
+| I-10 | **Merge confidence rules: both agree → "high"; LLM only → min(llm, "medium"); baseline only → "low"** | Consensus = high confidence. LLM without rules confirmation is capped at medium (it may hallucinate). Rules without LLM confirmation are low (weak signal). Transparent, predictable tiers. |
+| I-11 | **Slot name collision resolution: second occupant gets `additional_N` overflow slot name** | Two services can't share a slot. The priority order (high > medium > low) means the better-evidenced service keeps the semantic slot name; the lower-confidence one overflows. |
+| I-12 | **Evidence cap to LLM: 16 KB total prompt evidence, 3 KB per file** | Prevents context overflow on large repos. The rule engine already runs on the full content; the LLM cap is only for prompt length, not signal extraction. |
+| I-13 | **`fetchRepoSignals` uses `raw.githubusercontent.com` for file content, GitHub Contents API as fallback** | The raw URL returns plain text; the Contents API returns base64-encoded JSON which requires decoding. Raw is faster and cleaner. Redirect following disabled (SSRF guard). |
+| I-14 | **`capConfidence` comparison: `ci >= mi ? c : max`** | `CONFIDENCE_ORDER = ["high","medium","low"]`; lower index = better. To cap at `max`, return `c` only if `c` is already worse-or-equal (`ci >= mi`); otherwise clamp to `max`. (Fixed off-by-one bug caught by tests.) |
+
+*Last updated: 2026-08-18 — Stage 2 complete. 41/41 tests pass, TypeScript clean.*
