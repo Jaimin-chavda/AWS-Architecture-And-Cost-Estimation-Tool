@@ -72,6 +72,25 @@ export const SERVICE_IDS = [
 export type ServiceId = (typeof SERVICE_IDS)[number];
 
 // ---------------------------------------------------------------------------
+// Service categories — used for gap detection during LLM result filtering.
+// If the LLM result covers compute but not storage, rules fill only storage.
+// ---------------------------------------------------------------------------
+export const SERVICE_CATEGORIES: Record<ServiceId, string> = {
+  EC2: "compute", Lambda: "compute", ECS: "compute", EKS: "compute",
+  Fargate: "compute", Lightsail: "compute", Batch: "compute",
+  S3: "storage", EBS: "storage", EFS: "storage", Glacier: "storage",
+  RDS: "database", DynamoDB: "database", ElastiCache: "database",
+  Aurora: "database", Redshift: "database", DocumentDB: "database",
+  CloudFront: "networking", APIGateway: "networking", ALB: "networking",
+  Route53: "networking", VPC: "networking", NATGateway: "networking",
+  SQS: "messaging", SNS: "messaging", EventBridge: "messaging", Kinesis: "messaging",
+  Cognito: "auth",
+  CloudWatch: "observability", CodePipeline: "observability", ECR: "observability",
+  SageMaker: "ml", Rekognition: "ml", Comprehend: "ml",
+  SES: "misc", Amplify: "misc",
+};
+
+// ---------------------------------------------------------------------------
 // Architecture pattern templates (Decision in PROJECT.md — 5–8 patterns).
 // These drive diagram layout (Stage 3/4) and slot validation.
 // ---------------------------------------------------------------------------

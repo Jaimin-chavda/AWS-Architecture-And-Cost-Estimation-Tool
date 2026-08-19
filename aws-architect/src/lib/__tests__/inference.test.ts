@@ -163,15 +163,79 @@ describe("mergeServicePlans — with LLM result", () => {
         compute: { serviceId: "INVALID_SERVICE", confidence: "high", evidence: "hallucinated" },
       },
     };
-    // Note: in real flow, callLlm already gates this. Here we test the merge
-    // itself is robust — bad data → baseline.
-    // The merge produces an invalid serviceId → ServicePlanSchema.safeParse fails
-    // → mergeServicePlans returns baseline with grounding cap.
     const result = mergeServicePlans(baseline, badLlm, "repo");
-    // Lambda should still be present (from baseline fallback)
     const ids = new Set(Object.values(result.slots).map((s) => s.serviceId));
     assert.ok(ids.has("Lambda"), "Should fall back to baseline (Lambda present)");
     assert.ok(!ids.has("INVALID_SERVICE"), "Invalid service ID must not appear");
+  });
+
+  it("Fix 1: filters invalid IDs individually and trims to 12 valid services", async () => {
+    const { filterAndValidateLlmSlots } = await import("../llmClient.ts");
+    // 15 services total: 12 valid + 3 invalid
+    const rawSlots: Record<string, { serviceId: string; confidence: "high" | "medium" | "low"; evidence: string }> = {
+      s1: { serviceId: "Lambda", confidence: "high", evidence: "valid compute" },
+      s2: { serviceId: "EC2", confidence: "high", evidence: "valid compute 2" },
+      s3: { serviceId: "S3", confidence: "high", evidence: "valid storage" },
+      s4: { serviceId: "DynamoDB", confidence: "high", evidence: "valid db" },
+      s5: { serviceId: "RDS", confidence: "high", evidence: "valid db 2" },
+      s6: { serviceId: "SQS", confidence: "high", evidence: "valid queue" },
+      s7: { serviceId: "SNS", confidence: "medium", evidence: "valid sns" },
+      s8: { serviceId: "CloudFront", confidence: "medium", evidence: "valid cdn" },
+      s9: { serviceId: "APIGateway", confidence: "medium", evidence: "valid api" },
+      s10: { serviceId: "Cognito", confidence: "low", evidence: "valid auth" },
+      s11: { serviceId: "CloudWatch", confidence: "low", evidence: "valid logs" },
+      s12: { serviceId: "EventBridge", confidence: "low", evidence: "valid events" },
+      s13: { serviceId: "Kinesis", confidence: "low", evidence: "valid kinesis" }, // 13th valid
+      bad1: { serviceId: "NON_EXISTENT_AWS_SERVICE", confidence: "high", evidence: "invalid" },
+      bad2: { serviceId: "GoogleCloudStorage", confidence: "high", evidence: "invalid" },
+      bad3: { serviceId: "AzureBlob", confidence: "high", evidence: "invalid" },
+    };
+
+    const filtered = filterAndValidateLlmSlots(rawSlots);
+    assert.ok(filtered, "Should return filtered slots");
+    const serviceList = Object.values(filtered).map((s) => s.serviceId);
+    assert.strictEqual(serviceList.length, 12, "Should cap to exactly 12 services");
+    assert.ok(!serviceList.includes("NON_EXISTENT_AWS_SERVICE"), "Invalid IDs must be dropped");
+    assert.ok(!serviceList.includes("GoogleCloudStorage"), "Invalid IDs must be dropped");
+    assert.ok(!serviceList.includes("AzureBlob"), "Invalid IDs must be dropped");
+    // High confidence items must be preserved over low confidence items
+    assert.ok(serviceList.includes("Lambda"));
+    assert.ok(serviceList.includes("S3"));
+    assert.ok(serviceList.includes("DynamoDB"));
+  });
+
+  it("Fix 1: only fills baseline gap for unaddressed categories, preserving LLM coverage", () => {
+    // LLM covers compute (Lambda) and database (DynamoDB)
+    const llm = makePlan({
+      slots: {
+        compute: { serviceId: "Lambda", confidence: "high", evidence: "llm lambda" },
+        database: { serviceId: "DynamoDB", confidence: "high", evidence: "llm dynamo" },
+      },
+    });
+    // Baseline had compute (EC2), database (RDS), storage (S3), observability (CloudWatch)
+    const baseline = makePlan({
+      slots: {
+        compute: { serviceId: "EC2", confidence: "medium", evidence: "base ec2" },
+        database: { serviceId: "RDS", confidence: "medium", evidence: "base rds" },
+        storage: { serviceId: "S3", confidence: "medium", evidence: "base s3" },
+        monitoring: { serviceId: "CloudWatch", confidence: "medium", evidence: "base cw" },
+      },
+    });
+
+    const result = mergeServicePlans(baseline, llm, "repo");
+    const ids = Object.values(result.slots).map((s) => s.serviceId);
+
+    // LLM choices for covered categories are preserved
+    assert.ok(ids.includes("Lambda"), "Lambda should be present");
+    assert.ok(ids.includes("DynamoDB"), "DynamoDB should be present");
+
+    // Baseline services for categories LLM already covered (compute/db) should NOT be added
+    assert.ok(!ids.includes("EC2"), "EC2 should NOT be added because LLM already covered compute");
+    assert.ok(!ids.includes("RDS"), "RDS should NOT be added because LLM already covered database");
+
+    // Baseline services for categories LLM missed (storage, observability) SHOULD be gap-filled
+    assert.ok(ids.includes("S3"), "S3 should be gap-filled for storage");
+    assert.ok(ids.includes("CloudWatch"), "CloudWatch should be gap-filled for observability");
   });
 });
 

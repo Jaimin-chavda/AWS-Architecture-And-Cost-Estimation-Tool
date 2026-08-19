@@ -28,6 +28,7 @@ import {
 } from "./schema.ts";
 import type { ServicePlan, Grounding } from "./schema.ts";
 import type { RepoSignals } from "./repoFetcher.ts";
+import type { ProjectProfile } from "./repoAnalyzer.ts";
 
 // ---------------------------------------------------------------------------
 // LLM output schema for generateObject
@@ -107,8 +108,8 @@ export function llmConfigured(): boolean {
 // ---------------------------------------------------------------------------
 
 function buildSystemPrompt(): string {
-  return `You are an AWS architecture analyst. Given evidence about a software project,
-determine which AWS services are needed to deploy it and classify the architecture pattern.
+  return `You are an AWS architecture analyst. A project has already been analyzed and its technologies extracted.
+Your ONLY job is to determine which AWS services are needed to deploy it, based on the detected technologies.
 
 Valid serviceIds (use ONLY these exact strings):
 ${SERVICE_IDS.join(", ")}
@@ -117,44 +118,131 @@ Valid patterns:
 ${PATTERN_IDS.join(", ")}
 
 Rules:
-- Only include services that have clear evidence from the project files.
+- Map each detected technology to the AWS service that would host/replace it in production.
+- ONLY include services with a direct mapping to a detected technology listed in the analysis.
+- Do NOT add services that have no evidence in the detected technologies.
 - Use slot names that match the pattern (e.g. "compute", "database", "storage", "api", "queue", "cdn", "monitoring").
-- Confidence "high" = explicit SDK/service reference; "medium" = likely needed; "low" = inferred.
-- Evidence field: one short sentence explaining why this service was chosen.
+- Confidence "high" = explicit SDK/service reference or exact AWS service detected;
+  "medium" = clearly needed given the tech stack; "low" = reasonable inference.
+- Evidence field: cite the specific file and dependency that justifies this service.
 - Maximum 12 distinct services total.
 - Never include services not in the valid serviceIds list.`;
 }
 
-function buildUserPrompt(
-  evidence: string,
-  inputKind: "github_url" | "description",
+/**
+ * Builds a structured prompt using the ProjectProfile as the primary context.
+ * When a profile is available (repo path), the LLM receives the pre-analyzed
+ * technology summary first, then the raw files as supplementary evidence.
+ * When no profile is present (description path), falls back to the description.
+ */
+function buildStructuredPrompt(
+  profile: ProjectProfile | null,
+  signals: RepoSignals | null,
+  description: string,
   grounding: Grounding
 ): string {
-  const context =
-    grounding === "repo"
+  const parts: string[] = [];
+
+  if (profile && grounding === "repo") {
+    // Lead with the structured analysis — this is the key change.
+    // The LLM sees WHAT was found first, then the raw files for context.
+    parts.push(profile.summary);
+
+    // Add raw file content as supplementary evidence (capped per file)
+    if (signals && signals.keyFiles.length > 0) {
+      parts.push("\n--- SUPPLEMENTARY RAW FILE EVIDENCE (for reference) ---");
+      let totalChars = 0;
+      const FILE_CHAR_CAP = 1_500; // per file
+      const TOTAL_CHAR_CAP = 12_000; // total evidence cap
+      for (const f of signals.keyFiles) {
+        if (totalChars >= TOTAL_CHAR_CAP) break;
+        if (f.content) {
+          const snippet = f.content.slice(0, FILE_CHAR_CAP);
+          parts.push(`=== ${f.path} ===\n${snippet}`);
+          totalChars += snippet.length;
+        } else {
+          parts.push(`=== ${f.path} === (content unavailable)`);
+        }
+      }
+    }
+  } else {
+    // Description path — no profile available
+    const context = grounding === "repo"
       ? "Analyze the following repository files and infer the AWS architecture."
       : "Analyze the following project description and infer the AWS architecture needed.";
-
-  return `${context}\n\n${evidence}`;
-}
-
-function buildEvidence(
-  signals: RepoSignals | null,
-  description: string
-): string {
-  if (!signals || signals.keyFiles.length === 0) {
-    return description || "(no evidence provided)";
-  }
-  const parts: string[] = [];
-  if (description) parts.push(`Project description: ${description}`);
-  for (const f of signals.keyFiles) {
-    if (f.content) {
-      parts.push(`=== ${f.path} ===\n${f.content.slice(0, 3000)}`);
-    } else {
-      parts.push(`=== ${f.path} === (file present, content unavailable)`);
+    parts.push(context);
+    if (description) parts.push(`\nProject description: ${description}`);
+    if (signals && signals.keyFiles.length > 0) {
+      for (const f of signals.keyFiles) {
+        if (f.content) {
+          parts.push(`=== ${f.path} ===\n${f.content.slice(0, 3000)}`);
+        } else {
+          parts.push(`=== ${f.path} === (file present, content unavailable)`);
+        }
+      }
     }
   }
-  return parts.join("\n\n").slice(0, 16_000); // total evidence cap for LLM context
+
+  return parts.join("\n\n").slice(0, 20_000);
+}
+
+// ---------------------------------------------------------------------------
+// Slot validation & filtering (Fix 1)
+// ---------------------------------------------------------------------------
+
+const CONFIDENCE_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
+
+/**
+ * Validates each slot independently against the service catalog allowlist,
+ * drops invalid entries with warnings, and caps to top 12 by confidence.
+ * Returns null if zero valid services remain.
+ */
+export function filterAndValidateLlmSlots(
+  slots: Record<string, { serviceId: string; confidence: ConfidenceTier; evidence: string }>
+): Record<string, { serviceId: string; confidence: ConfidenceTier; evidence: string }> | null {
+  const allowlist = new Set<string>(SERVICE_IDS as readonly string[]);
+  const validSlots: Record<string, { serviceId: string; confidence: ConfidenceTier; evidence: string }> = {};
+
+  const entries = Object.entries(slots).map(([slotName, slot], idx) => ({
+    slotName,
+    slot,
+    originalIdx: idx,
+  }));
+
+  for (const { slotName, slot } of entries) {
+    if (!allowlist.has(slot.serviceId)) {
+      console.warn(
+        `[llmClient] Dropped invalid service "${slot.serviceId}" from LLM result (slot: ${slotName}, reason: not in catalog allowlist)`
+      );
+      continue;
+    }
+    validSlots[slotName] = slot;
+  }
+
+  if (Object.keys(validSlots).length === 0) {
+    console.warn("[llmClient] LLM returned zero valid services after filtering — falling back to rules");
+    return null;
+  }
+
+  // If > 12 unique services, keep the 12 highest-confidence entries
+  const uniqueServices = new Set(Object.values(validSlots).map((s) => s.serviceId));
+  if (uniqueServices.size > 12) {
+    const sorted = Object.entries(validSlots).sort(([, a], [, b]) => {
+      const ca = CONFIDENCE_RANK[a.confidence] ?? 2;
+      const cb = CONFIDENCE_RANK[b.confidence] ?? 2;
+      return ca - cb;
+    });
+    const keptServices = new Set<string>();
+    const keptSlots: Record<string, { serviceId: string; confidence: ConfidenceTier; evidence: string }> = {};
+    for (const [slotName, slot] of sorted) {
+      if (keptServices.size >= 12 && !keptServices.has(slot.serviceId)) continue;
+      keptServices.add(slot.serviceId);
+      keptSlots[slotName] = slot;
+    }
+    return keptSlots;
+  }
+
+  return validSlots;
 }
 
 // ---------------------------------------------------------------------------
@@ -173,12 +261,18 @@ export async function callLlm(opts: {
   description: string;
   inputKind: "github_url" | "description";
   grounding: Grounding;
+  /** Structured project profile from repoAnalyzer — used to build a pre-analyzed prompt */
+  profile?: ProjectProfile | null;
 }): Promise<ServicePlan | null> {
   const provider = resolveProvider();
   if (!provider) return null;
 
-  const evidence = buildEvidence(opts.signals, opts.description);
-  const userPrompt = buildUserPrompt(evidence, opts.inputKind, opts.grounding);
+  const userPrompt = buildStructuredPrompt(
+    opts.profile ?? null,
+    opts.signals,
+    opts.description,
+    opts.grounding
+  );
 
   try {
     const { object: raw } = await generateObject({
@@ -190,11 +284,16 @@ export async function callLlm(opts: {
       maxRetries: 3,
     });
 
-    // Build the full shape including inputKind + metadata for the gate
+    // ── Per-entry validation (Fix 1) ─────────────────────────────────────
+    const validSlots = filterAndValidateLlmSlots(raw.slots);
+    if (!validSlots) {
+      return null;
+    }
+
     const candidate = {
       inputKind: opts.inputKind,
       pattern: raw.pattern,
-      slots: raw.slots,
+      slots: validSlots,
       customEdges: raw.customEdges,
       metadata: {
         grounding: opts.grounding,
@@ -203,11 +302,11 @@ export async function callLlm(opts: {
       },
     };
 
-    // Gate: run the full schema including catalog allowlist + 12-service cap refines
+    // Final validation (should pass after per-entry filtering, but defense-in-depth)
     const gateResult = ServicePlanSchema.safeParse(candidate);
     if (!gateResult.success) {
       console.warn(
-        "[llmClient] LLM output failed schema gate:",
+        "[llmClient] LLM output failed schema gate after per-entry filtering:",
         gateResult.error.issues.map((i) => i.message).join("; ")
       );
       return null;

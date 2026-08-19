@@ -13,16 +13,18 @@
 
 import { runRuleEngine } from "./ruleEngine.ts";
 import { callLlm, llmConfigured } from "./llmClient.ts";
-import { ServicePlanSchema } from "./schema.ts";
+import { ServicePlanSchema, SERVICE_CATEGORIES } from "./schema.ts";
 import type {
   ServicePlan,
   ServiceSlot,
+  ServiceId,
   ConfidenceTier,
   Grounding,
   PatternId,
 } from "./schema.ts";
 import type { RuleInput } from "./ruleEngine.ts";
 import type { RepoSignals } from "./repoFetcher.ts";
+import type { ProjectProfile } from "./repoAnalyzer.ts";
 
 // ---------------------------------------------------------------------------
 // Merge algorithm
@@ -72,6 +74,15 @@ export function mergeServicePlans(
     llmMap.set(slot.serviceId, { slotName, slot });
   }
 
+  // ── Fix 1: Category-gap detection ──────────────────────────────────────
+  // Identify which architecture categories the LLM already covers.
+  // Only fill gaps from baseline for categories the LLM missed entirely.
+  const llmCategories = new Set<string>();
+  for (const id of llmMap.keys()) {
+    const cat = SERVICE_CATEGORIES[id as ServiceId];
+    if (cat) llmCategories.add(cat);
+  }
+
   // All unique service IDs across both plans
   const allIds = new Set([...baseMap.keys(), ...llmMap.keys()]);
 
@@ -103,9 +114,14 @@ export function mergeServicePlans(
       evidence = inLlm.slot.evidence;
       slotName = inLlm.slotName;
     } else {
-      // Baseline only → low
+      // Baseline only → include only if LLM missed this service's category
+      const baseCat = SERVICE_CATEGORIES[id as ServiceId];
+      if (baseCat && llmCategories.has(baseCat)) {
+        // LLM already covered this category — skip baseline-only service
+        continue;
+      }
       confidence = "low";
-      evidence = inBase!.slot.evidence + " (rule-only, not confirmed by LLM)";
+      evidence = inBase!.slot.evidence + " (rule-only, gap-fill for missing category)";
       slotName = inBase!.slotName;
     }
 
@@ -184,6 +200,12 @@ export interface InferenceInput {
   signals: RepoSignals | null;
   /** Freeform description text (used on description path, or for LLM context on repo path) */
   description: string;
+  /**
+   * Structured project profile from repoAnalyzer (github_url path only).
+   * Forwarded to both the rule engine (for typed scoring) and the LLM (for
+   * the pre-analyzed technology summary prompt).
+   */
+  profile?: ProjectProfile | null;
 }
 
 /**
@@ -196,7 +218,11 @@ export interface InferenceInput {
  */
 export async function runInference(input: InferenceInput): Promise<ServicePlan> {
   // Step 1: Rule engine baseline (synchronous, never fails)
-  const baseline = runRuleEngine(input.ruleInput);
+  // Pass the profile so scoring uses typed fields + file-specific evidence strings
+  const baseline = runRuleEngine({
+    ...input.ruleInput,
+    profile: input.profile ?? undefined,
+  });
 
   // Step 2: LLM (async, can fail silently)
   let llmResult: ServicePlan | null = null;
@@ -206,6 +232,7 @@ export async function runInference(input: InferenceInput): Promise<ServicePlan> 
       description: input.description,
       inputKind: input.ruleInput.inputKind,
       grounding: input.ruleInput.grounding,
+      profile: input.profile ?? null,
     });
   }
 
