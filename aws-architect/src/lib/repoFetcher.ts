@@ -19,7 +19,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 // Types
 // ---------------------------------------------------------------------------
 
-export type KeyFileKind = "readme" | "manifest" | "container_ci";
+export type KeyFileKind = "readme" | "manifest" | "container_ci" | "source";
 
 export interface KeyFile {
   path: string;
@@ -32,6 +32,12 @@ export interface KeyFile {
   truncated: boolean;
 }
 
+export interface SdkEvidence {
+  file: string;
+  match: string;
+  service: string;
+}
+
 export interface RepoSignals {
   repoName: string; // "owner/repo"
   defaultBranch: string;
@@ -41,11 +47,13 @@ export interface RepoSignals {
   parseErrors: string[]; // paths that failed structured parse
   /** Raw character length of the README content (0 if no README) */
   readmeLength: number;
+  /** Extracted AWS SDK and service evidence from code */
+  sdkEvidence: SdkEvidence[];
 }
 
 // ---------------------------------------------------------------------------
-// Key-file allowlist (Decision 23)
-// Priority groups: README > manifests > container/CI
+// Key-file allowlist & patterns (Fix 3 & Fix 4)
+// Priority groups: README > manifests > container/CI > source
 // ---------------------------------------------------------------------------
 
 const README_PATTERNS = [/^readme(\.\w+)?$/i];
@@ -63,43 +71,105 @@ const MANIFEST_PATTERNS = [
   /^[\w.-]+\.csproj$/,
 ];
 
+// Monorepo nested manifests (e.g. packages/core/package.json, apps/web/package.json)
+const NESTED_MANIFEST_PATTERNS = [
+  /^(?:packages|apps|modules|services|libs)\/[^/]+\/(?:package\.json|pom\.xml|build\.gradle(\.kts)?|Cargo\.toml|pyproject\.toml|requirements\.txt|go\.mod)$/i,
+];
+
 const CONTAINER_CI_PATTERNS = [
-  /^dockerfile$/i,
-  /^docker-compose\.(yml|yaml)$/i,
-  /^serverless\.(yml|yaml)$/,
-  /^\.github\/workflows\/[^/]+\.(yml|yaml)$/,
-  /^vercel\.json$/,
-  /^netlify\.toml$/,
-  /^terraform\/[^/]+\.tf$/,
-  /^template\.yaml$/,
+  /^Dockerfile(\.[\w.-]+)?$/i,
+  /^(?:docker|build|infra)\/Dockerfile(\.[\w.-]+)?$/i,
+  /^docker-compose(\.[\w.-]+)?\.(yml|yaml)$/i,
+  /^serverless(\.[\w.-]+)?\.(yml|yaml)$/i,
+  /^(?:src|infra|services|functions)\/.*serverless(\.[\w.-]+)?\.(yml|yaml)$/i,
+  /^\.github\/workflows\/[^/]+\.(yml|yaml)$/i,
+  /^vercel\.json$/i,
+  /^netlify\.toml$/i,
+  /^amplify\.ya?ml$/i,
+  /^amplify\/.*$/i,
+  /^cdk\.json$/i,
+  /^appspec\.ya?ml$/i,
+  /^buildspec\.ya?ml$/i,
+  /^\.ebextensions\/.*$/i,
+  /^(?:cloudformation|\.cloudformation)\/.*\.(ya?ml|json)$/i,
+  /^(?:terraform|infra|\.infra)\/.*\.tf$/i,
+  /^.*\.tf$/i,
+  /^template\.ya?ml$/i,
+  /^sam\.ya?ml$/i,
+  /^.*\.template\.ya?ml$/i,
+  /^(?:k8s|kubernetes|helm)\/.*\.(ya?ml|json)$/i,
+];
+
+const SOURCE_HIGH_PRIORITY_PATTERNS = [
+  /(?:^|\/)(?:handler|lambda_function|main|app|server|index)\.(?:js|ts|mjs|cjs|py|go|rs|java)$/i,
+  /(?:^|\/)cmd\/main\.go$/i,
+  /(?:^|\/)(?:manage|wsgi|asgi)\.py$/i,
+  /(?:^|\/).*\.controller\.(?:ts|js)$/i,
+];
+
+const SOURCE_GLOB_PATTERNS = [
+  /^src\/[^/]+\.(?:ts|js|py|go|java|rs|cs|php|rb)$/i,
+  /^src\/[^/]+\/[^/]+\.(?:ts|js|py|go|java|rs|cs|php|rb)$/i,
+  /^app\/[^/]+\.(?:ts|js|py|go|java|rs|cs|php|rb)$/i,
+  /^app\/[^/]+\/[^/]+\.(?:ts|js|py|go|java|rs|cs|php|rb)$/i,
+  /^server\/[^/]+\.(?:ts|js|py|go|java|rs|cs|php|rb)$/i,
+  /^server\/[^/]+\/[^/]+\.(?:ts|js|py|go|java|rs|cs|php|rb)$/i,
 ];
 
 const MAX_TREE_PATHS = 50_000;
-const MAX_FILES = 20;
-const MAX_FILE_BYTES = 64 * 1024; // 64 KB
+const MAX_FILES = 40;
+const MAX_FILE_BYTES = 4 * 1024; // 4 KB per file (Fix 3)
+const MAX_TOTAL_PAYLOAD_BYTES = 150 * 1024; // 150 KB total payload (Fix 3)
 const MAX_COMPACT_TOP_LEVEL = 40;
 const GITHUB_API = "https://api.github.com";
 const FETCH_TIMEOUT_MS = 10_000;
 
 // ---------------------------------------------------------------------------
-// File-kind classifier
+// File-kind classifier & relevance scoring (Fix 3)
 // ---------------------------------------------------------------------------
 
-function classifyFile(
+export function classifyFile(
   path: string
-): { kind: KeyFileKind; priority: number } | null {
+): { kind: KeyFileKind; priority: number; score: number } | null {
   const name = path.split("/").pop() ?? path;
   const depth = path.split("/").length - 1; // 0 = root, 1 = one level deep
 
   for (const re of README_PATTERNS) {
-    if (re.test(name) && depth === 0) return { kind: "readme", priority: 0 };
+    if (re.test(name) && depth === 0) {
+      return { kind: "readme", priority: 0, score: 100 };
+    }
   }
+
   for (const re of MANIFEST_PATTERNS) {
-    if (re.test(name) && depth <= 1) return { kind: "manifest", priority: 1 };
+    if (re.test(name) && depth <= 1) {
+      return { kind: "manifest", priority: 1, score: 95 - depth * 5 };
+    }
   }
+
+  for (const re of NESTED_MANIFEST_PATTERNS) {
+    if (re.test(path)) {
+      return { kind: "manifest", priority: 1, score: 90 - depth * 5 };
+    }
+  }
+
   for (const re of CONTAINER_CI_PATTERNS) {
-    if (re.test(path)) return { kind: "container_ci", priority: 2 };
+    if (re.test(path)) {
+      return { kind: "container_ci", priority: 2, score: 85 - depth * 5 };
+    }
   }
+
+  for (const re of SOURCE_HIGH_PRIORITY_PATTERNS) {
+    if (re.test(path)) {
+      return { kind: "source", priority: 3, score: 80 - depth * 5 };
+    }
+  }
+
+  for (const re of SOURCE_GLOB_PATTERNS) {
+    if (re.test(path)) {
+      return { kind: "source", priority: 3, score: 65 - depth * 5 };
+    }
+  }
+
   return null;
 }
 
@@ -218,6 +288,119 @@ async function ghFetch(url: string, token?: string): Promise<Response> {
 }
 
 // ---------------------------------------------------------------------------
+// SDK Evidence extraction pass (Fix 3)
+// ---------------------------------------------------------------------------
+
+export function extractSdkEvidence(keyFiles: KeyFile[]): SdkEvidence[] {
+  const evidence: SdkEvidence[] = [];
+  const seen = new Set<string>();
+
+  const add = (file: string, match: string, service: string) => {
+    const key = `${file}:${service}:${match}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      evidence.push({ file, match: match.slice(0, 100), service });
+    }
+  };
+
+  for (const file of keyFiles) {
+    if (!file.content) continue;
+    const content = file.content;
+
+    // boto3.client('service') or boto3.resource('service')
+    const botoMatches = content.matchAll(/boto3\.(?:client|resource)\(\s*['"]([a-zA-Z0-9_-]+)['"]/g);
+    for (const m of botoMatches) {
+      const rawSvc = m[1].toLowerCase();
+      const svcMap: Record<string, string> = {
+        s3: "S3",
+        dynamodb: "DynamoDB",
+        sqs: "SQS",
+        sns: "SNS",
+        lambda: "Lambda",
+        rds: "RDS",
+        ecs: "ECS",
+        ec2: "EC2",
+        "cognito-idp": "Cognito",
+        "cognito-identity": "Cognito",
+        eventbridge: "EventBridge",
+        events: "EventBridge",
+        kinesis: "Kinesis",
+        ses: "SES",
+        apigateway: "APIGateway",
+        cloudwatch: "CloudWatch",
+        logs: "CloudWatch",
+      };
+      const svc = svcMap[rawSvc] ?? rawSvc.toUpperCase();
+      add(file.path, m[0], svc);
+    }
+
+    // require('aws-sdk')
+    const awsSdkMatches = content.matchAll(/require\(\s*['"]aws-sdk['"]\s*\)/g);
+    for (const m of awsSdkMatches) {
+      add(file.path, m[0], "AWS SDK");
+    }
+
+    // require('@aws-sdk/client-...') or from '@aws-sdk/client-...'
+    const v3Matches = content.matchAll(/(?:require\(\s*['"]|from\s+['"])@aws-sdk\/client-([\w-]+)['"]/g);
+    for (const m of v3Matches) {
+      const rawClient = m[1].toLowerCase();
+      const clientMap: Record<string, string> = {
+        s3: "S3",
+        lambda: "Lambda",
+        dynamodb: "DynamoDB",
+        sqs: "SQS",
+        sns: "SNS",
+        rds: "RDS",
+        "cognito-identity-provider": "Cognito",
+        "cognito-idp": "Cognito",
+        cloudwatch: "CloudWatch",
+        ec2: "EC2",
+        ecs: "ECS",
+        ses: "SES",
+        eventbridge: "EventBridge",
+        kinesis: "Kinesis",
+        "api-gateway": "APIGateway",
+        apigatewayv2: "APIGateway",
+      };
+      const svc = clientMap[rawClient] ?? rawClient;
+      add(file.path, m[0], svc);
+    }
+
+    // S3 operations: PutObjectCommand, s3.putObject, s3.upload, etc.
+    const s3Ops = content.matchAll(/(?:PutObjectCommand|s3\.putObject|s3\.upload|S3.*PutObject|s3\.getObject|GetObjectCommand)/gi);
+    for (const m of s3Ops) {
+      add(file.path, m[0], "S3");
+    }
+
+    // SQS operations: sqs.sendMessage, SendMessageCommand, etc.
+    const sqsOps = content.matchAll(/(?:sqs\.sendMessage|SendMessageCommand|sqs\.send_message|sqs\.receiveMessage)/gi);
+    for (const m of sqsOps) {
+      add(file.path, m[0], "SQS");
+    }
+
+    // DynamoDB operations
+    const dynamoOps = content.matchAll(/(?:dynamodb\.putItem|PutItemCommand|dynamodb\.query|QueryCommand|dynamodb\.getItem)/gi);
+    for (const m of dynamoOps) {
+      add(file.path, m[0], "DynamoDB");
+    }
+
+    // WebSocket / socket server bindings
+    const wsMatches = content.matchAll(/(?:WebSocketServer|socket\.io|new\s+WebSocket\(|ws\.on\()/gi);
+    for (const m of wsMatches) {
+      add(file.path, m[0], "APIGateway");
+    }
+
+    // cron / schedule decorators
+    const cronMatches = content.matchAll(/(?:@schedule|croniter|node-cron|cron\.schedule|@cron)/gi);
+    for (const m of cronMatches) {
+      add(file.path, m[0], "EventBridge");
+    }
+  }
+
+  return evidence;
+}
+
+// ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
 
@@ -280,29 +463,43 @@ export async function fetchRepoSignals(
     // fall through with empty tree — freeform description still works
   }
 
-  // 3. Classify and priority-sort files
-  type Candidate = { path: string; kind: KeyFileKind; priority: number };
+  // 3. Classify and relevance-sort files (Fix 3)
+  type Candidate = { path: string; kind: KeyFileKind; priority: number; score: number };
   const candidates: Candidate[] = [];
   for (const path of treePaths) {
     const c = classifyFile(path);
     if (c) candidates.push({ path, ...c });
   }
-  // Sort: README (0) → manifests (1) → container/CI (2); within group, shorter path first
+
+  // Sort by relevance score desc, with shorter path length as tiebreaker
   candidates.sort((a, b) =>
-    a.priority !== b.priority
-      ? a.priority - b.priority
+    a.score !== b.score
+      ? b.score - a.score
       : a.path.length - b.path.length
   );
 
-  // Apply 20-file cap
+  // Apply 40-file cap
   const selected = candidates.slice(0, MAX_FILES);
   if (candidates.length > MAX_FILES) overallTruncated = true;
 
-  // 4. Fetch each selected file
+  // 4. Fetch each selected file (enforcing 4KB/file and 150KB total payload cap)
   const keyFiles: KeyFile[] = [];
   let readmeLength = 0;
+  let totalPayloadBytes = 0;
 
   for (const candidate of selected) {
+    if (totalPayloadBytes >= MAX_TOTAL_PAYLOAD_BYTES) {
+      overallTruncated = true;
+      keyFiles.push({
+        path: candidate.path,
+        kind: candidate.kind,
+        content: null,
+        sizeBytes: 0,
+        truncated: true,
+      });
+      continue;
+    }
+
     let raw: string | null = null;
     let sizeBytes = 0;
     let fileTruncated = false;
@@ -327,18 +524,18 @@ export async function fetchRepoSignals(
         );
         clearTimeout(rawTimer);
         if (!rawFetch.ok) throw new Error(`HTTP ${rawFetch.status}`);
-        // Read up to MAX_FILE_BYTES
+        // Read up to MAX_FILE_BYTES (4KB) from file start
         const reader = rawFetch.body?.getReader();
         if (!reader) throw new Error("No body reader");
         const chunks: Uint8Array[] = [];
-        let totalBytes = 0;
+        let bytesRead = 0;
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           if (value) {
             chunks.push(value);
-            totalBytes += value.byteLength;
-            if (totalBytes >= MAX_FILE_BYTES) {
+            bytesRead += value.byteLength;
+            if (bytesRead >= MAX_FILE_BYTES) {
               fileTruncated = true;
               overallTruncated = true;
               break;
@@ -346,14 +543,14 @@ export async function fetchRepoSignals(
           }
         }
         reader.cancel().catch(() => {});
-        sizeBytes = totalBytes;
-        rawContent = new TextDecoder().decode(
-          chunks.reduce((acc, c) => {
-            const merged = new Uint8Array(acc.byteLength + c.byteLength);
-            merged.set(acc); merged.set(c, acc.byteLength);
-            return merged;
-          }, new Uint8Array(0))
-        );
+        sizeBytes = bytesRead;
+        const mergedBytes = chunks.reduce((acc, c) => {
+          const merged = new Uint8Array(acc.byteLength + c.byteLength);
+          merged.set(acc);
+          merged.set(c, acc.byteLength);
+          return merged;
+        }, new Uint8Array(0));
+        rawContent = new TextDecoder().decode(mergedBytes.slice(0, MAX_FILE_BYTES));
         raw = rawContent;
       } catch {
         clearTimeout(rawTimer);
@@ -364,7 +561,10 @@ export async function fetchRepoSignals(
           if (data.content) {
             const decoded = Buffer.from(data.content.replace(/\n/g, ""), "base64").toString("utf8");
             raw = decoded.slice(0, MAX_FILE_BYTES);
-            if (decoded.length > MAX_FILE_BYTES) { fileTruncated = true; overallTruncated = true; }
+            if (decoded.length > MAX_FILE_BYTES) {
+              fileTruncated = true;
+              overallTruncated = true;
+            }
           }
         }
       }
@@ -390,6 +590,11 @@ export async function fetchRepoSignals(
     const processed = processContent(candidate.path, raw, parseErrors);
     if (processed.truncated) { fileTruncated = true; overallTruncated = true; }
 
+    totalPayloadBytes += processed.content.length;
+    if (totalPayloadBytes > MAX_TOTAL_PAYLOAD_BYTES) {
+      overallTruncated = true;
+    }
+
     keyFiles.push({
       path: candidate.path,
       kind: candidate.kind,
@@ -399,6 +604,8 @@ export async function fetchRepoSignals(
     });
   }
 
+  const sdkEvidence = extractSdkEvidence(keyFiles);
+
   return {
     repoName,
     defaultBranch,
@@ -406,6 +613,7 @@ export async function fetchRepoSignals(
     truncated: overallTruncated,
     parseErrors,
     readmeLength,
+    sdkEvidence,
   };
 }
 
@@ -421,6 +629,7 @@ function emptySignals(repoName: string, _reason: string): RepoSignals {
     truncated: false,
     parseErrors: [],
     readmeLength: 0,
+    sdkEvidence: [],
   };
 }
 
