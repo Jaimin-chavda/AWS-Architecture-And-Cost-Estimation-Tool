@@ -238,7 +238,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // ── Stage 4: Diagram XML ──────────────────────────────────────────────────
   let diagramXml: string | null = null;
   try {
-    diagramXml = generateDiagramXml(servicePlan);
+    diagramXml = generateDiagramXml(servicePlan, signals?.sdkEvidence);
   } catch (err) {
     console.warn("[analyze] Diagram generation failed:", err);
     warnings.push("Diagram generation failed — diagram unavailable.");

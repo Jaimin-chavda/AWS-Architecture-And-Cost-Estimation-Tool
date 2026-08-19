@@ -255,8 +255,10 @@ function overflowGeometry(index: number): NodeGeometry {
 }
 
 // ---------------------------------------------------------------------------
-// mxGraph XML generation
+// mxGraph XML generation (Fix 8: evidence-backed solid vs dashed inferred edges)
 // ---------------------------------------------------------------------------
+
+import type { SdkEvidence } from "./repoFetcher.ts";
 
 interface DiagramNode {
   id: string;
@@ -269,15 +271,67 @@ interface DiagramEdge {
   source: string;
   target: string;
   label: string;
+  style: "solid" | "dashed";
+}
+
+function isEdgeConfirmed(
+  srcService: string,
+  dstService: string,
+  srcEvidence: string,
+  dstEvidence: string,
+  customEdges: Array<{ from: string; to: string }>,
+  sdkEvidence?: SdkEvidence[] | null
+): boolean {
+  // 1. Explicit customEdges from LLM or rule engine
+  if (
+    customEdges.some(
+      (e) =>
+        (e.from.toLowerCase() === srcService.toLowerCase() &&
+          e.to.toLowerCase() === dstService.toLowerCase()) ||
+        (e.from.toLowerCase() === dstService.toLowerCase() &&
+          e.to.toLowerCase() === srcService.toLowerCase())
+    )
+  ) {
+    return true;
+  }
+
+  // 2. sdkEvidence cross-service proof
+  if (sdkEvidence && sdkEvidence.length > 0) {
+    const hasDstSdk = sdkEvidence.some(
+      (ev) =>
+        ev.serviceHint.toLowerCase() === dstService.toLowerCase() ||
+        dstService.toLowerCase().includes(ev.serviceHint.toLowerCase())
+    );
+    const computeServices = ["lambda", "ecs", "ec2", "fargate", "eks"];
+    if (hasDstSdk && computeServices.includes(srcService.toLowerCase())) {
+      return true;
+    }
+  }
+
+  // 3. Explicit cross-service mention in evidence strings
+  const lowerSrcEv = srcEvidence.toLowerCase();
+  const lowerDstEv = dstEvidence.toLowerCase();
+  if (
+    lowerSrcEv.includes(dstService.toLowerCase()) ||
+    lowerDstEv.includes(srcService.toLowerCase())
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 /**
  * Generates a complete .drawio XML document from a ServicePlan.
  *
- * The output is a standalone mxGraph XML file that can be opened in draw.io
- * directly or embedded via the draw.io iframe API.
+ * An edge is solid (confirmed) ONLY if justified by SDK evidence, custom edges,
+ * or explicit cross-service references.
+ * Layout-only template edges are drawn as dashed lines indicating "inferred topology".
  */
-export function generateDiagramXml(plan: ServicePlan): string {
+export function generateDiagramXml(
+  plan: ServicePlan,
+  sdkEvidence?: SdkEvidence[] | null
+): string {
   const { pattern, slots, customEdges } = plan;
 
   const layout = PATTERN_LAYOUTS[pattern] ?? PATTERN_LAYOUTS["generic"];
@@ -303,19 +357,38 @@ export function generateDiagramXml(plan: ServicePlan): string {
     });
   }
 
-  // Build template edges (only for slots that exist in the plan)
+  // Build template edges with solid vs dashed distinction
   const edges: DiagramEdge[] = [];
   for (const [srcSlot, dstSlot, label] of templateEdgeDefs) {
     if (slotIdMap[srcSlot] && slotIdMap[dstSlot]) {
+      const srcService = slots[srcSlot]?.serviceId ?? "";
+      const dstService = slots[dstSlot]?.serviceId ?? "";
+      const srcEv = slots[srcSlot]?.evidence ?? "";
+      const dstEv = slots[dstSlot]?.evidence ?? "";
+
+      const confirmed = isEdgeConfirmed(
+        srcService,
+        dstService,
+        srcEv,
+        dstEv,
+        customEdges,
+        sdkEvidence
+      );
+
       edges.push({
         source: slotIdMap[srcSlot],
         target: slotIdMap[dstSlot],
-        label: label ?? "",
+        label: confirmed
+          ? (label ?? "")
+          : label
+          ? `${label} (inferred topology)`
+          : "inferred topology",
+        style: confirmed ? "solid" : "dashed",
       });
     }
   }
 
-  // Append custom edges (serviceId-based, best-effort match)
+  // Append custom edges (serviceId-based, confirmed solid)
   const serviceIdNodeMap: Record<string, string> = {};
   for (const node of nodes) {
     serviceIdNodeMap[node.serviceId] = node.id;
@@ -329,6 +402,7 @@ export function generateDiagramXml(plan: ServicePlan): string {
         source: srcId,
         target: dstId,
         label: ce.label ?? "",
+        style: "solid",
       });
     }
   }
@@ -356,13 +430,17 @@ export function generateDiagramXml(plan: ServicePlan): string {
     );
   }
 
-  // Edges
+  // Edges (solid vs dashed style)
   let edgeId = nextId;
   for (const edge of edges) {
     const label = xmlAttr(edge.label);
+    const edgeStyle =
+      edge.style === "dashed"
+        ? "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;dashed=1;dashPattern=8 8;strokeColor=#6B7280;strokeWidth=1;"
+        : "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;strokeColor=#232F3E;strokeWidth=1.5;";
     cellsXml.push(
       `    <mxCell id="edge-${edgeId++}" value="${label}" ` +
-        `style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;" ` +
+        `style="${edgeStyle}" ` +
         `edge="1" source="${edge.source}" target="${edge.target}" parent="1">` +
         `<mxGeometry relative="1" as="geometry"/>` +
         `</mxCell>`

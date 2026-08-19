@@ -212,6 +212,59 @@ describe("generateDiagramXml - overflow slots", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Fix 8: Solid vs Dashed edge verification
+// ---------------------------------------------------------------------------
+describe("Fix 8 — Evidence-justified edges (solid vs dashed)", () => {
+  it("(a) Repo with explicit SDK usage Lambda→S3 generates a solid edge between them", () => {
+    const plan = makePlan({
+      pattern: "serverless-api",
+      slots: {
+        api: { serviceId: "APIGateway", confidence: "high", evidence: "api gateway" },
+        compute: { serviceId: "Lambda", confidence: "high", evidence: "src/handler.py imports boto3" },
+        storage: { serviceId: "S3", confidence: "high", evidence: "s3 storage" },
+      },
+    });
+    const sdkEvidence = [
+      {
+        filePath: "src/handler.py",
+        line: 12,
+        matchSnippet: "boto3.client('s3')",
+        serviceHint: "S3",
+      },
+    ];
+
+    const xml = generateDiagramXml(plan, sdkEvidence);
+    // Edge between Lambda (compute) and S3 (storage) should be solid
+    assert.ok(
+      xml.includes('style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;strokeColor=#232F3E;strokeWidth=1.5;"'),
+      "Should have solid edge for verified Lambda->S3 SDK connection"
+    );
+  });
+
+  it("(b) Pattern-only connection with no cross-service evidence generates a dashed edge", () => {
+    const plan = makePlan({
+      pattern: "static-site",
+      slots: {
+        dns: { serviceId: "Route53", confidence: "medium", evidence: "Route53 detected" },
+        cdn: { serviceId: "CloudFront", confidence: "medium", evidence: "CloudFront detected" },
+        storage: { serviceId: "S3", confidence: "medium", evidence: "S3 detected" },
+      },
+    });
+
+    const xml = generateDiagramXml(plan, []);
+    // Layout-only edges without cross-service evidence should be dashed with inferred topology label
+    assert.ok(
+      xml.includes('dashed=1;dashPattern=8 8;strokeColor=#6B7280;strokeWidth=1;'),
+      "Pattern-only edges should be dashed"
+    );
+    assert.ok(
+      xml.includes("inferred topology"),
+      "Pattern-only edges should have inferred topology label"
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 6. Golden-file byte-identical checks
 // ---------------------------------------------------------------------------
 describe("generateDiagramXml - golden file tests", () => {
@@ -226,8 +279,8 @@ describe("generateDiagramXml - golden file tests", () => {
     <mxCell id="node-3" value="S3" style="shape=mxgraph.aws4.s3;sketch=0;fontStyle=0;aspect=fixed;fillColor=#FF9900;strokeColor=#232F3E;fontColor=#232F3E;" vertex="1" parent="1"><mxGeometry x="380" y="200" width="78" height="78" as="geometry"/></mxCell>
     <mxCell id="node-4" value="Route53" style="shape=mxgraph.aws4.route_53;sketch=0;fontStyle=0;aspect=fixed;fillColor=#FF9900;strokeColor=#232F3E;fontColor=#232F3E;" vertex="1" parent="1"><mxGeometry x="60" y="200" width="78" height="78" as="geometry"/></mxCell>
     <mxCell id="node-5" value="CloudWatch" style="shape=mxgraph.aws4.cloudwatch;sketch=0;fontStyle=0;aspect=fixed;fillColor=#FF9900;strokeColor=#232F3E;fontColor=#232F3E;" vertex="1" parent="1"><mxGeometry x="540" y="200" width="78" height="78" as="geometry"/></mxCell>
-    <mxCell id="edge-6" value="DNS → CDN" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;" edge="1" source="node-4" target="node-2" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
-    <mxCell id="edge-7" value="Origin" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;" edge="1" source="node-2" target="node-3" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+    <mxCell id="edge-6" value="DNS → CDN (inferred topology)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;dashed=1;dashPattern=8 8;strokeColor=#6B7280;strokeWidth=1;" edge="1" source="node-4" target="node-2" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+    <mxCell id="edge-7" value="Origin (inferred topology)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;dashed=1;dashPattern=8 8;strokeColor=#6B7280;strokeWidth=1;" edge="1" source="node-2" target="node-3" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
       </root>
     </mxGraphModel>
   </diagram>
@@ -261,8 +314,8 @@ describe("generateDiagramXml - golden file tests", () => {
     <mxCell id="node-2" value="APIGateway" style="shape=mxgraph.aws4.api_gateway;sketch=0;fontStyle=0;aspect=fixed;fillColor=#FF9900;strokeColor=#232F3E;fontColor=#232F3E;" vertex="1" parent="1"><mxGeometry x="60" y="200" width="78" height="78" as="geometry"/></mxCell>
     <mxCell id="node-3" value="Lambda" style="shape=mxgraph.aws4.lambda;sketch=0;fontStyle=0;aspect=fixed;fillColor=#FF9900;strokeColor=#232F3E;fontColor=#232F3E;" vertex="1" parent="1"><mxGeometry x="220" y="200" width="78" height="78" as="geometry"/></mxCell>
     <mxCell id="node-4" value="DynamoDB" style="shape=mxgraph.aws4.dynamodb;sketch=0;fontStyle=0;aspect=fixed;fillColor=#FF9900;strokeColor=#232F3E;fontColor=#232F3E;" vertex="1" parent="1"><mxGeometry x="380" y="200" width="78" height="78" as="geometry"/></mxCell>
-    <mxCell id="edge-5" value="invoke" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;" edge="1" source="node-2" target="node-3" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
-    <mxCell id="edge-6" value="read/write" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;" edge="1" source="node-3" target="node-4" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+    <mxCell id="edge-5" value="invoke (inferred topology)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;dashed=1;dashPattern=8 8;strokeColor=#6B7280;strokeWidth=1;" edge="1" source="node-2" target="node-3" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
+    <mxCell id="edge-6" value="read/write (inferred topology)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;dashed=1;dashPattern=8 8;strokeColor=#6B7280;strokeWidth=1;" edge="1" source="node-3" target="node-4" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
       </root>
     </mxGraphModel>
   </diagram>
