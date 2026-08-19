@@ -115,8 +115,15 @@ export type ConfidenceTier = (typeof CONFIDENCE_TIERS)[number];
 
 // ---------------------------------------------------------------------------
 // Grounding modes (Decision 39: input_kind != grounding — they may differ)
+// Fix 2: Evidence-derived grounding modes (repo, repoFiles, description, filenameOnly, unfounded)
 // ---------------------------------------------------------------------------
-export const GROUNDING_VALUES = ["repo", "description"] as const;
+export const GROUNDING_VALUES = [
+  "repo",
+  "repoFiles",
+  "description",
+  "filenameOnly",
+  "unfounded",
+] as const;
 export type Grounding = (typeof GROUNDING_VALUES)[number];
 
 // ---------------------------------------------------------------------------

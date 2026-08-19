@@ -19,10 +19,13 @@ import {
   isInsufficientSignal,
   signalsToRuleInput,
 } from "@/lib/repoFetcher";
-import { runInference } from "@/lib/inference";
+import { analyzeProject } from "@/lib/repoAnalyzer";
+import { runInference, deriveGrounding } from "@/lib/inference";
 import { generateDiagramXml } from "@/lib/diagram";
 import { computeCostRows } from "@/lib/cost";
 import type { RuleInput } from "@/lib/ruleEngine";
+import type { ProjectProfile } from "@/lib/repoAnalyzer";
+import type { Grounding } from "@/lib/schema";
 
 // ---------------------------------------------------------------------------
 // Request / Response types
@@ -142,8 +145,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const warnings: string[] = [];
   let ruleInput: RuleInput;
   let signals = null;
-  let grounding: "repo" | "description";
+  let grounding: Grounding;
   let description = "";
+  let profile: ProjectProfile | null = null;
 
   if (kind === "github_url") {
     const githubToken = process.env.GITHUB_TOKEN;
@@ -161,14 +165,27 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       });
     }
 
-    // Grounding: did we actually get file content, or only an empty repo?
-    const hasContent = signals.keyFiles.some((f) => f.content !== null);
-    grounding = hasContent ? "repo" : "description";
-    if (!hasContent) {
+    // Grounding: derive directly and only from evidence actually consumed (Fix 2)
+    grounding = deriveGrounding({
+      description: "",
+      fetchedFiles: signals.keyFiles,
+    });
+
+    if (grounding === "filenameOnly") {
       warnings.push(
-        "Could not fetch repo files — falling back to description-level inference."
+        "Could not fetch repo file contents — inferred from file names only."
+      );
+    } else if (grounding === "unfounded") {
+      warnings.push(
+        "Could not access repo or resolve any file names — inference is unfounded with low confidence."
       );
     }
+
+    // ── Stage 2b: Project Analysis (NEW) ─────────────────────────────────────
+    // Analyzes what the repository actually contains BEFORE any AWS inference.
+    // Produces a structured ProjectProfile (languages, frameworks, databases,
+    // infrastructure) that replaces the raw file dump sent to the LLM.
+    profile = analyzeProject(signals);
 
     ruleInput = signalsToRuleInput(signals, kind, grounding);
 
@@ -200,12 +217,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     ruleInput,
     signals,
     description,
+    profile, // structured analysis from Stage 2b
   });
 
-  // Grounding warning (Decision 19)
+  // Grounding warning (Decision 19 / Fix 2)
   if (grounding === "description") {
     warnings.push(
       "Inferred from your description only — not verified against code."
+    );
+  } else if (grounding === "filenameOnly") {
+    warnings.push(
+      "Inferred from file names only — file contents could not be read."
+    );
+  } else if (grounding === "unfounded") {
+    warnings.push(
+      "Unfounded inference — no repository files or description available."
     );
   }
 
@@ -235,5 +261,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     diagram_xml: diagramXml,
     cost_rows: costRows,
     warnings,
+    // project_profile is included for transparency/debugging when repo analysis ran
+    ...(profile ? { project_profile: profile } : {}),
   });
 }

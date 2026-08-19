@@ -435,13 +435,15 @@ export function isInsufficientSignal(signals: RepoSignals): boolean {
   return !hasManifestOrCI && signals.readmeLength < 100;
 }
 
+import type { Grounding } from "./schema.ts";
+
 /**
  * Converts RepoSignals into the flat RuleInput that the rule engine expects.
  */
 export function signalsToRuleInput(
   signals: RepoSignals,
   inputKind: "github_url" | "description",
-  grounding: "repo" | "description"
+  grounding: Grounding
 ): import("./ruleEngine.ts").RuleInput {
   const fileContent = signals.keyFiles
     .map((f) => (f.content ? `### ${f.path}\n${f.content}` : `### ${f.path} (parse error)`))

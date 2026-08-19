@@ -20,7 +20,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { CostResult } from "@/lib/cost";
-import type { ServicePlan } from "@/lib/schema";
+import type { ServicePlan, Grounding } from "@/lib/schema";
 import { scaleCostRows } from "@/lib/cost";
 
 // ---------------------------------------------------------------------------
@@ -28,7 +28,7 @@ import { scaleCostRows } from "@/lib/cost";
 // ---------------------------------------------------------------------------
 interface AnalyzeResponse {
   input_kind: string;
-  grounding: "repo" | "description";
+  grounding: Grounding;
   service_plan: ServicePlan;
   diagram_xml: string | null;
   cost_rows: CostResult | null;
@@ -150,8 +150,30 @@ function ChevronIcon({ open }: { open: boolean }) {
 // Sub-components
 // ---------------------------------------------------------------------------
 
-function GroundingBanner({ grounding }: { grounding: "repo" | "description" }) {
-  if (grounding === "repo") return null;
+function GroundingBanner({ grounding }: { grounding: Grounding }) {
+  if (grounding === "repo" || grounding === "repoFiles") return null;
+  if (grounding === "filenameOnly") {
+    return (
+      <div className="mb-4 flex items-start gap-2.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
+        <AlertIcon />
+        <p>
+          <span className="font-medium">Inferred from repository file names only</span> — file contents could not be retrieved. Confidence is capped at{" "}
+          <span className="font-mono text-amber-200">low</span> for all services.
+        </p>
+      </div>
+    );
+  }
+  if (grounding === "unfounded") {
+    return (
+      <div className="mb-4 flex items-start gap-2.5 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+        <AlertIcon />
+        <p>
+          <span className="font-medium">Unfounded inference</span> — repository could not be accessed and no file names were resolved. Confidence is capped at{" "}
+          <span className="font-mono text-red-200">low</span> for all services.
+        </p>
+      </div>
+    );
+  }
   return (
     <div className="mb-4 flex items-start gap-2.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
       <AlertIcon />

@@ -256,3 +256,62 @@ describe("mergeServicePlans — metadata passthrough", () => {
     assert.strictEqual(result.metadata.truncated, true);
   });
 });
+
+describe("Fix 2 — Grounding derivation & confidence cap", () => {
+  it("derives 'description' when description is non-empty", async () => {
+    const { deriveGrounding } = await import("../inference.ts");
+    const g = deriveGrounding({
+      description: "My custom app",
+      fetchedFiles: [{ content: "package.json content" }],
+    });
+    assert.strictEqual(g, "description");
+  });
+
+  it("derives 'repoFiles' when description is empty and file content was fetched", async () => {
+    const { deriveGrounding } = await import("../inference.ts");
+    const g = deriveGrounding({
+      description: "",
+      fetchedFiles: [
+        { content: "FROM node:22" },
+        { content: null },
+      ],
+    });
+    assert.strictEqual(g, "repoFiles");
+  });
+
+  it("derives 'filenameOnly' when fetch fails for all files but filenames were known", async () => {
+    const { deriveGrounding } = await import("../inference.ts");
+    const g = deriveGrounding({
+      description: "",
+      fetchedFiles: [
+        { content: null },
+        { content: null },
+      ],
+    });
+    assert.strictEqual(g, "filenameOnly");
+    assert.notStrictEqual(g, "description", "Must never be 'description' when description is empty");
+  });
+
+  it("derives 'unfounded' when fetch failed AND no filenames were resolvable", async () => {
+    const { deriveGrounding } = await import("../inference.ts");
+    const g = deriveGrounding({
+      description: "",
+      fetchedFiles: [],
+    });
+    assert.strictEqual(g, "unfounded");
+    assert.notStrictEqual(g, "description");
+  });
+
+  it("caps all confidence to 'low' when grounding is 'unfounded' or 'filenameOnly'", () => {
+    const baseline = makePlan({
+      slots: {
+        compute: { serviceId: "Lambda", confidence: "high", evidence: "test" },
+      },
+    });
+    const resultUnfounded = mergeServicePlans(baseline, null, "unfounded");
+    assert.strictEqual(resultUnfounded.slots.compute.confidence, "low");
+
+    const resultFilenameOnly = mergeServicePlans(baseline, null, "filenameOnly");
+    assert.strictEqual(resultFilenameOnly.slots.compute.confidence, "low");
+  });
+});

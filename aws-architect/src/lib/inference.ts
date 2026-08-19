@@ -179,9 +179,31 @@ export function mergeServicePlans(
   return applyGroundingCap(check.data, grounding);
 }
 
-/** Caps all slot confidence to "low" for description-grounded results (Decision 19). */
-function applyGroundingCap(plan: ServicePlan, grounding: Grounding): ServicePlan {
-  if (grounding !== "description") return plan;
+/**
+ * Derives grounding directly and only from evidence actually consumed (Fix 2).
+ */
+export function deriveGrounding(opts: {
+  description?: string;
+  fetchedFiles?: { content: string | null }[];
+  treeFilenames?: string[];
+}): Grounding {
+  if (opts.description && opts.description.trim().length > 0) {
+    return "description";
+  }
+  const files = opts.fetchedFiles ?? [];
+  const hasContent = files.some((f) => f.content !== null);
+  if (hasContent) {
+    return "repoFiles";
+  }
+  if (files.length > 0 || (opts.treeFilenames && opts.treeFilenames.length > 0)) {
+    return "filenameOnly";
+  }
+  return "unfounded";
+}
+
+/** Caps all slot confidence to "low" for non-code grounded results (Decision 19 / Fix 2). */
+export function applyGroundingCap(plan: ServicePlan, grounding: Grounding): ServicePlan {
+  if (grounding === "repo" || grounding === "repoFiles") return plan;
 
   const cappedSlots: Record<string, ServiceSlot> = {};
   for (const [name, slot] of Object.entries(plan.slots)) {
