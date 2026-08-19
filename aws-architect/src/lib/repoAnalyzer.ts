@@ -45,6 +45,8 @@ export interface ProjectProfile {
   awsUsage: DetectedTech[];
   /** PaaS / hosting configs (Vercel, Netlify, Amplify) */
   deploymentHints: DetectedTech[];
+  /** File paths where structured manifest parsing failed */
+  parseFailures?: string[];
   /**
    * A concise, structured summary of detected technologies.
    * This is what gets passed to the LLM instead of raw file content.

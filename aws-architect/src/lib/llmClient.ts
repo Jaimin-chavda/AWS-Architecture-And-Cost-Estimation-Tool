@@ -26,7 +26,7 @@ import {
   CONFIDENCE_TIERS,
   GROUNDING_VALUES,
 } from "./schema.ts";
-import type { ServicePlan, Grounding } from "./schema.ts";
+import type { ServicePlan, Grounding, ConfidenceTier } from "./schema.ts";
 import type { RepoSignals } from "./repoFetcher.ts";
 import type { ProjectProfile } from "./repoAnalyzer.ts";
 
@@ -154,7 +154,11 @@ export function buildStructuredPrompt(
     if (signals?.sdkEvidence && signals.sdkEvidence.length > 0) {
       parts.push("\nEXTRACTED SDK / CODE SIGNALS:");
       for (const ev of signals.sdkEvidence) {
-        parts.push(`  - [${ev.serviceHint}] ${ev.filePath}:${ev.line} — "${ev.matchSnippet}"`);
+        const hint = ev.serviceHint ?? ev.service ?? "AWS";
+        const path = ev.filePath ?? ev.file ?? "code";
+        const line = ev.line !== undefined ? `:${ev.line}` : "";
+        const match = ev.matchSnippet ?? ev.match ?? "";
+        parts.push(`  - [${hint}] ${path}${line} — "${match}"`);
       }
     }
 

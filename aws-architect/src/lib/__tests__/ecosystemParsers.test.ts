@@ -208,19 +208,16 @@ gem 'aws-sdk-s3'
 
   it("analyzeProject logs parseFailures on corrupted manifest without throwing", () => {
     const signals: RepoSignals = {
-      owner: "test",
-      repo: "corrupt-app",
       repoName: "test/corrupt-app",
-      tree: [
-        { path: "composer.json", type: "blob" },
-        { path: "pyproject.toml", type: "blob" },
-      ],
+      defaultBranch: "main",
       keyFiles: [
-        { path: "composer.json", content: "{ bad json missing closing brace", truncated: false },
-        { path: "pyproject.toml", content: "[project]\ndependencies = ['fastapi']", truncated: false },
+        { path: "composer.json", kind: "manifest", content: "{ bad json missing closing brace", sizeBytes: 100, truncated: false },
+        { path: "pyproject.toml", kind: "manifest", content: "[project]\ndependencies = ['fastapi']", sizeBytes: 100, truncated: false },
       ],
       sdkEvidence: [],
       truncated: false,
+      parseErrors: [],
+      readmeLength: 0,
     };
 
     const profile = analyzeProject(signals);

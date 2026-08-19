@@ -28,6 +28,7 @@ function makePlan(overrides: Partial<ServicePlan>): ServicePlan {
       monitoring: { serviceId: "CloudWatch", confidence: "low", evidence: "test" },
     },
     customEdges: [],
+    suggestedServices: [],
     metadata: { grounding: "description", truncated: false, parseErrors: [] },
     ...overrides,
   };
@@ -226,9 +227,12 @@ describe("Fix 8 — Evidence-justified edges (solid vs dashed)", () => {
     });
     const sdkEvidence = [
       {
+        file: "src/handler.py",
         filePath: "src/handler.py",
         line: 12,
+        match: "boto3.client('s3')",
         matchSnippet: "boto3.client('s3')",
+        service: "S3",
         serviceHint: "S3",
       },
     ];
@@ -297,6 +301,7 @@ describe("generateDiagramXml - golden file tests", () => {
         monitoring: { serviceId: "CloudWatch", confidence: "medium", evidence: "CloudWatch baseline" },
       },
       customEdges: [],
+      suggestedServices: [],
       metadata: { grounding: "repo", truncated: false, parseErrors: [] },
     };
 
@@ -331,6 +336,7 @@ describe("generateDiagramXml - golden file tests", () => {
         database: { serviceId: "DynamoDB", confidence: "high", evidence: "DynamoDB detected" },
       },
       customEdges: [],
+      suggestedServices: [],
       metadata: { grounding: "repo", truncated: false, parseErrors: [] },
     };
 

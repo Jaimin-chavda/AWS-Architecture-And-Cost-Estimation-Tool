@@ -26,6 +26,7 @@ function makePlan(overrides: Partial<ServicePlan> = {}): ServicePlan {
       monitoring: { serviceId: "CloudWatch", confidence: "medium", evidence: "always present" },
     },
     customEdges: [],
+    suggestedServices: [],
     metadata: { grounding: "repo", truncated: false, parseErrors: [] },
     ...overrides,
   };

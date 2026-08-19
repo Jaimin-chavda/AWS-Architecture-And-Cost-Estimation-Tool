@@ -297,11 +297,13 @@ function isEdgeConfirmed(
 
   // 2. sdkEvidence cross-service proof
   if (sdkEvidence && sdkEvidence.length > 0) {
-    const hasDstSdk = sdkEvidence.some(
-      (ev) =>
-        ev.serviceHint.toLowerCase() === dstService.toLowerCase() ||
-        dstService.toLowerCase().includes(ev.serviceHint.toLowerCase())
-    );
+    const hasDstSdk = sdkEvidence.some((ev) => {
+      const hint = ev.serviceHint ?? ev.service ?? "";
+      return (
+        hint.toLowerCase() === dstService.toLowerCase() ||
+        dstService.toLowerCase().includes(hint.toLowerCase())
+      );
+    });
     const computeServices = ["lambda", "ecs", "ec2", "fargate", "eks"];
     if (hasDstSdk && computeServices.includes(srcService.toLowerCase())) {
       return true;

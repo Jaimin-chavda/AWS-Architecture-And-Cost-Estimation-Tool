@@ -161,6 +161,7 @@ export function mergeServicePlans(
     pattern: llmResult.pattern as PatternId,
     slots,
     customEdges: llmResult.customEdges.length > 0 ? llmResult.customEdges : baseline.customEdges,
+    suggestedServices: baseline.suggestedServices ?? [],
     metadata: {
       grounding: baseline.metadata.grounding,
       truncated: baseline.metadata.truncated,

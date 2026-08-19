@@ -23,6 +23,7 @@ function makeSignals(overrides: Partial<RepoSignals> = {}): RepoSignals {
     truncated: false,
     parseErrors: [],
     readmeLength: 0,
+    sdkEvidence: [],
     ...overrides,
   };
 }

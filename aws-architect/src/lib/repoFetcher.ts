@@ -36,6 +36,10 @@ export interface SdkEvidence {
   file: string;
   match: string;
   service: string;
+  line?: number;
+  filePath?: string;
+  matchSnippet?: string;
+  serviceHint?: string;
 }
 
 export interface RepoSignals {
@@ -295,11 +299,19 @@ export function extractSdkEvidence(keyFiles: KeyFile[]): SdkEvidence[] {
   const evidence: SdkEvidence[] = [];
   const seen = new Set<string>();
 
-  const add = (file: string, match: string, service: string) => {
+  const add = (file: string, match: string, service: string, line?: number) => {
     const key = `${file}:${service}:${match}`;
     if (!seen.has(key)) {
       seen.add(key);
-      evidence.push({ file, match: match.slice(0, 100), service });
+      evidence.push({
+        file,
+        filePath: file,
+        match: match.slice(0, 100),
+        matchSnippet: match.slice(0, 100),
+        service,
+        serviceHint: service,
+        line,
+      });
     }
   };
 

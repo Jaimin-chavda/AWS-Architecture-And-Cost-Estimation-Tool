@@ -19,34 +19,38 @@ describe("Fix 7 — LLM prompt hygiene & no raw file leakage", () => {
     };
 
     const signals: RepoSignals = {
-      owner: "user",
-      repo: "my-app",
       repoName: "user/my-app",
-      tree: [
-        { path: "src/main.py", type: "blob" },
-        { path: "requirements.txt", type: "blob" },
-      ],
+      defaultBranch: "main",
       keyFiles: [
         {
           path: "src/main.py",
+          kind: "source",
           content: `${rawFileSecret}\nimport boto3\ns3 = boto3.client('s3')\ns3.upload_file(...)`,
+          sizeBytes: 100,
           truncated: false,
         },
         {
           path: "requirements.txt",
+          kind: "manifest",
           content: "fastapi==0.100.0\npsycopg2-binary==2.9.9\nboto3==1.34.0",
+          sizeBytes: 100,
           truncated: false,
         },
       ],
       sdkEvidence: [
         {
+          file: "src/main.py",
           filePath: "src/main.py",
           line: 2,
+          match: "boto3.client('s3')",
           matchSnippet: "boto3.client('s3')",
+          service: "S3",
           serviceHint: "S3",
         },
       ],
       truncated: false,
+      parseErrors: [],
+      readmeLength: 0,
     };
 
     const prompt = buildStructuredPrompt(
