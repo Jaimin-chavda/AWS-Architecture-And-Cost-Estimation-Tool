@@ -12,7 +12,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { generateDiagramXml } from "../diagram.ts";
+import { generateDiagramXml, computeLayout, bucketHeight } from "../diagram.ts";
 import type { ServicePlan } from "../schema.ts";
 
 // ---------------------------------------------------------------------------
@@ -269,28 +269,10 @@ describe("Fix 8 — Evidence-justified edges (solid vs dashed)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 6. Golden-file byte-identical checks
+// 6. Structural checks (dynamic grid/subnet layout replaced byte-identical golden files)
 // ---------------------------------------------------------------------------
-describe("generateDiagramXml - golden file tests", () => {
-  const GOLDEN_STATIC_SITE = `<?xml version="1.0" encoding="UTF-8"?>
-<mxfile host="aws-architect" modified="" agent="aws-architect" version="21.0.0" type="device">
-  <diagram id="diagram-1" name="Static Site Architecture">
-    <mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="0">
-      <root>
-        <mxCell id="0"/>
-        <mxCell id="1" parent="0"/>
-    <mxCell id="node-2" value="CloudFront" style="shape=mxgraph.aws4.cloudfront;sketch=0;fontStyle=0;aspect=fixed;fillColor=#FF9900;strokeColor=#232F3E;fontColor=#232F3E;" vertex="1" parent="1"><mxGeometry x="220" y="200" width="78" height="78" as="geometry"/></mxCell>
-    <mxCell id="node-3" value="S3" style="shape=mxgraph.aws4.s3;sketch=0;fontStyle=0;aspect=fixed;fillColor=#FF9900;strokeColor=#232F3E;fontColor=#232F3E;" vertex="1" parent="1"><mxGeometry x="380" y="200" width="78" height="78" as="geometry"/></mxCell>
-    <mxCell id="node-4" value="Route53" style="shape=mxgraph.aws4.route_53;sketch=0;fontStyle=0;aspect=fixed;fillColor=#FF9900;strokeColor=#232F3E;fontColor=#232F3E;" vertex="1" parent="1"><mxGeometry x="60" y="200" width="78" height="78" as="geometry"/></mxCell>
-    <mxCell id="node-5" value="CloudWatch" style="shape=mxgraph.aws4.cloudwatch;sketch=0;fontStyle=0;aspect=fixed;fillColor=#FF9900;strokeColor=#232F3E;fontColor=#232F3E;" vertex="1" parent="1"><mxGeometry x="540" y="200" width="78" height="78" as="geometry"/></mxCell>
-    <mxCell id="edge-6" value="DNS → CDN (inferred topology)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;dashed=1;dashPattern=8 8;strokeColor=#6B7280;strokeWidth=1;" edge="1" source="node-4" target="node-2" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
-    <mxCell id="edge-7" value="Origin (inferred topology)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;dashed=1;dashPattern=8 8;strokeColor=#6B7280;strokeWidth=1;" edge="1" source="node-2" target="node-3" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
-      </root>
-    </mxGraphModel>
-  </diagram>
-</mxfile>`;
-
-  it("static-site with 4 slots matches golden XML exactly", () => {
+describe("generateDiagramXml - subnet container structure", () => {
+  it("static-site plan renders edge banner + VPC with data subnet containers", () => {
     const plan: ServicePlan = {
       inputKind: "github_url",
       pattern: "static-site",
@@ -306,27 +288,15 @@ describe("generateDiagramXml - golden file tests", () => {
     };
 
     const xml = generateDiagramXml(plan);
-    assert.equal(xml, GOLDEN_STATIC_SITE, "static-site XML should be byte-identical to golden");
+    assert.ok(xml.includes('id="container-edge"'), "should render the edge banner container");
+    assert.ok(xml.includes('id="container-vpc"'), "should render the VPC container");
+    assert.ok(xml.includes('id="container-data_subnet"'), "should render the data subnet");
+    assert.ok(xml.includes('parent="container-edge"'), "edge services nest in the edge banner");
+    assert.ok(xml.includes('parent="container-data_subnet"'), "data services nest in the data subnet");
+    assert.ok(xml.includes('pageWidth="'), "page size must be emitted");
   });
 
-  const GOLDEN_SERVERLESS_API_CORE = `<?xml version="1.0" encoding="UTF-8"?>
-<mxfile host="aws-architect" modified="" agent="aws-architect" version="21.0.0" type="device">
-  <diagram id="diagram-1" name="Serverless Api Architecture">
-    <mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="0">
-      <root>
-        <mxCell id="0"/>
-        <mxCell id="1" parent="0"/>
-    <mxCell id="node-2" value="APIGateway" style="shape=mxgraph.aws4.api_gateway;sketch=0;fontStyle=0;aspect=fixed;fillColor=#FF9900;strokeColor=#232F3E;fontColor=#232F3E;" vertex="1" parent="1"><mxGeometry x="60" y="200" width="78" height="78" as="geometry"/></mxCell>
-    <mxCell id="node-3" value="Lambda" style="shape=mxgraph.aws4.lambda;sketch=0;fontStyle=0;aspect=fixed;fillColor=#FF9900;strokeColor=#232F3E;fontColor=#232F3E;" vertex="1" parent="1"><mxGeometry x="220" y="200" width="78" height="78" as="geometry"/></mxCell>
-    <mxCell id="node-4" value="DynamoDB" style="shape=mxgraph.aws4.dynamodb;sketch=0;fontStyle=0;aspect=fixed;fillColor=#FF9900;strokeColor=#232F3E;fontColor=#232F3E;" vertex="1" parent="1"><mxGeometry x="380" y="200" width="78" height="78" as="geometry"/></mxCell>
-    <mxCell id="edge-5" value="invoke (inferred topology)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;dashed=1;dashPattern=8 8;strokeColor=#6B7280;strokeWidth=1;" edge="1" source="node-2" target="node-3" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
-    <mxCell id="edge-6" value="read/write (inferred topology)" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;dashed=1;dashPattern=8 8;strokeColor=#6B7280;strokeWidth=1;" edge="1" source="node-3" target="node-4" parent="1"><mxGeometry relative="1" as="geometry"/></mxCell>
-      </root>
-    </mxGraphModel>
-  </diagram>
-</mxfile>`;
-
-  it("serverless-api with 3 slots matches golden XML exactly", () => {
+  it("serverless-api plan renders edge, compute subnet, and data subnet containers", () => {
     const plan: ServicePlan = {
       inputKind: "github_url",
       pattern: "serverless-api",
@@ -341,6 +311,72 @@ describe("generateDiagramXml - golden file tests", () => {
     };
 
     const xml = generateDiagramXml(plan);
-    assert.equal(xml, GOLDEN_SERVERLESS_API_CORE, "serverless-api XML should be byte-identical to golden");
+    assert.ok(xml.includes('id="container-compute_subnet"'), "should render the compute subnet");
+    assert.ok(xml.includes('parent="container-compute_subnet"'), "Lambda nests in the compute subnet");
+    assert.ok(xml.includes('parent="container-data_subnet"'), "DynamoDB nests in the data subnet");
+    assert.ok(xml.includes('parent="container-edge"'), "APIGateway nests in the edge banner");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix B: Dynamic container sizing (computeLayout)
+// ---------------------------------------------------------------------------
+function slot(serviceId: string, name: string, confidence: "high" | "medium" | "low" = "medium") {
+  return { [name]: { serviceId, confidence, evidence: "test" } as const };
+}
+
+describe("Fix B - dynamic container sizing", () => {
+  it("grows DATA_SUBNET to 4 rows for 14 data-tier services (cols=4) without overlapping EDGE_ROW or VPC_BOX", () => {
+    const dataIds = ["S3", "EBS", "EFS", "Glacier", "RDS", "Aurora", "DynamoDB", "ElastiCache", "Redshift", "DocumentDB", "SQS", "SNS", "EventBridge", "Kinesis"];
+    const slots: Record<string, { serviceId: string; confidence: "high" | "medium" | "low"; evidence: string }> = {};
+    dataIds.forEach((id, i) => { slots[`d${i}`] = { serviceId: id, confidence: "medium", evidence: "test" }; });
+    slots.edge = { serviceId: "Route53", confidence: "medium", evidence: "test" };
+
+    const layout = computeLayout(slots);
+    const data = layout.containers.data_subnet!;
+    const edge = layout.containers.edge!;
+    const vpc = layout.containers.vpc!;
+
+    assert.ok(data, "data subnet should exist");
+    assert.strictEqual(data.h, bucketHeight(4), "4 rows × CELL_H + label + gaps + pad");
+    assert.ok(data.h >= 4 * 78, "must physically fit 4 rows of cells");
+    assert.ok(data.y >= edge.y + edge.h, "DATA_SUBNET must not overlap the edge row");
+    assert.ok(data.x >= vpc.x && data.y + data.h <= vpc.y + vpc.h, "DATA_SUBNET must sit inside VPC_BOX");
+    // 14 data nodes present, all placed inside the data subnet container
+    const dataNodes = Object.values(layout.nodes).filter((n) => n.parent === "container-data_subnet");
+    assert.strictEqual(dataNodes.length, 14);
+  });
+
+  it("shrinks containers back down for a single service per tier (no negative/zero dims)", () => {
+    const layout = computeLayout({
+      ...slot("Route53", "a"),
+      ...slot("NATGateway", "b"),
+      ...slot("EC2", "c"),
+      ...slot("S3", "d"),
+      ...slot("SES", "e"),
+    });
+    for (const [key, rect] of Object.entries(layout.containers)) {
+      assert.ok(rect, `${key} should exist`);
+      assert.ok(rect!.w > 0 && rect!.h > 0, `${key} must have positive dimensions`);
+      assert.ok(rect!.x >= 0 && rect!.y >= 0, `${key} must have non-negative origin`);
+    }
+    assert.strictEqual(layout.containers.data_subnet!.h, bucketHeight(1), "1 row → minimal height");
+    assert.strictEqual(layout.containers.compute_subnet!.h, bucketHeight(1));
+    assert.ok(layout.containers.external!.h >= layout.containers.vpc!.h, "external column stretches to VPC height");
+    assert.ok(layout.canvasW > 0 && layout.canvasH > 0);
+  });
+
+  it("omits containers for empty tiers", () => {
+    const layout = computeLayout({
+      ...slot("Route53", "a"),
+      ...slot("EC2", "b"),
+      ...slot("Lambda", "c"),
+    });
+    assert.strictEqual(layout.containers.public_subnet, null, "empty public subnet → omitted");
+    assert.strictEqual(layout.containers.data_subnet, null, "empty data subnet → omitted");
+    assert.strictEqual(layout.containers.external, null, "empty external tier → omitted");
+    assert.ok(layout.containers.edge, "edge banner present");
+    assert.ok(layout.containers.vpc, "VPC present (compute subnet non-empty)");
+    assert.ok(layout.containers.compute_subnet, "compute subnet present");
   });
 });

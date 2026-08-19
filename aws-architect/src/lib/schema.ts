@@ -72,15 +72,16 @@ export const SERVICE_IDS = [
 export type ServiceId = (typeof SERVICE_IDS)[number];
 
 // ---------------------------------------------------------------------------
-// Service categories — used for gap detection during LLM result filtering.
-// If the LLM result covers compute but not storage, rules fill only storage.
+// Service categories — fine-grained category mapping.
 // ---------------------------------------------------------------------------
 export const SERVICE_CATEGORIES: Record<ServiceId, string> = {
   EC2: "compute", Lambda: "compute", ECS: "compute", EKS: "compute",
   Fargate: "compute", Lightsail: "compute", Batch: "compute",
   S3: "storage", EBS: "storage", EFS: "storage", Glacier: "storage",
-  RDS: "database", DynamoDB: "database", ElastiCache: "database",
-  Aurora: "database", Redshift: "database", DocumentDB: "database",
+  RDS: "relational_db", Aurora: "relational_db",
+  DynamoDB: "nosql_db", DocumentDB: "nosql_db",
+  ElastiCache: "cache",
+  Redshift: "warehouse",
   CloudFront: "networking", APIGateway: "networking", ALB: "networking",
   Route53: "networking", VPC: "networking", NATGateway: "networking",
   SQS: "messaging", SNS: "messaging", EventBridge: "messaging", Kinesis: "messaging",
@@ -88,6 +89,50 @@ export const SERVICE_CATEGORIES: Record<ServiceId, string> = {
   CloudWatch: "observability", CodePipeline: "observability", ECR: "observability",
   SageMaker: "ml", Rekognition: "ml", Comprehend: "ml",
   SES: "misc", Amplify: "misc",
+};
+
+// ---------------------------------------------------------------------------
+// Service substitutes — explicit direct 1-to-1 substitute mappings.
+// Used during plan merging: a baseline service is dropped ONLY if the LLM
+// returned an exact match OR a designated direct substitute.
+// ---------------------------------------------------------------------------
+export const SERVICE_SUBSTITUTES: Record<ServiceId, readonly ServiceId[]> = {
+  RDS: ["Aurora"],
+  Aurora: ["RDS"],
+  EC2: ["Lightsail"],
+  Lightsail: ["EC2"],
+  Lambda: [],
+  ECS: [],
+  EKS: [],
+  Fargate: [],
+  Batch: [],
+  S3: [],
+  EBS: [],
+  EFS: [],
+  Glacier: [],
+  DynamoDB: [],
+  ElastiCache: [],
+  Redshift: [],
+  DocumentDB: [],
+  CloudFront: [],
+  APIGateway: [],
+  ALB: [],
+  Route53: [],
+  VPC: [],
+  NATGateway: [],
+  SQS: [],
+  SNS: [],
+  EventBridge: [],
+  Kinesis: [],
+  Cognito: [],
+  CloudWatch: [],
+  CodePipeline: [],
+  ECR: [],
+  SageMaker: [],
+  Rekognition: [],
+  Comprehend: [],
+  SES: [],
+  Amplify: [],
 };
 
 // ---------------------------------------------------------------------------

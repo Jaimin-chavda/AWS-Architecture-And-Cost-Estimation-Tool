@@ -205,7 +205,7 @@ describe("mergeServicePlans — with LLM result", () => {
     assert.ok(serviceList.includes("DynamoDB"));
   });
 
-  it("Fix 1: only fills baseline gap for unaddressed categories, preserving LLM coverage", () => {
+  it("Fix 1: retains baseline-only services unless LLM returned the exact service or a designated substitute", () => {
     // LLM covers compute (Lambda) and database (DynamoDB)
     const llm = makePlan({
       slots: {
@@ -230,13 +230,94 @@ describe("mergeServicePlans — with LLM result", () => {
     assert.ok(ids.includes("Lambda"), "Lambda should be present");
     assert.ok(ids.includes("DynamoDB"), "DynamoDB should be present");
 
-    // Baseline services for categories LLM already covered (compute/db) should NOT be added
-    assert.ok(!ids.includes("EC2"), "EC2 should NOT be added because LLM already covered compute");
-    assert.ok(!ids.includes("RDS"), "RDS should NOT be added because LLM already covered database");
+    // Baseline services are retained even when the LLM covers the same broad
+    // category — Lambda is not a substitute for EC2, DynamoDB not a substitute for RDS
+    assert.ok(ids.includes("EC2"), "EC2 should be retained (no substitute relationship with Lambda)");
+    assert.ok(ids.includes("RDS"), "RDS should be retained (no substitute relationship with DynamoDB)");
 
-    // Baseline services for categories LLM missed (storage, observability) SHOULD be gap-filled
-    assert.ok(ids.includes("S3"), "S3 should be gap-filled for storage");
-    assert.ok(ids.includes("CloudWatch"), "CloudWatch should be gap-filled for observability");
+    // Baseline services for untouched categories are also retained
+    assert.ok(ids.includes("S3"), "S3 should be retained");
+    assert.ok(ids.includes("CloudWatch"), "CloudWatch should be retained");
+  });
+
+  it("Fix A: 12-service baseline survives LLM that covers only 3 services (no category collapse)", () => {
+    const baseIds = ["RDS", "DynamoDB", "ElastiCache", "S3", "Route53", "ALB", "ECS", "Lambda", "DocumentDB", "SQS", "SNS", "CloudWatch"];
+    const baseSlots: Record<string, { serviceId: string; confidence: "high" | "medium" | "low"; evidence: string }> = {};
+    baseIds.forEach((id, i) => { baseSlots[`b${i}`] = { serviceId: id, confidence: "medium", evidence: "rule" }; });
+    const baseline = makePlan({ slots: baseSlots });
+
+    const llmIds = ["Route53", "ECS", "CloudWatch"];
+    const llmSlots: typeof baseSlots = {};
+    llmIds.forEach((id, i) => { llmSlots[`l${i}`] = { serviceId: id, confidence: "high", evidence: "llm" }; });
+    const llm = makePlan({ slots: llmSlots });
+
+    const result = mergeServicePlans(baseline, llm, "repo");
+    const ids = Object.values(result.slots).map((s) => s.serviceId);
+
+    // All 12 baseline services survive (LLM's 3 are all already in baseline → deduped)
+    for (const id of baseIds) {
+      assert.ok(ids.includes(id), `${id} should survive the merge`);
+    }
+    assert.strictEqual(new Set(ids).size, 12, "expected exactly 12 distinct services");
+    // Consensus services are high; baseline-only are low
+    for (const id of llmIds) {
+      const slot = Object.values(result.slots).find((s) => s.serviceId === id);
+      assert.strictEqual(slot!.confidence, "high", `${id} in both plans → high`);
+    }
+    for (const id of ["RDS", "DynamoDB", "ElastiCache", "S3", "ALB", "Lambda", "DocumentDB", "SQS", "SNS"]) {
+      const slot = Object.values(result.slots).find((s) => s.serviceId === id);
+      assert.strictEqual(slot!.confidence, "low", `${id} baseline-only → low`);
+    }
+  });
+
+  it("Fix A: drops baseline RDS when LLM returns substitute Aurora (role filled once)", () => {
+    const baseline = makePlan({
+      slots: { database: { serviceId: "RDS", confidence: "medium", evidence: "base rds" } },
+    });
+    const llm = makePlan({
+      slots: { database: { serviceId: "Aurora", confidence: "high", evidence: "llm aurora" } },
+    });
+
+    const result = mergeServicePlans(baseline, llm, "repo");
+    const ids = Object.values(result.slots).map((s) => s.serviceId);
+    assert.ok(ids.includes("Aurora"), "Aurora (LLM pick) should win the role");
+    assert.ok(!ids.includes("RDS"), "RDS should be dropped as a substitute");
+  });
+
+  it("Fix A: keeps both baseline RDS and LLM DynamoDB (not listed substitutes)", () => {
+    const baseline = makePlan({
+      slots: { database: { serviceId: "RDS", confidence: "medium", evidence: "base rds" } },
+    });
+    const llm = makePlan({
+      slots: { database: { serviceId: "DynamoDB", confidence: "high", evidence: "llm dynamo" } },
+    });
+
+    const result = mergeServicePlans(baseline, llm, "repo");
+    const ids = Object.values(result.slots).map((s) => s.serviceId);
+    assert.ok(ids.includes("RDS"), "RDS should be retained");
+    assert.ok(ids.includes("DynamoDB"), "DynamoDB should be retained");
+  });
+
+  it("Fix A: regression — coarse-category collapse no longer happens", () => {
+    // Reproduce the original bug: a coarse "compute" bucket held EC2/Lambda/ECS,
+    // and a single LLM service in that bucket wiped the rest.
+    const baseline = makePlan({
+      slots: {
+        c1: { serviceId: "EC2", confidence: "medium", evidence: "rule" },
+        c2: { serviceId: "Lambda", confidence: "medium", evidence: "rule" },
+        c3: { serviceId: "ECS", confidence: "medium", evidence: "rule" },
+        s1: { serviceId: "S3", confidence: "medium", evidence: "rule" },
+      },
+    });
+    const llm = makePlan({
+      slots: { compute: { serviceId: "Lambda", confidence: "high", evidence: "llm" } },
+    });
+
+    const result = mergeServicePlans(baseline, llm, "repo");
+    const ids = Object.values(result.slots).map((s) => s.serviceId);
+    for (const id of ["EC2", "Lambda", "ECS", "S3"]) {
+      assert.ok(ids.includes(id), `${id} must survive — no category collapse`);
+    }
   });
 });
 

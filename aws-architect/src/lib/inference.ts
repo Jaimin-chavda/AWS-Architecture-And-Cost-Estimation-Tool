@@ -13,7 +13,7 @@
 
 import { runRuleEngine } from "./ruleEngine.ts";
 import { callLlm, llmConfigured } from "./llmClient.ts";
-import { ServicePlanSchema, SERVICE_CATEGORIES } from "./schema.ts";
+import { ServicePlanSchema, SERVICE_SUBSTITUTES } from "./schema.ts";
 import type {
   ServicePlan,
   ServiceSlot,
@@ -74,14 +74,10 @@ export function mergeServicePlans(
     llmMap.set(slot.serviceId, { slotName, slot });
   }
 
-  // ── Fix 1: Category-gap detection ──────────────────────────────────────
-  // Identify which architecture categories the LLM already covers.
-  // Only fill gaps from baseline for categories the LLM missed entirely.
-  const llmCategories = new Set<string>();
-  for (const id of llmMap.keys()) {
-    const cat = SERVICE_CATEGORIES[id as ServiceId];
-    if (cat) llmCategories.add(cat);
-  }
+  // ── Fix 1: Substitute-gap detection ────────────────────────────────────
+  // A baseline-only service is dropped ONLY if the LLM returned an exact
+  // match (handled below via llmMap) or a designated direct substitute.
+  // Broad-category overlap alone no longer discards baseline services.
 
   // All unique service IDs across both plans
   const allIds = new Set([...baseMap.keys(), ...llmMap.keys()]);
@@ -114,14 +110,18 @@ export function mergeServicePlans(
       evidence = inLlm.slot.evidence;
       slotName = inLlm.slotName;
     } else {
-      // Baseline only → include only if LLM missed this service's category
-      const baseCat = SERVICE_CATEGORIES[id as ServiceId];
-      if (baseCat && llmCategories.has(baseCat)) {
-        // LLM already covered this category — skip baseline-only service
+      // Baseline only → retain at "low" unless the LLM returned a direct
+      // substitute filling the same role (e.g. baseline RDS, LLM Aurora).
+      const subs = SERVICE_SUBSTITUTES[id as ServiceId] ?? [];
+      const subInLlm = subs.find((s) => llmMap.has(s));
+      if (subInLlm) {
+        console.warn(
+          `[inference] dropped baseline service ${id}: LLM returned substitute ${subInLlm}`
+        );
         continue;
       }
       confidence = "low";
-      evidence = inBase!.slot.evidence + " (rule-only, gap-fill for missing category)";
+      evidence = inBase!.slot.evidence + " (rule-only, baseline signal)";
       slotName = inBase!.slotName;
     }
 
