@@ -43,7 +43,6 @@ describe("runRuleEngine — always produces a valid ServicePlan", () => {
     const plan = runRuleEngine(makeInput());
     const result = ServicePlanSchema.safeParse(plan);
     assert.ok(result.success, `Schema failed: ${!result.success && JSON.stringify(result.error.issues)}`);
-    assert.ok(Object.keys(plan.slots).length >= 1, "Must have at least one slot");
   });
 
   it("passes schema validation in all cases (catalog allowlist)", () => {
@@ -64,6 +63,7 @@ describe("runRuleEngine — always produces a valid ServicePlan", () => {
   it("every serviceId in slots is in the catalog allowlist", () => {
     const plan = runRuleEngine(makeInput({
       description: "react app with express api postgres s3 cloudfront cloudwatch cognito sqs sns",
+      fileContent: "DATABASE_URL=postgresql://localhost:5432/db",
     }));
     const ids = serviceIds(plan);
     const allowlist = new Set<string>(SERVICE_IDS);
@@ -76,7 +76,7 @@ describe("runRuleEngine — always produces a valid ServicePlan", () => {
     // Give it a ton of signals to stress the cap
     const plan = runRuleEngine(makeInput({
       description: "lambda apigateway dynamodb s3 cloudfront route53 sqs sns eventbridge cognito elasticache rds ec2 ecs fargate eks ecr alb kinesis sagemaker",
-      fileContent: "sagemaker rekognition comprehend bedrock",
+      fileContent: "sagemaker rekognition comprehend bedrock DATABASE_URL=postgresql://localhost REDIS_URL=redis://localhost",
       fileNames: ["Dockerfile", "serverless.yml", "docker-compose.yml", "terraform/main.tf"],
     }));
     const unique = new Set(serviceIds(plan));
@@ -140,9 +140,48 @@ describe("runRuleEngine — pattern classification", () => {
 
   it("falls back to generic when signals are too weak", () => {
     const plan = runRuleEngine(makeInput({ description: "my cool project" }));
-    // generic or any pattern — just must be valid
     const result = ServicePlanSchema.safeParse(plan);
     assert.ok(result.success);
+  });
+});
+
+describe("Fix 5 — Two-tier signals & CloudWatch gating", () => {
+  it("(a) Docker-only repo → RDS/ElastiCache do NOT appear in services, only suggestedServices", () => {
+    const plan = runRuleEngine(makeInput({
+      fileNames: ["Dockerfile"],
+      fileContent: "FROM node:22\nCOPY . .\nCMD ['node', 'index.js']\n// mentioning postgres and redis in comments only",
+    }));
+    const ids = serviceIds(plan);
+    assert.ok(!ids.includes("RDS"), "RDS must not appear in services[] for Docker-only repo without DB connection/infra");
+    assert.ok(!ids.includes("ElastiCache"), "ElastiCache must not appear in services[] for Docker-only repo");
+
+    const suggestedIds = (plan.suggestedServices ?? []).map((s) => s.serviceId);
+    assert.ok(suggestedIds.includes("RDS"), "RDS should appear in suggestedServices");
+    assert.ok(suggestedIds.includes("ElastiCache"), "ElastiCache should appear in suggestedServices");
+  });
+
+  it("(b) Docker + Postgres connection string → RDS promoted to services[]", () => {
+    const plan = runRuleEngine(makeInput({
+      fileNames: ["Dockerfile", ".env.example"],
+      fileContent: "FROM node:22\nDATABASE_URL=postgresql://user:pass@localhost:5432/mydb",
+    }));
+    const ids = serviceIds(plan);
+    assert.ok(ids.includes("RDS"), "RDS should be promoted to services[] when corroborated by connection string");
+  });
+
+  it("(c) empty plan → no CloudWatch", () => {
+    const plan = runRuleEngine(makeInput({ description: "" }));
+    const ids = serviceIds(plan);
+    assert.ok(!ids.includes("CloudWatch"), "CloudWatch must not be added when no compute service is present");
+  });
+
+  it("(d) Lambda present → CloudWatch present", () => {
+    const plan = runRuleEngine(makeInput({
+      description: "aws-lambda handler",
+    }));
+    const ids = serviceIds(plan);
+    assert.ok(ids.includes("Lambda"), "Lambda should be present");
+    assert.ok(ids.includes("CloudWatch"), "CloudWatch must be present when Lambda (compute) is present");
   });
 });
 
@@ -173,11 +212,6 @@ describe("runRuleEngine — service detection", () => {
       description: "kubernetes cluster k8s kubectl deployment",
     }));
     assert.ok(serviceIds(plan).includes("EKS"), "Expected EKS from k8s signal");
-  });
-
-  it("always includes CloudWatch", () => {
-    const plan = runRuleEngine(makeInput({ description: "aws app" }));
-    assert.ok(serviceIds(plan).includes("CloudWatch"), "CloudWatch should always be present");
   });
 
   it("detects Aurora (not RDS) when aurora keyword present", () => {

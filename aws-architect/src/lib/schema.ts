@@ -182,6 +182,10 @@ export const ServicePlanSchema = z
      * Flagged in the UI as requiring manual review.
      */
     customEdges: z.array(CustomEdgeSchema),
+    /**
+     * Weak-signal services that were detected but not corroborated (Fix 5)
+     */
+    suggestedServices: z.array(ServiceSlotSchema).optional().default([]),
     metadata: ServicePlanMetadataSchema,
   })
   .refine(
