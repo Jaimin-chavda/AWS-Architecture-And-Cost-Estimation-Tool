@@ -57,7 +57,7 @@ export interface ProjectProfile {
 // ---------------------------------------------------------------------------
 
 // Maps package name → { framework label, category }
-const NPM_FRAMEWORK_MAP: Record<string, { label: string; category: "framework" | "database" | "runtime" }> = {
+export const NPM_FRAMEWORK_MAP: Record<string, { label: string; category: "framework" | "database" | "runtime" }> = {
   // Frontend frameworks
   react: { label: "React", category: "framework" },
   "react-dom": { label: "React", category: "framework" },
@@ -123,7 +123,7 @@ const NPM_FRAMEWORK_MAP: Record<string, { label: string; category: "framework" |
 };
 
 // Maps pip package name → label
-const PYTHON_PACKAGE_MAP: Record<string, { label: string; category: "framework" | "database" | "runtime" }> = {
+export const PYTHON_PACKAGE_MAP: Record<string, { label: string; category: "framework" | "database" | "runtime" }> = {
   django: { label: "Django", category: "framework" },
   flask: { label: "Flask", category: "framework" },
   fastapi: { label: "FastAPI", category: "framework" },
@@ -153,7 +153,7 @@ const PYTHON_PACKAGE_MAP: Record<string, { label: string; category: "framework" 
 };
 
 // Maps Go module path fragment → label
-const GO_MODULE_MAP: Record<string, { label: string; category: "framework" | "database" | "runtime" }> = {
+export const GO_MODULE_MAP: Record<string, { label: string; category: "framework" | "database" | "runtime" }> = {
   "gin-gonic/gin": { label: "Gin", category: "framework" },
   "labstack/echo": { label: "Echo", category: "framework" },
   "gofiber/fiber": { label: "Fiber", category: "framework" },
@@ -166,6 +166,91 @@ const GO_MODULE_MAP: Record<string, { label: string; category: "framework" | "da
   "mongodb/mongo-go-driver": { label: "MongoDB", category: "database" },
   "aws/aws-sdk-go": { label: "AWS SDK (Go v1)", category: "framework" },
   "aws/aws-sdk-go-v2": { label: "AWS SDK (Go v2)", category: "framework" },
+};
+
+// Maps Cargo crate name → label (Fix 6)
+export const CARGO_PACKAGE_MAP: Record<string, { label: string; category: "framework" | "database" | "aws" }> = {
+  tokio: { label: "Tokio", category: "framework" },
+  "actix-web": { label: "Actix Web", category: "framework" },
+  axum: { label: "Axum", category: "framework" },
+  rocket: { label: "Rocket", category: "framework" },
+  diesel: { label: "Diesel ORM", category: "database" },
+  sqlx: { label: "SQLx", category: "database" },
+  "sea-orm": { label: "SeaORM", category: "database" },
+  redis: { label: "Redis", category: "database" },
+  mongodb: { label: "MongoDB", category: "database" },
+  "aws-sdk-s3": { label: "AWS SDK (S3)", category: "aws" },
+  "aws-sdk-dynamodb": { label: "AWS SDK (DynamoDB)", category: "aws" },
+  "aws-sdk-lambda": { label: "AWS SDK (Lambda)", category: "aws" },
+  "aws-sdk-sqs": { label: "AWS SDK (SQS)", category: "aws" },
+  "aws-sdk-sns": { label: "AWS SDK (SNS)", category: "aws" },
+  rusoto_core: { label: "AWS SDK (Rusoto)", category: "aws" },
+  rusoto_s3: { label: "AWS SDK (S3 / Rusoto)", category: "aws" },
+  rusoto_dynamodb: { label: "AWS SDK (DynamoDB / Rusoto)", category: "aws" },
+  rusoto_sqs: { label: "AWS SDK (SQS / Rusoto)", category: "aws" },
+};
+
+// Maps Maven / Gradle artifact name → label (Fix 6)
+export const MAVEN_ARTIFACT_MAP: Record<string, { label: string; category: "framework" | "database" | "aws" }> = {
+  "spring-boot": { label: "Spring Boot", category: "framework" },
+  "spring-boot-starter-web": { label: "Spring Boot", category: "framework" },
+  "spring-boot-starter-data-jpa": { label: "Spring Data JPA", category: "framework" },
+  quarkus: { label: "Quarkus", category: "framework" },
+  "quarkus-core": { label: "Quarkus", category: "framework" },
+  micronaut: { label: "Micronaut", category: "framework" },
+  "micronaut-core": { label: "Micronaut", category: "framework" },
+  hibernate: { label: "Hibernate ORM", category: "database" },
+  "hibernate-core": { label: "Hibernate ORM", category: "database" },
+  postgresql: { label: "PostgreSQL", category: "database" },
+  "mysql-connector-java": { label: "MySQL", category: "database" },
+  "mysql-connector-j": { label: "MySQL", category: "database" },
+  jedis: { label: "Redis", category: "database" },
+  lettuce: { label: "Redis", category: "database" },
+  "aws-java-sdk-s3": { label: "AWS SDK (S3)", category: "aws" },
+  "aws-java-sdk-dynamodb": { label: "AWS SDK (DynamoDB)", category: "aws" },
+  "aws-java-sdk-lambda": { label: "AWS SDK (Lambda)", category: "aws" },
+  "aws-java-sdk-sqs": { label: "AWS SDK (SQS)", category: "aws" },
+  s3: { label: "AWS SDK v2 (S3)", category: "aws" },
+  dynamodb: { label: "AWS SDK v2 (DynamoDB)", category: "aws" },
+  lambda: { label: "AWS SDK v2 (Lambda)", category: "aws" },
+  sqs: { label: "AWS SDK v2 (SQS)", category: "aws" },
+};
+
+// Maps Ruby gem name → label (Fix 6)
+export const RUBY_GEM_MAP: Record<string, { label: string; category: "framework" | "database" | "aws" }> = {
+  rails: { label: "Ruby on Rails", category: "framework" },
+  sinatra: { label: "Sinatra", category: "framework" },
+  pg: { label: "PostgreSQL", category: "database" },
+  mysql2: { label: "MySQL", category: "database" },
+  redis: { label: "Redis", category: "database" },
+  sidekiq: { label: "Sidekiq (task queue)", category: "framework" },
+  "aws-sdk-s3": { label: "AWS SDK (S3)", category: "aws" },
+  "aws-sdk-dynamodb": { label: "AWS SDK (DynamoDB)", category: "aws" },
+  "aws-sdk-sqs": { label: "AWS SDK (SQS)", category: "aws" },
+  "aws-sdk": { label: "AWS SDK (Ruby)", category: "aws" },
+};
+
+// Maps PHP Composer package name → label (Fix 6)
+export const PHP_COMPOSER_MAP: Record<string, { label: string; category: "framework" | "database" | "aws" }> = {
+  "laravel/framework": { label: "Laravel", category: "framework" },
+  "symfony/framework-bundle": { label: "Symfony", category: "framework" },
+  "doctrine/orm": { label: "Doctrine ORM", category: "database" },
+  "predis/predis": { label: "Redis", category: "database" },
+  "aws/aws-sdk-php": { label: "AWS SDK (PHP)", category: "aws" },
+};
+
+// Maps .NET / NuGet package name → label (Fix 6)
+export const DOTNET_PACKAGE_MAP: Record<string, { label: string; category: "framework" | "database" | "aws" }> = {
+  "Microsoft.AspNetCore.App": { label: "ASP.NET Core", category: "framework" },
+  "Microsoft.EntityFrameworkCore": { label: "Entity Framework Core", category: "database" },
+  "Npgsql.EntityFrameworkCore.PostgreSQL": { label: "PostgreSQL", category: "database" },
+  "Pomelo.EntityFrameworkCore.MySql": { label: "MySQL", category: "database" },
+  "StackExchange.Redis": { label: "Redis", category: "database" },
+  "AWSSDK.S3": { label: "AWS SDK (S3)", category: "aws" },
+  "AWSSDK.DynamoDBv2": { label: "AWS SDK (DynamoDB)", category: "aws" },
+  "AWSSDK.SQS": { label: "AWS SDK (SQS)", category: "aws" },
+  "AWSSDK.Lambda": { label: "AWS SDK (Lambda)", category: "aws" },
+  "AWSSDK.Core": { label: "AWS SDK (.NET)", category: "aws" },
 };
 
 // ---------------------------------------------------------------------------
@@ -242,8 +327,234 @@ const AWS_SDK_CONTENT_PATTERNS: Array<{ pattern: RegExp; service: string }> = [
 ];
 
 // ---------------------------------------------------------------------------
-// Parsers for specific manifest formats
+// Parsers for specific manifest formats (Fix 6)
 // ---------------------------------------------------------------------------
+
+export interface ParsedPackage {
+  name: string;
+  version?: string;
+}
+
+export function parsePyprojectToml(content: string): ParsedPackage[] {
+  const packages: ParsedPackage[] = [];
+  const lines = content.split(/\r?\n/);
+  let section = "";
+  let inDepArray = false;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+
+    const sectionMatch = line.match(/^\[([^\]]+)\]/);
+    if (sectionMatch) {
+      section = sectionMatch[1].trim().toLowerCase();
+      inDepArray = false;
+      continue;
+    }
+
+    if (section === "project.dependencies" || section === "project") {
+      if (line.startsWith("dependencies")) {
+        inDepArray = true;
+      }
+      if (inDepArray || section === "project.dependencies") {
+        const matches = line.matchAll(/['"]([a-zA-Z0-9_.-]+)(?:\[[^\]]*\])?(?:[><=~!^@][^'"]*)?['"]/g);
+        for (const m of matches) {
+          if (m[1].toLowerCase() !== "dependencies") {
+            packages.push({ name: m[1].toLowerCase() });
+          }
+        }
+        // Only terminate array if line ends with ] (not inside a string like [standard])
+        if (/\]\s*,?$/.test(line) && !line.startsWith("dependencies")) {
+          inDepArray = false;
+        } else if (line.startsWith("dependencies") && line.endsWith("]")) {
+          inDepArray = false;
+        }
+      }
+    }
+
+    if (
+      section === "tool.poetry.dependencies" ||
+      section === "tool.poetry.dev-dependencies" ||
+      section.startsWith("tool.poetry.group.")
+    ) {
+      const poetryMatch = line.match(/^([a-zA-Z0-9_.-]+)\s*=\s*(?:['"]([^'"]+)['"]|\{.*?version\s*=\s*['"]([^'"]+)['"].*\}|.+)/);
+      if (poetryMatch && poetryMatch[1].toLowerCase() !== "python") {
+        packages.push({
+          name: poetryMatch[1].toLowerCase(),
+          version: poetryMatch[2] || poetryMatch[3],
+        });
+      }
+    }
+  }
+
+  return packages;
+}
+
+export function parseCargoToml(content: string): ParsedPackage[] {
+  const packages: ParsedPackage[] = [];
+  const lines = content.split(/\r?\n/);
+  let inDeps = false;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+
+    const sectionMatch = line.match(/^\[([^\]]+)\]/);
+    if (sectionMatch) {
+      const sec = sectionMatch[1].trim().toLowerCase();
+      inDeps = /dependencies/.test(sec);
+      continue;
+    }
+
+    if (inDeps) {
+      const match = line.match(/^([a-zA-Z0-9_-]+)\s*=\s*(?:['"]([^'"]+)['"]|\{.*?(?:version\s*=\s*['"]([^'"]+)['"])?.*?\})/);
+      if (match) {
+        packages.push({
+          name: match[1].toLowerCase(),
+          version: match[2] || match[3],
+        });
+      }
+    }
+  }
+
+  return packages;
+}
+
+export function parsePomXml(content: string): ParsedPackage[] {
+  const packages: ParsedPackage[] = [];
+  const depBlocks = content.match(/<dependency>[\s\S]*?<\/dependency>/gi) || [];
+  for (const block of depBlocks) {
+    const groupMatch = block.match(/<groupId>([\s\S]*?)<\/groupId>/i);
+    const artifactMatch = block.match(/<artifactId>([\s\S]*?)<\/artifactId>/i);
+    const versionMatch = block.match(/<version>([\s\S]*?)<\/version>/i);
+
+    const groupId = groupMatch ? groupMatch[1].trim() : "";
+    const artifactId = artifactMatch ? artifactMatch[1].trim() : "";
+    const version = versionMatch ? versionMatch[1].trim() : undefined;
+
+    if (artifactId) {
+      packages.push({
+        name: groupId ? `${groupId}:${artifactId}` : artifactId,
+        version,
+      });
+    }
+  }
+  return packages;
+}
+
+export function parseBuildGradle(content: string): ParsedPackage[] {
+  const packages: ParsedPackage[] = [];
+  const lines = content.split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (line.startsWith("//") || line.startsWith("/*")) continue;
+
+    const match = line.match(/(?:implementation|compile|api|runtimeOnly|testImplementation)\s*[\(\s]['"]([^:'"\s]+):([^:'"\s]+)(?::([^'"\s]+))?['"]\)?/);
+    if (match) {
+      packages.push({
+        name: `${match[1]}:${match[2]}`,
+        version: match[3],
+      });
+    }
+  }
+  return packages;
+}
+
+export function parseGemfile(content: string): ParsedPackage[] {
+  const packages: ParsedPackage[] = [];
+  const lines = content.split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (line.startsWith("#")) continue;
+
+    const match = line.match(/^gem\s+['"]([^'"]+)['"](?:\s*,\s*['"]([^'"]+)['"])?/);
+    if (match) {
+      packages.push({
+        name: match[1].toLowerCase(),
+        version: match[2],
+      });
+    }
+  }
+  return packages;
+}
+
+export function parseComposerJson(content: string): ParsedPackage[] {
+  const packages: ParsedPackage[] = [];
+  const parsed = JSON.parse(content) as Record<string, unknown>;
+  const all = {
+    ...((parsed.require as Record<string, string>) ?? {}),
+    ...((parsed["require-dev"] as Record<string, string>) ?? {}),
+  };
+  for (const [pkg, ver] of Object.entries(all)) {
+    packages.push({ name: pkg.toLowerCase(), version: typeof ver === "string" ? ver : undefined });
+  }
+  return packages;
+}
+
+export function parseCsProj(content: string): ParsedPackage[] {
+  const packages: ParsedPackage[] = [];
+  const matches = content.matchAll(/<PackageReference\s+[^>]*Include=["']([^"']+)["'][^>]*(?:Version=["']([^"']+)["'])?[^>]*\/?>/gi);
+  for (const m of matches) {
+    packages.push({
+      name: m[1],
+      version: m[2],
+    });
+  }
+  return packages;
+}
+
+/**
+ * Normalization helper mapping parsed packages to tech entries
+ */
+export function mapParsedPackages(
+  pkgs: ParsedPackage[],
+  filePath: string,
+  mappingTable: Record<string, { label: string; category: "framework" | "database" | "aws" | "runtime" }>
+): { frameworks: DetectedTech[]; databases: DetectedTech[]; awsUsage: DetectedTech[] } {
+  const frameworks: DetectedTech[] = [];
+  const databases: DetectedTech[] = [];
+  const awsUsage: DetectedTech[] = [];
+  const seen = new Set<string>();
+
+  for (const pkg of pkgs) {
+    let match = mappingTable[pkg.name];
+    if (!match) {
+      const parts = pkg.name.split(":");
+      if (parts.length > 1 && mappingTable[parts[1]]) {
+        match = mappingTable[parts[1]];
+      } else {
+        for (const [key, val] of Object.entries(mappingTable)) {
+          if (
+            pkg.name.toLowerCase().includes(key.toLowerCase()) ||
+            key.toLowerCase().includes(pkg.name.toLowerCase())
+          ) {
+            match = val;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!match || seen.has(match.label)) continue;
+    seen.add(match.label);
+
+    const entry: DetectedTech = {
+      name: match.label,
+      evidence: `${filePath} → ${pkg.name}${pkg.version ? `@${pkg.version}` : ""}`,
+      confidence: "high",
+    };
+
+    if (match.category === "aws" || match.label.startsWith("AWS SDK")) {
+      awsUsage.push(entry);
+    } else if (match.category === "database") {
+      databases.push(entry);
+    } else {
+      frameworks.push(entry);
+    }
+  }
+
+  return { frameworks, databases, awsUsage };
+}
 
 /**
  * Parses package.json and extracts frameworks + databases from dependencies.
@@ -261,7 +572,7 @@ function analyzePackageJson(
   try {
     parsed = JSON.parse(content) as Record<string, unknown>;
   } catch {
-    return { frameworks, databases, awsUsage };
+    throw new Error(`Failed to parse package.json at ${filePath}`);
   }
 
   const allDeps: Record<string, string> = {
@@ -493,32 +804,102 @@ export function analyzeProject(signals: RepoSignals): ProjectProfile {
 
   // ── Pass 2: file-content signals (manifest parsing + SDK scan) ────────────
 
+  const parseFailures: string[] = [];
+
   for (const file of signals.keyFiles) {
     if (!file.content) continue;
     const fileName = file.path.split("/").pop() ?? file.path;
 
-    // package.json
-    if (fileName === "package.json") {
-      const result = analyzePackageJson(file.content, file.path);
-      for (const f of result.frameworks) addUnique(frameworks, f, seenFrameworks);
-      for (const d of result.databases) addUnique(databases, d, seenDatabases);
-      for (const a of result.awsUsage) addUnique(awsUsage, a, seenAwsUsage);
-    }
+    try {
+      // package.json
+      if (fileName === "package.json") {
+        const result = analyzePackageJson(file.content, file.path);
+        for (const f of result.frameworks) addUnique(frameworks, f, seenFrameworks);
+        for (const d of result.databases) addUnique(databases, d, seenDatabases);
+        for (const a of result.awsUsage) addUnique(awsUsage, a, seenAwsUsage);
+      }
 
-    // requirements.txt
-    if (fileName === "requirements.txt") {
-      const result = analyzeRequirementsTxt(file.content, file.path);
-      for (const f of result.frameworks) addUnique(frameworks, f, seenFrameworks);
-      for (const d of result.databases) addUnique(databases, d, seenDatabases);
-      for (const a of result.awsUsage) addUnique(awsUsage, a, seenAwsUsage);
-    }
+      // requirements.txt
+      if (fileName === "requirements.txt") {
+        const result = analyzeRequirementsTxt(file.content, file.path);
+        for (const f of result.frameworks) addUnique(frameworks, f, seenFrameworks);
+        for (const d of result.databases) addUnique(databases, d, seenDatabases);
+        for (const a of result.awsUsage) addUnique(awsUsage, a, seenAwsUsage);
+      }
 
-    // go.mod
-    if (fileName === "go.mod") {
-      const result = analyzeGoMod(file.content, file.path);
-      for (const f of result.frameworks) addUnique(frameworks, f, seenFrameworks);
-      for (const d of result.databases) addUnique(databases, d, seenDatabases);
-      for (const a of result.awsUsage) addUnique(awsUsage, a, seenAwsUsage);
+      // pyproject.toml (Fix 6)
+      if (fileName === "pyproject.toml") {
+        const pkgs = parsePyprojectToml(file.content);
+        const result = mapParsedPackages(pkgs, file.path, PYTHON_PACKAGE_MAP);
+        for (const f of result.frameworks) addUnique(frameworks, f, seenFrameworks);
+        for (const d of result.databases) addUnique(databases, d, seenDatabases);
+        for (const a of result.awsUsage) addUnique(awsUsage, a, seenAwsUsage);
+      }
+
+      // go.mod
+      if (fileName === "go.mod") {
+        const result = analyzeGoMod(file.content, file.path);
+        for (const f of result.frameworks) addUnique(frameworks, f, seenFrameworks);
+        for (const d of result.databases) addUnique(databases, d, seenDatabases);
+        for (const a of result.awsUsage) addUnique(awsUsage, a, seenAwsUsage);
+      }
+
+      // Cargo.toml (Fix 6)
+      if (/^cargo\.toml$/i.test(fileName)) {
+        const pkgs = parseCargoToml(file.content);
+        const result = mapParsedPackages(pkgs, file.path, CARGO_PACKAGE_MAP);
+        for (const f of result.frameworks) addUnique(frameworks, f, seenFrameworks);
+        for (const d of result.databases) addUnique(databases, d, seenDatabases);
+        for (const a of result.awsUsage) addUnique(awsUsage, a, seenAwsUsage);
+      }
+
+      // pom.xml (Fix 6)
+      if (fileName === "pom.xml") {
+        const pkgs = parsePomXml(file.content);
+        const result = mapParsedPackages(pkgs, file.path, MAVEN_ARTIFACT_MAP);
+        for (const f of result.frameworks) addUnique(frameworks, f, seenFrameworks);
+        for (const d of result.databases) addUnique(databases, d, seenDatabases);
+        for (const a of result.awsUsage) addUnique(awsUsage, a, seenAwsUsage);
+      }
+
+      // build.gradle / build.gradle.kts (Fix 6)
+      if (/^build\.gradle(\.kts)?$/i.test(fileName)) {
+        const pkgs = parseBuildGradle(file.content);
+        const result = mapParsedPackages(pkgs, file.path, MAVEN_ARTIFACT_MAP);
+        for (const f of result.frameworks) addUnique(frameworks, f, seenFrameworks);
+        for (const d of result.databases) addUnique(databases, d, seenDatabases);
+        for (const a of result.awsUsage) addUnique(awsUsage, a, seenAwsUsage);
+      }
+
+      // Gemfile (Fix 6)
+      if (/^gemfile$/i.test(fileName)) {
+        const pkgs = parseGemfile(file.content);
+        const result = mapParsedPackages(pkgs, file.path, RUBY_GEM_MAP);
+        for (const f of result.frameworks) addUnique(frameworks, f, seenFrameworks);
+        for (const d of result.databases) addUnique(databases, d, seenDatabases);
+        for (const a of result.awsUsage) addUnique(awsUsage, a, seenAwsUsage);
+      }
+
+      // composer.json (Fix 6)
+      if (fileName === "composer.json") {
+        const pkgs = parseComposerJson(file.content);
+        const result = mapParsedPackages(pkgs, file.path, PHP_COMPOSER_MAP);
+        for (const f of result.frameworks) addUnique(frameworks, f, seenFrameworks);
+        for (const d of result.databases) addUnique(databases, d, seenDatabases);
+        for (const a of result.awsUsage) addUnique(awsUsage, a, seenAwsUsage);
+      }
+
+      // *.csproj (Fix 6)
+      if (/\.csproj$/i.test(fileName)) {
+        const pkgs = parseCsProj(file.content);
+        const result = mapParsedPackages(pkgs, file.path, DOTNET_PACKAGE_MAP);
+        for (const f of result.frameworks) addUnique(frameworks, f, seenFrameworks);
+        for (const d of result.databases) addUnique(databases, d, seenDatabases);
+        for (const a of result.awsUsage) addUnique(awsUsage, a, seenAwsUsage);
+      }
+    } catch (err) {
+      console.warn(`[repoAnalyzer] Failed to parse manifest ${file.path}:`, err);
+      parseFailures.push(file.path);
     }
 
     // Scan all files for AWS SDK import statements
@@ -575,6 +956,7 @@ export function analyzeProject(signals: RepoSignals): ProjectProfile {
     entryPoints,
     awsUsage,
     deploymentHints,
+    parseFailures,
     summary,
   };
 }
