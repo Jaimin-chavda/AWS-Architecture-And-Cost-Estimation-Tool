@@ -130,12 +130,15 @@ Rules:
 }
 
 /**
- * Builds a structured prompt using the ProjectProfile as the primary context.
- * When a profile is available (repo path), the LLM receives the pre-analyzed
- * technology summary first, then the raw files as supplementary evidence.
- * When no profile is present (description path), falls back to the description.
+ * Builds a structured prompt using the ProjectProfile as the primary context (Fix 7).
+ * The LLM prompt contains ONLY:
+ * 1. The structured summary string from repoAnalyzer (profile text).
+ * 2. The sdkEvidence[] array from Fix 3.
+ * 3. Pattern classification context.
+ * 4. The user's input description (if present).
+ * Explicitly excludes raw file dumps to prevent token overflow and hallucinations.
  */
-function buildStructuredPrompt(
+export function buildStructuredPrompt(
   profile: ProjectProfile | null,
   signals: RepoSignals | null,
   description: string,
@@ -143,43 +146,27 @@ function buildStructuredPrompt(
 ): string {
   const parts: string[] = [];
 
-  if (profile && grounding === "repo") {
-    // Lead with the structured analysis — this is the key change.
-    // The LLM sees WHAT was found first, then the raw files for context.
+  if (profile && (grounding === "repo" || grounding === "repoFiles" || grounding === "filenameOnly")) {
+    // 1. Structured analysis summary from repoAnalyzer
     parts.push(profile.summary);
 
-    // Add raw file content as supplementary evidence (capped per file)
-    if (signals && signals.keyFiles.length > 0) {
-      parts.push("\n--- SUPPLEMENTARY RAW FILE EVIDENCE (for reference) ---");
-      let totalChars = 0;
-      const FILE_CHAR_CAP = 1_500; // per file
-      const TOTAL_CHAR_CAP = 12_000; // total evidence cap
-      for (const f of signals.keyFiles) {
-        if (totalChars >= TOTAL_CHAR_CAP) break;
-        if (f.content) {
-          const snippet = f.content.slice(0, FILE_CHAR_CAP);
-          parts.push(`=== ${f.path} ===\n${snippet}`);
-          totalChars += snippet.length;
-        } else {
-          parts.push(`=== ${f.path} === (content unavailable)`);
-        }
+    // 2. sdkEvidence array (Fix 3)
+    if (signals?.sdkEvidence && signals.sdkEvidence.length > 0) {
+      parts.push("\nEXTRACTED SDK / CODE SIGNALS:");
+      for (const ev of signals.sdkEvidence) {
+        parts.push(`  - [${ev.serviceHint}] ${ev.filePath}:${ev.line} — "${ev.matchSnippet}"`);
       }
+    }
+
+    // 3. User description (if present)
+    if (description) {
+      parts.push(`\nADDITIONAL USER CONTEXT:\n${description}`);
     }
   } else {
     // Description path — no profile available
-    const context = grounding === "repo"
-      ? "Analyze the following repository files and infer the AWS architecture."
-      : "Analyze the following project description and infer the AWS architecture needed.";
-    parts.push(context);
-    if (description) parts.push(`\nProject description: ${description}`);
-    if (signals && signals.keyFiles.length > 0) {
-      for (const f of signals.keyFiles) {
-        if (f.content) {
-          parts.push(`=== ${f.path} ===\n${f.content.slice(0, 3000)}`);
-        } else {
-          parts.push(`=== ${f.path} === (file present, content unavailable)`);
-        }
-      }
+    parts.push("Analyze the following project description and infer the AWS architecture needed.");
+    if (description) {
+      parts.push(`\nProject description: ${description}`);
     }
   }
 
