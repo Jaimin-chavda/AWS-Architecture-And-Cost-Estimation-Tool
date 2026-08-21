@@ -3,7 +3,8 @@
  *
  * Stage 1: Input normalisation + validation (FLOW.md Stage 1).
  * Stage 2: Evidence extraction via RepoFetcher + insufficient-signal gate.
- * Stage 3: Inference — runInference (rules baseline + optional LLM merge).
+ * Stage 3: Inference — LLM builds an ArchitectureModel, validated and
+ *          deterministically mapped to a ServicePlan (rules baseline = fallback).
  * Stage 4: Diagram XML generation via diagram.ts.
  * Stage 5: Cost estimation via cost.ts (default region us-east-1, 10k users).
  *
@@ -212,8 +213,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     };
   }
 
-  // ── Stage 3: Inference (rules baseline + optional LLM) ───────────────────
-  const servicePlan = await runInference({
+  // ── Stage 3: Inference ────────────────────────────────────────────────────
+  // Central reasoning path: LLM → ArchitectureModel → validation → deterministic
+  // AWS service mapping. Rules baseline is only the no-LLM / LLM-failure fallback.
+  const { plan: servicePlan, architectureModel } = await runInference({
     ruleInput,
     signals,
     description,
@@ -261,6 +264,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     diagram_xml: diagramXml,
     cost_rows: costRows,
     warnings,
+    // architecture_model is the LLM's structured understanding of the whole repo
+    // (single source of truth for the derived service plan) — exposed for transparency.
+    ...(architectureModel ? { architecture_model: architectureModel } : {}),
     // project_profile is included for transparency/debugging when repo analysis ran
     ...(profile ? { project_profile: profile } : {}),
   });

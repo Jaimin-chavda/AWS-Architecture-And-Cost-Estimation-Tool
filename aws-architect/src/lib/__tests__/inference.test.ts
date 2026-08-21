@@ -1,20 +1,41 @@
 /**
  * inference.test.ts
  *
- * Tests for the merge logic and grounding cap in inference.ts.
- * No real LLM or network calls — all merge-function inputs are constructed directly.
+ * Tests for the central reasoning flow in inference.ts:
+ *  - grounding derivation
+ *  - grounding confidence cap
+ *  - runInference fallback to the rules baseline when no LLM is configured
+ *
+ * No real LLM or network calls — the test runner has no provider keys set,
+ * so runInference takes its deterministic fallback path.
  *
  * Run: node --experimental-strip-types --test src/lib/__tests__/inference.test.ts
  */
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mergeServicePlans } from "../inference.ts";
+import { runInference, deriveGrounding, applyGroundingCap } from "../inference.ts";
+import type { InferenceInput } from "../inference.ts";
+import { ServicePlanSchema } from "../schema.ts";
 import type { ServicePlan } from "../schema.ts";
+import type { RuleInput } from "../ruleEngine.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
+
+function makeRuleInput(overrides: Partial<RuleInput> = {}): RuleInput {
+  return {
+    description: "",
+    fileContent: "",
+    fileNames: [],
+    inputKind: "description",
+    grounding: "description",
+    truncated: false,
+    parseErrors: [],
+    ...overrides,
+  };
+}
 
 function makePlan(overrides: Partial<ServicePlan> = {}): ServicePlan {
   return {
@@ -36,312 +57,8 @@ function makePlan(overrides: Partial<ServicePlan> = {}): ServicePlan {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("mergeServicePlans — null LLM result", () => {
-  it("returns baseline unchanged when llmResult is null (repo grounding)", () => {
-    const baseline = makePlan();
-    const result = mergeServicePlans(baseline, null, "repo");
-    assert.strictEqual(result.pattern, "serverless-api");
-    assert.ok(result.slots.compute.serviceId === "Lambda");
-    assert.ok(result.slots.database.serviceId === "DynamoDB");
-    // repo grounding: no confidence cap
-    assert.strictEqual(result.slots.compute.confidence, "high");
-  });
-
-  it("caps all confidence to 'low' when grounding=description and llmResult is null", () => {
-    const baseline = makePlan({ metadata: { grounding: "description", truncated: false, parseErrors: [] } });
-    const result = mergeServicePlans(baseline, null, "description");
-    for (const slot of Object.values(result.slots)) {
-      assert.strictEqual(slot.confidence, "low", `Expected 'low' got '${slot.confidence}' for ${slot.serviceId}`);
-    }
-  });
-});
-
-describe("mergeServicePlans — with LLM result", () => {
-  it("uses 'high' confidence for services in both baseline and LLM", () => {
-    const baseline = makePlan({
-      slots: {
-        compute: { serviceId: "Lambda", confidence: "medium", evidence: "rule signal" },
-        monitoring: { serviceId: "CloudWatch", confidence: "medium", evidence: "always" },
-      },
-    });
-    const llm = makePlan({
-      pattern: "serverless-api",
-      slots: {
-        compute: { serviceId: "Lambda", confidence: "high", evidence: "aws-sdk lambda import" },
-        api: { serviceId: "APIGateway", confidence: "high", evidence: "api gateway endpoint" },
-      },
-    });
-
-    const result = mergeServicePlans(baseline, llm, "repo");
-
-    // Lambda in both → high
-    const lambdaSlot = Object.values(result.slots).find((s) => s.serviceId === "Lambda");
-    assert.ok(lambdaSlot, "Lambda should be in merged plan");
-    assert.strictEqual(lambdaSlot!.confidence, "high");
-
-    // APIGateway from LLM only → medium (capped)
-    const apiSlot = Object.values(result.slots).find((s) => s.serviceId === "APIGateway");
-    assert.ok(apiSlot, "APIGateway from LLM should be in merged plan");
-    assert.strictEqual(apiSlot!.confidence, "medium");
-
-    // CloudWatch from baseline only → low
-    const cwSlot = Object.values(result.slots).find((s) => s.serviceId === "CloudWatch");
-    assert.ok(cwSlot, "CloudWatch from baseline should be kept");
-    assert.strictEqual(cwSlot!.confidence, "low");
-  });
-
-  it("uses LLM pattern when LLM result is present", () => {
-    const baseline = makePlan({ pattern: "generic" });
-    const llm = makePlan({ pattern: "containerised-app" });
-    const result = mergeServicePlans(baseline, llm, "repo");
-    assert.strictEqual(result.pattern, "containerised-app");
-  });
-
-  it("caps all confidence to 'low' on description grounding even with LLM", () => {
-    const baseline = makePlan({ metadata: { grounding: "description", truncated: false, parseErrors: [] } });
-    const llm = makePlan({
-      pattern: "serverless-api",
-      slots: { compute: { serviceId: "Lambda", confidence: "high", evidence: "high signal" } },
-    });
-    const result = mergeServicePlans(baseline, llm, "description");
-    for (const slot of Object.values(result.slots)) {
-      assert.strictEqual(slot.confidence, "low");
-    }
-  });
-
-  it("never exceeds 12 distinct services after merge", () => {
-    // Create baseline with 8 services
-    const baseSlots: Record<string, { serviceId: string; confidence: "high" | "medium" | "low"; evidence: string }> = {};
-    const bSvcs = ["Lambda", "DynamoDB", "S3", "CloudWatch", "SQS", "SNS", "Cognito", "Route53"];
-    bSvcs.forEach((id, i) => { baseSlots[`slot${i}`] = { serviceId: id, confidence: "medium", evidence: "rule" }; });
-
-    // LLM adds 8 different services
-    const llmSlots: typeof baseSlots = {};
-    const lSvcs = ["ECS", "RDS", "CloudFront", "ALB", "APIGateway", "ElastiCache", "ECR", "EventBridge"];
-    lSvcs.forEach((id, i) => { llmSlots[`lslot${i}`] = { serviceId: id, confidence: "high", evidence: "llm" }; });
-
-    const baseline = makePlan({ slots: baseSlots });
-    const llm = makePlan({ slots: llmSlots });
-    const result = mergeServicePlans(baseline, llm, "repo");
-
-    const unique = new Set(Object.values(result.slots).map((s) => s.serviceId));
-    assert.ok(unique.size <= 12, `Expected ≤12, got ${unique.size}`);
-  });
-
-  it("resolves slot name collisions with additional_N overflow slots", () => {
-    // Both LLM and baseline use the same slot name for different services
-    const baseline = makePlan({
-      slots: {
-        compute: { serviceId: "Lambda", confidence: "medium", evidence: "base" },
-      },
-    });
-    const llm = makePlan({
-      slots: {
-        compute: { serviceId: "ECS", confidence: "high", evidence: "llm" },
-        // Same slot name — should cause collision resolution
-        database: { serviceId: "DynamoDB", confidence: "high", evidence: "llm" },
-      },
-    });
-    const result = mergeServicePlans(baseline, llm, "repo");
-    // All serviceIds should be present (no data loss)
-    const ids = new Set(Object.values(result.slots).map((s) => s.serviceId));
-    // Lambda (baseline only) + ECS and DynamoDB (LLM) → all 3 present if under cap
-    assert.ok(ids.has("ECS"), "ECS should be in merged plan");
-    assert.ok(ids.has("DynamoDB"), "DynamoDB should be in merged plan");
-    // All slot names should be unique
-    const slotNames = Object.keys(result.slots);
-    assert.strictEqual(slotNames.length, new Set(slotNames).size, "Slot names must be unique");
-  });
-
-  it("falls back to baseline when LLM services exceed catalog (gate catches it)", () => {
-    // If somehow a bad LLM result gets through (all invalid service IDs),
-    // ServicePlanSchema.safeParse in mergeServicePlans should reject it
-    // and return baseline.
-    const baseline = makePlan();
-    const badLlm: ServicePlan = {
-      ...makePlan(),
-      slots: {
-        compute: { serviceId: "INVALID_SERVICE", confidence: "high", evidence: "hallucinated" },
-      },
-    };
-    const result = mergeServicePlans(baseline, badLlm, "repo");
-    const ids = new Set(Object.values(result.slots).map((s) => s.serviceId));
-    assert.ok(ids.has("Lambda"), "Should fall back to baseline (Lambda present)");
-    assert.ok(!ids.has("INVALID_SERVICE"), "Invalid service ID must not appear");
-  });
-
-  it("Fix 1: filters invalid IDs individually and trims to 12 valid services", async () => {
-    const { filterAndValidateLlmSlots } = await import("../llmClient.ts");
-    // 15 services total: 12 valid + 3 invalid
-    const rawSlots: Record<string, { serviceId: string; confidence: "high" | "medium" | "low"; evidence: string }> = {
-      s1: { serviceId: "Lambda", confidence: "high", evidence: "valid compute" },
-      s2: { serviceId: "EC2", confidence: "high", evidence: "valid compute 2" },
-      s3: { serviceId: "S3", confidence: "high", evidence: "valid storage" },
-      s4: { serviceId: "DynamoDB", confidence: "high", evidence: "valid db" },
-      s5: { serviceId: "RDS", confidence: "high", evidence: "valid db 2" },
-      s6: { serviceId: "SQS", confidence: "high", evidence: "valid queue" },
-      s7: { serviceId: "SNS", confidence: "medium", evidence: "valid sns" },
-      s8: { serviceId: "CloudFront", confidence: "medium", evidence: "valid cdn" },
-      s9: { serviceId: "APIGateway", confidence: "medium", evidence: "valid api" },
-      s10: { serviceId: "Cognito", confidence: "low", evidence: "valid auth" },
-      s11: { serviceId: "CloudWatch", confidence: "low", evidence: "valid logs" },
-      s12: { serviceId: "EventBridge", confidence: "low", evidence: "valid events" },
-      s13: { serviceId: "Kinesis", confidence: "low", evidence: "valid kinesis" }, // 13th valid
-      bad1: { serviceId: "NON_EXISTENT_AWS_SERVICE", confidence: "high", evidence: "invalid" },
-      bad2: { serviceId: "GoogleCloudStorage", confidence: "high", evidence: "invalid" },
-      bad3: { serviceId: "AzureBlob", confidence: "high", evidence: "invalid" },
-    };
-
-    const filtered = filterAndValidateLlmSlots(rawSlots);
-    assert.ok(filtered, "Should return filtered slots");
-    const serviceList = Object.values(filtered).map((s) => s.serviceId);
-    assert.strictEqual(serviceList.length, 12, "Should cap to exactly 12 services");
-    assert.ok(!serviceList.includes("NON_EXISTENT_AWS_SERVICE"), "Invalid IDs must be dropped");
-    assert.ok(!serviceList.includes("GoogleCloudStorage"), "Invalid IDs must be dropped");
-    assert.ok(!serviceList.includes("AzureBlob"), "Invalid IDs must be dropped");
-    // High confidence items must be preserved over low confidence items
-    assert.ok(serviceList.includes("Lambda"));
-    assert.ok(serviceList.includes("S3"));
-    assert.ok(serviceList.includes("DynamoDB"));
-  });
-
-  it("Fix 1: retains baseline-only services unless LLM returned the exact service or a designated substitute", () => {
-    // LLM covers compute (Lambda) and database (DynamoDB)
-    const llm = makePlan({
-      slots: {
-        compute: { serviceId: "Lambda", confidence: "high", evidence: "llm lambda" },
-        database: { serviceId: "DynamoDB", confidence: "high", evidence: "llm dynamo" },
-      },
-    });
-    // Baseline had compute (EC2), database (RDS), storage (S3), observability (CloudWatch)
-    const baseline = makePlan({
-      slots: {
-        compute: { serviceId: "EC2", confidence: "medium", evidence: "base ec2" },
-        database: { serviceId: "RDS", confidence: "medium", evidence: "base rds" },
-        storage: { serviceId: "S3", confidence: "medium", evidence: "base s3" },
-        monitoring: { serviceId: "CloudWatch", confidence: "medium", evidence: "base cw" },
-      },
-    });
-
-    const result = mergeServicePlans(baseline, llm, "repo");
-    const ids = Object.values(result.slots).map((s) => s.serviceId);
-
-    // LLM choices for covered categories are preserved
-    assert.ok(ids.includes("Lambda"), "Lambda should be present");
-    assert.ok(ids.includes("DynamoDB"), "DynamoDB should be present");
-
-    // Baseline services are retained even when the LLM covers the same broad
-    // category — Lambda is not a substitute for EC2, DynamoDB not a substitute for RDS
-    assert.ok(ids.includes("EC2"), "EC2 should be retained (no substitute relationship with Lambda)");
-    assert.ok(ids.includes("RDS"), "RDS should be retained (no substitute relationship with DynamoDB)");
-
-    // Baseline services for untouched categories are also retained
-    assert.ok(ids.includes("S3"), "S3 should be retained");
-    assert.ok(ids.includes("CloudWatch"), "CloudWatch should be retained");
-  });
-
-  it("Fix A: 12-service baseline survives LLM that covers only 3 services (no category collapse)", () => {
-    const baseIds = ["RDS", "DynamoDB", "ElastiCache", "S3", "Route53", "ALB", "ECS", "Lambda", "DocumentDB", "SQS", "SNS", "CloudWatch"];
-    const baseSlots: Record<string, { serviceId: string; confidence: "high" | "medium" | "low"; evidence: string }> = {};
-    baseIds.forEach((id, i) => { baseSlots[`b${i}`] = { serviceId: id, confidence: "medium", evidence: "rule" }; });
-    const baseline = makePlan({ slots: baseSlots });
-
-    const llmIds = ["Route53", "ECS", "CloudWatch"];
-    const llmSlots: typeof baseSlots = {};
-    llmIds.forEach((id, i) => { llmSlots[`l${i}`] = { serviceId: id, confidence: "high", evidence: "llm" }; });
-    const llm = makePlan({ slots: llmSlots });
-
-    const result = mergeServicePlans(baseline, llm, "repo");
-    const ids = Object.values(result.slots).map((s) => s.serviceId);
-
-    // All 12 baseline services survive (LLM's 3 are all already in baseline → deduped)
-    for (const id of baseIds) {
-      assert.ok(ids.includes(id), `${id} should survive the merge`);
-    }
-    assert.strictEqual(new Set(ids).size, 12, "expected exactly 12 distinct services");
-    // Consensus services are high; baseline-only are low
-    for (const id of llmIds) {
-      const slot = Object.values(result.slots).find((s) => s.serviceId === id);
-      assert.strictEqual(slot!.confidence, "high", `${id} in both plans → high`);
-    }
-    for (const id of ["RDS", "DynamoDB", "ElastiCache", "S3", "ALB", "Lambda", "DocumentDB", "SQS", "SNS"]) {
-      const slot = Object.values(result.slots).find((s) => s.serviceId === id);
-      assert.strictEqual(slot!.confidence, "low", `${id} baseline-only → low`);
-    }
-  });
-
-  it("Fix A: drops baseline RDS when LLM returns substitute Aurora (role filled once)", () => {
-    const baseline = makePlan({
-      slots: { database: { serviceId: "RDS", confidence: "medium", evidence: "base rds" } },
-    });
-    const llm = makePlan({
-      slots: { database: { serviceId: "Aurora", confidence: "high", evidence: "llm aurora" } },
-    });
-
-    const result = mergeServicePlans(baseline, llm, "repo");
-    const ids = Object.values(result.slots).map((s) => s.serviceId);
-    assert.ok(ids.includes("Aurora"), "Aurora (LLM pick) should win the role");
-    assert.ok(!ids.includes("RDS"), "RDS should be dropped as a substitute");
-  });
-
-  it("Fix A: keeps both baseline RDS and LLM DynamoDB (not listed substitutes)", () => {
-    const baseline = makePlan({
-      slots: { database: { serviceId: "RDS", confidence: "medium", evidence: "base rds" } },
-    });
-    const llm = makePlan({
-      slots: { database: { serviceId: "DynamoDB", confidence: "high", evidence: "llm dynamo" } },
-    });
-
-    const result = mergeServicePlans(baseline, llm, "repo");
-    const ids = Object.values(result.slots).map((s) => s.serviceId);
-    assert.ok(ids.includes("RDS"), "RDS should be retained");
-    assert.ok(ids.includes("DynamoDB"), "DynamoDB should be retained");
-  });
-
-  it("Fix A: regression — coarse-category collapse no longer happens", () => {
-    // Reproduce the original bug: a coarse "compute" bucket held EC2/Lambda/ECS,
-    // and a single LLM service in that bucket wiped the rest.
-    const baseline = makePlan({
-      slots: {
-        c1: { serviceId: "EC2", confidence: "medium", evidence: "rule" },
-        c2: { serviceId: "Lambda", confidence: "medium", evidence: "rule" },
-        c3: { serviceId: "ECS", confidence: "medium", evidence: "rule" },
-        s1: { serviceId: "S3", confidence: "medium", evidence: "rule" },
-      },
-    });
-    const llm = makePlan({
-      slots: { compute: { serviceId: "Lambda", confidence: "high", evidence: "llm" } },
-    });
-
-    const result = mergeServicePlans(baseline, llm, "repo");
-    const ids = Object.values(result.slots).map((s) => s.serviceId);
-    for (const id of ["EC2", "Lambda", "ECS", "S3"]) {
-      assert.ok(ids.includes(id), `${id} must survive — no category collapse`);
-    }
-  });
-});
-
-describe("mergeServicePlans — metadata passthrough", () => {
-  it("preserves parseErrors from baseline metadata", () => {
-    const baseline = makePlan({
-      metadata: { grounding: "repo", truncated: false, parseErrors: ["bad.yaml"] },
-    });
-    const result = mergeServicePlans(baseline, null, "repo");
-    assert.deepStrictEqual(result.metadata.parseErrors, ["bad.yaml"]);
-  });
-
-  it("preserves truncated flag from baseline metadata", () => {
-    const baseline = makePlan({
-      metadata: { grounding: "repo", truncated: true, parseErrors: [] },
-    });
-    const result = mergeServicePlans(baseline, null, "repo");
-    assert.strictEqual(result.metadata.truncated, true);
-  });
-});
-
-describe("Fix 2 — Grounding derivation & confidence cap", () => {
-  it("derives 'description' when description is non-empty", async () => {
-    const { deriveGrounding } = await import("../inference.ts");
+describe("Fix 2 — Grounding derivation", () => {
+  it("derives 'description' when description is non-empty", () => {
     const g = deriveGrounding({
       description: "My custom app",
       fetchedFiles: [{ content: "package.json content" }],
@@ -349,8 +66,7 @@ describe("Fix 2 — Grounding derivation & confidence cap", () => {
     assert.strictEqual(g, "description");
   });
 
-  it("derives 'repoFiles' when description is empty and file content was fetched", async () => {
-    const { deriveGrounding } = await import("../inference.ts");
+  it("derives 'repoFiles' when description is empty and file content was fetched", () => {
     const g = deriveGrounding({
       description: "",
       fetchedFiles: [
@@ -361,8 +77,7 @@ describe("Fix 2 — Grounding derivation & confidence cap", () => {
     assert.strictEqual(g, "repoFiles");
   });
 
-  it("derives 'filenameOnly' when fetch fails for all files but filenames were known", async () => {
-    const { deriveGrounding } = await import("../inference.ts");
+  it("derives 'filenameOnly' when fetch fails for all files but filenames were known", () => {
     const g = deriveGrounding({
       description: "",
       fetchedFiles: [
@@ -374,8 +89,7 @@ describe("Fix 2 — Grounding derivation & confidence cap", () => {
     assert.notStrictEqual(g, "description", "Must never be 'description' when description is empty");
   });
 
-  it("derives 'unfounded' when fetch failed AND no filenames were resolvable", async () => {
-    const { deriveGrounding } = await import("../inference.ts");
+  it("derives 'unfounded' when fetch failed AND no filenames were resolvable", () => {
     const g = deriveGrounding({
       description: "",
       fetchedFiles: [],
@@ -383,17 +97,63 @@ describe("Fix 2 — Grounding derivation & confidence cap", () => {
     assert.strictEqual(g, "unfounded");
     assert.notStrictEqual(g, "description");
   });
+});
 
-  it("caps all confidence to 'low' when grounding is 'unfounded' or 'filenameOnly'", () => {
-    const baseline = makePlan({
-      slots: {
-        compute: { serviceId: "Lambda", confidence: "high", evidence: "test" },
-      },
-    });
-    const resultUnfounded = mergeServicePlans(baseline, null, "unfounded");
-    assert.strictEqual(resultUnfounded.slots.compute.confidence, "low");
+describe("Decision 19 — Grounding confidence cap", () => {
+  it("does not cap confidence for repo / repoFiles grounding", () => {
+    for (const g of ["repo", "repoFiles"] as const) {
+      const result = applyGroundingCap(makePlan(), g);
+      assert.strictEqual(result.slots.compute.confidence, "high", `grounding=${g} must not cap`);
+    }
+  });
 
-    const resultFilenameOnly = mergeServicePlans(baseline, null, "filenameOnly");
-    assert.strictEqual(resultFilenameOnly.slots.compute.confidence, "low");
+  it("caps all confidence to 'low' for description / filenameOnly / unfounded grounding", () => {
+    for (const g of ["description", "filenameOnly", "unfounded"] as const) {
+      const result = applyGroundingCap(makePlan(), g);
+      for (const slot of Object.values(result.slots)) {
+        assert.strictEqual(slot.confidence, "low", `grounding=${g}: expected 'low' got '${slot.confidence}'`);
+      }
+    }
+  });
+});
+
+describe("runInference — no-LLM fallback", () => {
+  it("returns a valid ServicePlan and a null architectureModel when no LLM is configured", async () => {
+    const input: InferenceInput = {
+      ruleInput: makeRuleInput({
+        description: "react app with express api postgres and s3",
+        inputKind: "description",
+        grounding: "description",
+      }),
+      signals: null,
+      description: "react app with express api postgres and s3",
+      profile: null,
+    };
+
+    const result = await runInference(input);
+
+    assert.strictEqual(result.architectureModel, null, "No LLM configured → no architecture model");
+    const check = ServicePlanSchema.safeParse(result.plan);
+    assert.ok(check.success, "Fallback plan must be a valid ServicePlan");
+    assert.strictEqual(result.plan.inputKind, "description");
+  });
+
+  it("falls back to rules when the LLM path is unavailable, preserving input metadata", async () => {
+    const input: InferenceInput = {
+      ruleInput: makeRuleInput({
+        inputKind: "github_url",
+        grounding: "repoFiles",
+        truncated: true,
+        parseErrors: ["bad.yaml"],
+      }),
+      signals: null,
+      description: "",
+      profile: null,
+    };
+
+    const result = await runInference(input);
+    assert.strictEqual(result.plan.metadata.grounding, "repoFiles");
+    assert.strictEqual(result.plan.metadata.truncated, true);
+    assert.deepStrictEqual(result.plan.metadata.parseErrors, ["bad.yaml"]);
   });
 });

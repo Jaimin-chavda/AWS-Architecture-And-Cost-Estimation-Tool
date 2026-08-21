@@ -1019,9 +1019,9 @@ function buildSummary(data: Omit<ProjectProfile, "summary"> & { repoName: string
 
   lines.push("");
   lines.push(
-    "INFERENCE INSTRUCTIONS: Based ONLY on the technologies above, determine which AWS services " +
-    "are needed to deploy this project. Do not invent services not justified by the detected " +
-    "technologies. Each service must have a direct mapping to a detected technology."
+    "This structured analysis is the evidence base for building the application's " +
+    "architecture model. Use only the technologies above; do not invent technologies " +
+    "absent from this analysis."
   );
 
   return lines.join("\n");

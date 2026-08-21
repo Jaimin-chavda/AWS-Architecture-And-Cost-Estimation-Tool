@@ -1,184 +1,36 @@
 /**
  * inference.ts  —  FLOW.md Stage 3: Inference orchestration
  *
- * Runs rules baseline + optional LLM, then merges results.
- * This is the single entry point the route calls.
+ * Central reasoning pipeline:
+ *   RepoSignals/description → LLM → ArchitectureModel → validation
+ *     → deterministic AWS service mapping → ServicePlan
+ *
+ * The LLM never picks AWS services directly. It builds a single structured
+ * ArchitectureModel of the whole application; architecture.ts maps that model
+ * to the ServicePlan. Downstream (diagram, cost) consume the ServicePlan.
  *
  * Decision 3:  Rules-first — baseline never fails.
  * Decision 5:  LLM failure → baseline silently (no error page).
- * Decision 16: merge(baseline, validate(llm)) — provider-agnostic gate already in llmClient.
- * Decision 19: description-grounded → cap all confidence to "low" after merge.
+ * Decision 19: description-grounded → cap all confidence to "low".
  * Decision 21: retries capped at 3 inside llmClient.
  */
 
 import { runRuleEngine } from "./ruleEngine.ts";
-import { callLlm, llmConfigured } from "./llmClient.ts";
-import { ServicePlanSchema, SERVICE_SUBSTITUTES } from "./schema.ts";
+import { analyzeArchitecture, llmConfigured } from "./llmClient.ts";
+import { mapArchitectureModelToServicePlan } from "./architecture.ts";
+import type { ArchitectureModel } from "./architecture.ts";
 import type {
   ServicePlan,
   ServiceSlot,
-  ServiceId,
-  ConfidenceTier,
   Grounding,
-  PatternId,
 } from "./schema.ts";
 import type { RuleInput } from "./ruleEngine.ts";
 import type { RepoSignals } from "./repoFetcher.ts";
 import type { ProjectProfile } from "./repoAnalyzer.ts";
 
 // ---------------------------------------------------------------------------
-// Merge algorithm
-//
-// Confidence after merge:
-//   serviceId in BOTH baseline + LLM → "high"   (consensus)
-//   serviceId in LLM only             → min(llm.confidence, "medium")
-//   serviceId in baseline only        → "low"    (unconfirmed)
-//
-// Pattern: prefer LLM's pattern (it has fuller context via formatted evidence).
-// Slot names: prefer LLM's slot names; baseline services missing from LLM use
-//   their existing slot names with "low" confidence.
-// 12-service cap applied after merge, priority: high > medium > low.
-// Description-grounded → cap all to "low" (Decision 19).
+// Grounding derivation (Fix 2)
 // ---------------------------------------------------------------------------
-
-const CONFIDENCE_ORDER: ConfidenceTier[] = ["high", "medium", "low"];
-
-function capConfidence(c: ConfidenceTier, max: ConfidenceTier): ConfidenceTier {
-  const ci = CONFIDENCE_ORDER.indexOf(c);
-  const mi = CONFIDENCE_ORDER.indexOf(max);
-  // Lower index = higher confidence ("high"=0, "medium"=1, "low"=2).
-  // If current is already worse-or-equal to max (ci >= mi), keep it.
-  // If current is better than max (ci < mi), clamp to max.
-  return ci >= mi ? c : max;
-}
-
-/**
- * Merges the rule-engine baseline with a (validated) LLM ServicePlan.
- * If llmResult is null, returns the baseline unchanged.
- */
-export function mergeServicePlans(
-  baseline: ServicePlan,
-  llmResult: ServicePlan | null,
-  grounding: Grounding
-): ServicePlan {
-  if (!llmResult) return applyGroundingCap(baseline, grounding);
-
-  // Build lookup maps: serviceId → {slotName, slot} for each plan
-  const baseMap = new Map<string, { slotName: string; slot: ServiceSlot }>();
-  for (const [slotName, slot] of Object.entries(baseline.slots)) {
-    baseMap.set(slot.serviceId, { slotName, slot });
-  }
-
-  const llmMap = new Map<string, { slotName: string; slot: ServiceSlot }>();
-  for (const [slotName, slot] of Object.entries(llmResult.slots)) {
-    llmMap.set(slot.serviceId, { slotName, slot });
-  }
-
-  // ── Fix 1: Substitute-gap detection ────────────────────────────────────
-  // A baseline-only service is dropped ONLY if the LLM returned an exact
-  // match (handled below via llmMap) or a designated direct substitute.
-  // Broad-category overlap alone no longer discards baseline services.
-
-  // All unique service IDs across both plans
-  const allIds = new Set([...baseMap.keys(), ...llmMap.keys()]);
-
-  type MergedEntry = {
-    slotName: string;
-    serviceId: string;
-    confidence: ConfidenceTier;
-    evidence: string;
-    sortPriority: number; // 0 = high, 1 = medium, 2 = low
-  };
-
-  const merged: MergedEntry[] = [];
-  for (const id of allIds) {
-    const inBase = baseMap.get(id);
-    const inLlm = llmMap.get(id);
-
-    let confidence: ConfidenceTier;
-    let evidence: string;
-    let slotName: string;
-
-    if (inBase && inLlm) {
-      // Both agree → high confidence
-      confidence = "high";
-      evidence = inLlm.slot.evidence; // LLM evidence is usually more specific
-      slotName = inLlm.slotName;
-    } else if (inLlm) {
-      // LLM only → cap at medium
-      confidence = capConfidence(inLlm.slot.confidence, "medium");
-      evidence = inLlm.slot.evidence;
-      slotName = inLlm.slotName;
-    } else {
-      // Baseline only → retain at "low" unless the LLM returned a direct
-      // substitute filling the same role (e.g. baseline RDS, LLM Aurora).
-      const subs = SERVICE_SUBSTITUTES[id as ServiceId] ?? [];
-      const subInLlm = subs.find((s) => llmMap.has(s));
-      if (subInLlm) {
-        console.warn(
-          `[inference] dropped baseline service ${id}: LLM returned substitute ${subInLlm}`
-        );
-        continue;
-      }
-      confidence = "low";
-      evidence = inBase!.slot.evidence + " (rule-only, baseline signal)";
-      slotName = inBase!.slotName;
-    }
-
-    merged.push({
-      slotName,
-      serviceId: id,
-      confidence,
-      evidence,
-      sortPriority: CONFIDENCE_ORDER.indexOf(confidence),
-    });
-  }
-
-  // Sort by confidence (high first), then apply 12-service cap
-  merged.sort((a, b) => a.sortPriority - b.sortPriority);
-  const capped = merged.slice(0, 12);
-
-  // Resolve slot name collisions (two services can't share the same slot name)
-  const usedSlots = new Set<string>();
-  let overflowIdx = 1;
-  const slots: Record<string, ServiceSlot> = {};
-  for (const entry of capped) {
-    let slotName = entry.slotName;
-    if (usedSlots.has(slotName)) {
-      slotName = `additional_${overflowIdx++}`;
-    }
-    usedSlots.add(slotName);
-    slots[slotName] = {
-      serviceId: entry.serviceId,
-      confidence: entry.confidence,
-      evidence: entry.evidence,
-    };
-  }
-
-  const plan: ServicePlan = {
-    inputKind: baseline.inputKind,
-    // Prefer LLM pattern when the LLM had real evidence; baseline otherwise
-    pattern: llmResult.pattern as PatternId,
-    slots,
-    customEdges: llmResult.customEdges.length > 0 ? llmResult.customEdges : baseline.customEdges,
-    suggestedServices: baseline.suggestedServices ?? [],
-    metadata: {
-      grounding: baseline.metadata.grounding,
-      truncated: baseline.metadata.truncated,
-      parseErrors: baseline.metadata.parseErrors,
-    },
-  };
-
-  // Validate merged plan (should always pass, but defense-in-depth)
-  const check = ServicePlanSchema.safeParse(plan);
-  if (!check.success) {
-    // Fallback: return baseline with grounding cap
-    console.warn("[inference] Merged plan failed schema validation — using baseline");
-    return applyGroundingCap(baseline, grounding);
-  }
-
-  return applyGroundingCap(check.data, grounding);
-}
 
 /**
  * Derives grounding directly and only from evidence actually consumed (Fix 2).
@@ -225,40 +77,65 @@ export interface InferenceInput {
   description: string;
   /**
    * Structured project profile from repoAnalyzer (github_url path only).
-   * Forwarded to both the rule engine (for typed scoring) and the LLM (for
-   * the pre-analyzed technology summary prompt).
+   * Forwarded to the LLM as the evidence base for building the architecture model.
    */
   profile?: ProjectProfile | null;
 }
 
+export interface InferenceResult {
+  /** The ServicePlan consumed by diagram + cost (derived from the model, or rules baseline). */
+  plan: ServicePlan;
+  /**
+   * The ArchitectureModel produced by the LLM (null when the LLM was not
+   * configured or failed and the rules baseline was used).
+   */
+  architectureModel: ArchitectureModel | null;
+}
+
 /**
  * Runs the full inference pipeline:
- *   1. Rule engine baseline (always)
- *   2. LLM (if configured, silently skipped otherwise)
- *   3. Merge
+ *   1. LLM builds the ArchitectureModel (if configured).
+ *   2. The model is validated and deterministically mapped to a ServicePlan.
+ *   3. No LLM (or LLM failure) → deterministic rules baseline.
  *
  * Always returns a valid ServicePlan — never throws.
  */
-export async function runInference(input: InferenceInput): Promise<ServicePlan> {
-  // Step 1: Rule engine baseline (synchronous, never fails)
-  // Pass the profile so scoring uses typed fields + file-specific evidence strings
-  const baseline = runRuleEngine({
-    ...input.ruleInput,
-    profile: input.profile ?? undefined,
-  });
+export async function runInference(input: InferenceInput): Promise<InferenceResult> {
+  const { ruleInput, signals, description, profile } = input;
 
-  // Step 2: LLM (async, can fail silently)
-  let llmResult: ServicePlan | null = null;
-  if (llmConfigured()) {
-    llmResult = await callLlm({
-      signals: input.signals,
-      description: input.description,
-      inputKind: input.ruleInput.inputKind,
-      grounding: input.ruleInput.grounding,
-      profile: input.profile ?? null,
-    });
+  // Fallback: deterministic rule engine (no LLM configured, or LLM failed).
+  const baseline = () => runRuleEngine({ ...ruleInput, profile: profile ?? undefined });
+
+  // Central reasoning path requires an LLM provider.
+  if (!llmConfigured()) {
+    return { plan: baseline(), architectureModel: null };
   }
 
-  // Step 3: Merge
-  return mergeServicePlans(baseline, llmResult, input.ruleInput.grounding);
+  // 1. LLM builds the architecture model of the whole repo/system.
+  const model = await analyzeArchitecture({
+    signals,
+    description,
+    inputKind: ruleInput.inputKind,
+    grounding: ruleInput.grounding,
+    profile: profile ?? null,
+  });
+
+  // 2. analyzeArchitecture already validated + normalized the model; on
+  //    failure (null) fall back to rules.
+  if (!model) {
+    return { plan: baseline(), architectureModel: null };
+  }
+
+  // 3. Deterministic AWS service mapping from the model — the ONLY inference path.
+  const plan = mapArchitectureModelToServicePlan(model, {
+    inputKind: ruleInput.inputKind,
+    grounding: ruleInput.grounding,
+    truncated: ruleInput.truncated,
+    parseErrors: ruleInput.parseErrors,
+  });
+
+  return {
+    plan: applyGroundingCap(plan, ruleInput.grounding),
+    architectureModel: model,
+  };
 }

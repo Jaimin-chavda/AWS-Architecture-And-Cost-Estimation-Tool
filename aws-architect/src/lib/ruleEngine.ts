@@ -223,7 +223,7 @@ function scoreDataPipeline(combined: string, profile?: ProjectProfile): number {
 // Service signal detectors — return service signals from combined text
 // ---------------------------------------------------------------------------
 
-interface DetectedService {
+export interface DetectedService {
   serviceId: string;
   confidence: ConfidenceTier;
   evidence: string;
@@ -545,7 +545,7 @@ function detectServices(
 // in order of the detected services list; overflow goes to "additional_N".
 // ---------------------------------------------------------------------------
 
-const PATTERN_SLOTS: Record<PatternId, string[]> = {
+export const PATTERN_SLOTS: Record<PatternId, string[]> = {
   "static-site":      ["cdn", "storage", "dns", "monitoring"],
   "serverless-api":   ["api", "compute", "database", "storage", "queue", "auth", "monitoring"],
   "containerised-app":["compute", "registry", "load_balancer", "database", "cache", "storage", "monitoring"],
@@ -558,7 +558,7 @@ const PATTERN_SLOTS: Record<PatternId, string[]> = {
 
 // Preferred service → slot mapping for each pattern
 // If a service is detected, it goes into this slot (if available)
-const SERVICE_SLOT_AFFINITY: Record<string, string> = {
+export const SERVICE_SLOT_AFFINITY: Record<string, string> = {
   // static-site
   CloudFront: "cdn",
   S3: "storage",
@@ -588,7 +588,7 @@ const SERVICE_SLOT_AFFINITY: Record<string, string> = {
   Amplify: "frontend",
 };
 
-function assignSlots(
+export function assignSlots(
   pattern: PatternId,
   services: DetectedService[]
 ): Record<string, { serviceId: string; confidence: ConfidenceTier; evidence: string }> {

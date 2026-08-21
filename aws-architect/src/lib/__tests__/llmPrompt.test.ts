@@ -1,11 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildStructuredPrompt } from "../llmClient.ts";
+import { buildArchitecturePrompt } from "../llmClient.ts";
 import type { ProjectProfile } from "../repoAnalyzer.ts";
 import type { RepoSignals } from "../repoFetcher.ts";
 
 describe("Fix 7 — LLM prompt hygiene & no raw file leakage", () => {
-  it("includes profile summary, sdkEvidence, and user description, but NEVER raw file dump", () => {
+  it("includes profile summary, repo structure, readme, sdkEvidence, and description, but NEVER raw file dump", () => {
     const rawFileSecret = "const SECRET_INTERNAL_VARIABLE = 12345;";
     const profile: ProjectProfile = {
       languages: [{ name: "Python", evidence: "requirements.txt", confidence: "high" }],
@@ -36,6 +36,13 @@ describe("Fix 7 — LLM prompt hygiene & no raw file leakage", () => {
           sizeBytes: 100,
           truncated: false,
         },
+        {
+          path: "README.md",
+          kind: "readme",
+          content: "User App — a FastAPI service backed by PostgreSQL.",
+          sizeBytes: 60,
+          truncated: false,
+        },
       ],
       sdkEvidence: [
         {
@@ -50,10 +57,10 @@ describe("Fix 7 — LLM prompt hygiene & no raw file leakage", () => {
       ],
       truncated: false,
       parseErrors: [],
-      readmeLength: 0,
+      readmeLength: 60,
     };
 
-    const prompt = buildStructuredPrompt(
+    const prompt = buildArchitecturePrompt(
       profile,
       signals,
       "Please optimize this architecture for low cost",
@@ -63,21 +70,28 @@ describe("Fix 7 — LLM prompt hygiene & no raw file leakage", () => {
     // 1. Must include structured summary
     assert.ok(prompt.includes(profile.summary), "Must include structured profile summary");
 
-    // 2. Must include sdkEvidence
+    // 2. Must include repository structure (file paths only)
+    assert.ok(prompt.includes("src/main.py"), "Must include key file paths for repo structure");
+    assert.ok(prompt.includes("requirements.txt"), "Must include manifest path in repo structure");
+
+    // 3. Must include README excerpt
+    assert.ok(prompt.includes("User App — a FastAPI service"), "Must include README excerpt");
+
+    // 4. Must include sdkEvidence
     assert.ok(prompt.includes("boto3.client('s3')"), "Must include extracted sdkEvidence match");
     assert.ok(prompt.includes("[S3] src/main.py:2"), "Must include sdkEvidence location metadata");
 
-    // 3. Must include user description
+    // 5. Must include user description
     assert.ok(prompt.includes("Please optimize this architecture for low cost"), "Must include user description");
 
-    // 4. Must NOT leak raw file content dump
+    // 6. Must NOT leak raw file content dump
     assert.ok(!prompt.includes(rawFileSecret), "Must NOT leak raw file contents into prompt");
     assert.ok(!prompt.includes("=== src/main.py ==="), "Must NOT contain raw file section dividers");
     assert.ok(!prompt.includes("=== requirements.txt ==="), "Must NOT dump raw requirements.txt");
   });
 
   it("handles description-only path cleanly without file placeholders", () => {
-    const prompt = buildStructuredPrompt(
+    const prompt = buildArchitecturePrompt(
       null,
       null,
       "Real-time event streaming pipeline using Kafka and Spark",

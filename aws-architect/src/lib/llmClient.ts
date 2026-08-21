@@ -1,11 +1,16 @@
 /**
- * llmClient.ts  —  LLM provider factory + structured inference call
+ * llmClient.ts  —  LLM provider factory + structured repository understanding
  *
  * Decision 18: Primary = DeepSeek deepseek-v4-flash; Gemini Flash / Groq fallbacks.
  * Decision 16: generateObject + zod schema = provider-agnostic structured extraction.
  * Decision 21: temperature 0, ≤3 retries.
  * Decision 5:  Any error → return null (caller falls back to rules baseline).
- * Decision 4:  LLM outputs ServicePlan only — never diagram XML or prices.
+ *
+ * The LLM's ONLY job is to build the ArchitectureModel — a structured
+ * understanding of the whole repository as a system (components, technologies,
+ * databases, APIs, external services, build config, runtime relationships).
+ * It does NOT choose AWS services. AWS service selection happens later,
+ * deterministically, in architecture.ts::mapArchitectureModelToServicePlan().
  *
  * Provider chain (first configured key wins):
  *   1. DEEPSEEK_API_KEY  → deepseek-v4-flash  (@ai-sdk/deepseek)
@@ -17,40 +22,17 @@ import { generateObject } from "ai";
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createGroq } from "@ai-sdk/groq";
-import { z } from "zod";
 
-import {
-  ServicePlanSchema,
-  SERVICE_IDS,
-  PATTERN_IDS,
-  CONFIDENCE_TIERS,
-  GROUNDING_VALUES,
-} from "./schema.ts";
-import type { ServicePlan, Grounding, ConfidenceTier } from "./schema.ts";
+import { PATTERN_IDS } from "./schema.ts";
+import type { Grounding } from "./schema.ts";
 import type { RepoSignals } from "./repoFetcher.ts";
 import type { ProjectProfile } from "./repoAnalyzer.ts";
-
-// ---------------------------------------------------------------------------
-// LLM output schema for generateObject
-//
-// Mirrors ServicePlanSchema shape WITHOUT the .refine() guards — those are our
-// explicit gate (ServicePlanSchema.safeParse) run after the call. This avoids
-// the LLM burning retries on catalog violations when the gate will catch them.
-// ---------------------------------------------------------------------------
-const LlmOutputSchema = z.object({
-  pattern: z.enum(PATTERN_IDS),
-  slots: z.record(
-    z.string(),
-    z.object({
-      serviceId: z.string(),
-      confidence: z.enum(CONFIDENCE_TIERS),
-      evidence: z.string().max(200),
-    })
-  ),
-  customEdges: z
-    .array(z.object({ from: z.string(), to: z.string(), label: z.string().max(80).optional() }))
-    .default([]),
-});
+import {
+  ArchitectureModelSchema,
+  COMPONENT_TYPES,
+  validateArchitectureModel,
+} from "./architecture.ts";
+import type { ArchitectureModel } from "./architecture.ts";
 
 // ---------------------------------------------------------------------------
 // Provider selection
@@ -104,41 +86,38 @@ export function llmConfigured(): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Prompt builder
+// Prompt builders
 // ---------------------------------------------------------------------------
 
 function buildSystemPrompt(): string {
-  return `You are an AWS architecture analyst. A project has already been analyzed and its technologies extracted.
-Your ONLY job is to determine which AWS services are needed to deploy it, based on the detected technologies.
+  return `You are a software architecture analyst. You are given structured evidence extracted from a software repository (or a project description). Build a SINGLE structured model of the ENTIRE application as a system — how its parts fit and interact — not a list of isolated files.
 
-Valid serviceIds (use ONLY these exact strings):
-${SERVICE_IDS.join(", ")}
-
-Valid patterns:
-${PATTERN_IDS.join(", ")}
+The application model must capture:
+- appType: the deployment pattern that best fits the whole app. Valid values: ${PATTERN_IDS.join(", ")}.
+- appName: short repo/project name.
+- description: 1-2 sentence summary of what the application does.
+- components: the application's meaningful parts. Each component has: id (short unique slug, e.g. "web", "api", "db", "worker"), name, type, technology (the ACTUAL tech: e.g. "Next.js", "Express", "PostgreSQL", "Redis"), and optional details. Component types: ${COMPONENT_TYPES.join(", ")}.
+- languages, frameworks, databases, apis (endpoints / third-party APIs used), externalServices (non-AWS SaaS such as Stripe, Auth0, Twilio, SendGrid), dependencies, and buildConfig (Docker, CI/CD, serverless.yml, terraform, etc.).
+- relationships: runtime connections between components: { from: <component id>, to: <component id>, type: "calls" | "reads" | "writes" | "triggers" | "subscribes" | "sends" | "receives" }.
 
 Rules:
-- Map each detected technology to the AWS service that would host/replace it in production.
-- ONLY include services with a direct mapping to a detected technology listed in the analysis.
-- Do NOT add services that have no evidence in the detected technologies.
-- Use slot names that match the pattern (e.g. "compute", "database", "storage", "api", "queue", "cdn", "monitoring").
-- Confidence "high" = explicit SDK/service reference or exact AWS service detected;
-  "medium" = clearly needed given the tech stack; "low" = reasonable inference.
-- Evidence field: cite the specific file and dependency that justifies this service.
-- Maximum 12 distinct services total.
-- Never include services not in the valid serviceIds list.`;
+- The model describes the APPLICATION, NOT AWS. Never name AWS services inside components or technologies (use "PostgreSQL", never "RDS"; use the actual library or "object storage", never "S3").
+- Every component and relationship must be grounded in the evidence provided. Do NOT invent parts that the evidence does not support.
+- External SaaS (hosted by a third party, not self-hosted) belong in externalServices; only add an "external_service" component if the app talks to it at runtime.
+- Record a relationship for every real interaction you can justify (frontend → API, API → database, worker → queue, compute → storage).`;
 }
 
 /**
- * Builds a structured prompt using the ProjectProfile as the primary context (Fix 7).
- * The LLM prompt contains ONLY:
- * 1. The structured summary string from repoAnalyzer (profile text).
- * 2. The sdkEvidence[] array from Fix 3.
- * 3. Pattern classification context.
- * 4. The user's input description (if present).
+ * Builds the evidence prompt for the architecture-model call (Fix 7).
+ * Contains ONLY:
+ *   1. The structured summary string from repoAnalyzer (profile text).
+ *   2. The repository file-path structure (paths, never raw contents).
+ *   3. A README excerpt.
+ *   4. The sdkEvidence[] array from Fix 3.
+ *   5. The user's input description (if present).
  * Explicitly excludes raw file dumps to prevent token overflow and hallucinations.
  */
-export function buildStructuredPrompt(
+export function buildArchitecturePrompt(
   profile: ProjectProfile | null,
   signals: RepoSignals | null,
   description: string,
@@ -150,7 +129,21 @@ export function buildStructuredPrompt(
     // 1. Structured analysis summary from repoAnalyzer
     parts.push(profile.summary);
 
-    // 2. sdkEvidence array (Fix 3)
+    // 2. Repository structure — file paths only
+    if (signals && signals.keyFiles.length > 0) {
+      parts.push("\nREPOSITORY STRUCTURE (file paths):");
+      for (const f of signals.keyFiles) {
+        parts.push(`  - ${f.path}`);
+      }
+    }
+
+    // 3. README excerpt
+    const readme = signals?.keyFiles.find((f) => f.kind === "readme")?.content;
+    if (readme) {
+      parts.push(`\nREADME EXCERPT:\n${readme.slice(0, 1500)}`);
+    }
+
+    // 4. sdkEvidence array (Fix 3)
     if (signals?.sdkEvidence && signals.sdkEvidence.length > 0) {
       parts.push("\nEXTRACTED SDK / CODE SIGNALS:");
       for (const ev of signals.sdkEvidence) {
@@ -162,13 +155,15 @@ export function buildStructuredPrompt(
       }
     }
 
-    // 3. User description (if present)
+    // 5. User description (if present)
     if (description) {
       parts.push(`\nADDITIONAL USER CONTEXT:\n${description}`);
     }
   } else {
     // Description path — no profile available
-    parts.push("Analyze the following project description and infer the AWS architecture needed.");
+    parts.push(
+      "Analyze the following project description and build the architecture model of the described application as a system."
+    );
     if (description) {
       parts.push(`\nProject description: ${description}`);
     }
@@ -178,87 +173,29 @@ export function buildStructuredPrompt(
 }
 
 // ---------------------------------------------------------------------------
-// Slot validation & filtering (Fix 1)
-// ---------------------------------------------------------------------------
-
-const CONFIDENCE_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
-
-/**
- * Validates each slot independently against the service catalog allowlist,
- * drops invalid entries with warnings, and caps to top 12 by confidence.
- * Returns null if zero valid services remain.
- */
-export function filterAndValidateLlmSlots(
-  slots: Record<string, { serviceId: string; confidence: ConfidenceTier; evidence: string }>
-): Record<string, { serviceId: string; confidence: ConfidenceTier; evidence: string }> | null {
-  const allowlist = new Set<string>(SERVICE_IDS as readonly string[]);
-  const validSlots: Record<string, { serviceId: string; confidence: ConfidenceTier; evidence: string }> = {};
-
-  const entries = Object.entries(slots).map(([slotName, slot], idx) => ({
-    slotName,
-    slot,
-    originalIdx: idx,
-  }));
-
-  for (const { slotName, slot } of entries) {
-    if (!allowlist.has(slot.serviceId)) {
-      console.warn(
-        `[llmClient] Dropped invalid service "${slot.serviceId}" from LLM result (slot: ${slotName}, reason: not in catalog allowlist)`
-      );
-      continue;
-    }
-    validSlots[slotName] = slot;
-  }
-
-  if (Object.keys(validSlots).length === 0) {
-    console.warn("[llmClient] LLM returned zero valid services after filtering — falling back to rules");
-    return null;
-  }
-
-  // If > 12 unique services, keep the 12 highest-confidence entries
-  const uniqueServices = new Set(Object.values(validSlots).map((s) => s.serviceId));
-  if (uniqueServices.size > 12) {
-    const sorted = Object.entries(validSlots).sort(([, a], [, b]) => {
-      const ca = CONFIDENCE_RANK[a.confidence] ?? 2;
-      const cb = CONFIDENCE_RANK[b.confidence] ?? 2;
-      return ca - cb;
-    });
-    const keptServices = new Set<string>();
-    const keptSlots: Record<string, { serviceId: string; confidence: ConfidenceTier; evidence: string }> = {};
-    for (const [slotName, slot] of sorted) {
-      if (keptServices.size >= 12 && !keptServices.has(slot.serviceId)) continue;
-      keptServices.add(slot.serviceId);
-      keptSlots[slotName] = slot;
-    }
-    return keptSlots;
-  }
-
-  return validSlots;
-}
-
-// ---------------------------------------------------------------------------
 // Main call
 // ---------------------------------------------------------------------------
 
 /**
- * Calls the configured LLM provider with the evidence, returning a validated
- * ServicePlan or null on any failure (caller uses rules baseline).
+ * Calls the configured LLM provider to produce an ArchitectureModel.
+ * Returns a validated, normalized model or null on any failure
+ * (caller falls back to the rules baseline).
  *
- * Decision 5 / 16: gate = ServicePlanSchema.safeParse; failure → null.
+ * Decision 5 / 16: gate = ArchitectureModelSchema.safeParse; failure → null.
  * Decision 21: temperature 0, maxRetries 3.
  */
-export async function callLlm(opts: {
+export async function analyzeArchitecture(opts: {
   signals: RepoSignals | null;
   description: string;
   inputKind: "github_url" | "description";
   grounding: Grounding;
   /** Structured project profile from repoAnalyzer — used to build a pre-analyzed prompt */
   profile?: ProjectProfile | null;
-}): Promise<ServicePlan | null> {
+}): Promise<ArchitectureModel | null> {
   const provider = resolveProvider();
   if (!provider) return null;
 
-  const userPrompt = buildStructuredPrompt(
+  const prompt = buildArchitecturePrompt(
     opts.profile ?? null,
     opts.signals,
     opts.description,
@@ -268,45 +205,17 @@ export async function callLlm(opts: {
   try {
     const { object: raw } = await generateObject({
       model: provider.getModel() as Parameters<typeof generateObject>[0]["model"],
-      schema: LlmOutputSchema,
+      schema: ArchitectureModelSchema,
       system: buildSystemPrompt(),
-      prompt: userPrompt,
+      prompt,
       temperature: 0,
       maxRetries: 3,
     });
 
-    // ── Per-entry validation (Fix 1) ─────────────────────────────────────
-    const validSlots = filterAndValidateLlmSlots(raw.slots);
-    if (!validSlots) {
-      return null;
-    }
-
-    const candidate = {
-      inputKind: opts.inputKind,
-      pattern: raw.pattern,
-      slots: validSlots,
-      customEdges: raw.customEdges,
-      metadata: {
-        grounding: opts.grounding,
-        truncated: opts.signals?.truncated ?? false,
-        parseErrors: opts.signals?.parseErrors ?? [],
-      },
-    };
-
-    // Final validation (should pass after per-entry filtering, but defense-in-depth)
-    const gateResult = ServicePlanSchema.safeParse(candidate);
-    if (!gateResult.success) {
-      console.warn(
-        "[llmClient] LLM output failed schema gate after per-entry filtering:",
-        gateResult.error.issues.map((i) => i.message).join("; ")
-      );
-      return null;
-    }
-
-    return gateResult.data;
+    return validateArchitectureModel(raw);
   } catch (err) {
     // Any network error, provider error, timeout, malformed response → null
-    console.warn("[llmClient] LLM call failed:", (err as Error).message ?? String(err));
+    console.warn("[llmClient] Architecture model call failed:", (err as Error).message ?? String(err));
     return null;
   }
 }

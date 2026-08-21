@@ -13,18 +13,23 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AWS Architecture Estimator",
-  description: "Infer AWS architecture and estimate monthly costs from a GitHub repository or project description.",
+  title: "AWS Architecture Estimator & Cost Modeler",
+  description: "AI-powered cloud architecture inference, interactive draw.io diagrams, and realistic AWS cost estimates from any GitHub repository or project description.",
 };
 
-
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
     <html
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col bg-background">{children}</body>
+      <body className="min-h-full flex flex-col bg-background bg-ambient-glow text-foreground selection:bg-accent/25 selection:text-accent-light">
+        {children}
+      </body>
     </html>
   );
 }
