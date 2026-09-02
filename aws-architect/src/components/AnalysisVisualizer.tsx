@@ -2,15 +2,9 @@
 
 import React, { useEffect, useState, useMemo } from "react";
 import {
-  Cpu,
-  Database,
-  Cloud,
-  Network,
-  Shield,
   Layers,
   CheckCircle2,
   Sparkles,
-  Zap,
 } from "lucide-react";
 
 export interface AnalysisVisualizerProps {
@@ -133,15 +127,6 @@ const DESCRIPTION_STAGES: StageDefinition[] = [
     detail: "Your customized AWS architecture is ready for exploration",
     durationMs: 1000,
   },
-];
-
-const ORBITAL_NODES = [
-  { label: "Compute", icon: Cpu, angle: 0, color: "from-violet-400 to-indigo-500", text: "Lambda / ECS" },
-  { label: "Database", icon: Database, angle: 60, color: "from-indigo-400 to-purple-500", text: "Aurora / RDS" },
-  { label: "Storage", icon: Cloud, angle: 120, color: "from-purple-400 to-pink-500", text: "S3 / CDN" },
-  { label: "Network", icon: Network, angle: 180, color: "from-sky-400 to-indigo-500", text: "ALB / VPC" },
-  { label: "Security", icon: Shield, angle: 240, color: "from-emerald-400 to-teal-500", text: "IAM / Cognito" },
-  { label: "Messaging", icon: Zap, angle: 300, color: "from-amber-400 to-orange-500", text: "SQS / Events" },
 ];
 
 export function AnalysisVisualizer({
@@ -276,38 +261,6 @@ export function AnalysisVisualizer({
           />
         </svg>
 
-        {/* Orbiting Satellite Nodes (Planetary Floating Badges) */}
-        <div className="animate-orbit-satellite pointer-events-none absolute inset-0 h-full w-full">
-          {ORBITAL_NODES.map((node) => {
-            const Icon = node.icon;
-            // Radius ~38% on container
-            const rad = (node.angle * Math.PI) / 180;
-            const x = 50 + 38 * Math.cos(rad);
-            const y = 50 + 38 * Math.sin(rad);
-
-            return (
-              <div
-                key={node.label}
-                className="absolute -translate-x-1/2 -translate-y-1/2 transition-transform"
-                style={{
-                  left: `${x}%`,
-                  top: `${y}%`,
-                }}
-              >
-                <div className="flex items-center gap-1.5 rounded-full border border-white/10 bg-surface/90 px-2.5 py-1 shadow-lg backdrop-blur-md">
-                  <div
-                    className={`flex h-4 w-4 items-center justify-center rounded-full bg-gradient-to-r ${node.color} text-on-accent`}
-                  >
-                    <Icon className="h-2.5 w-2.5" />
-                  </div>
-                  <span className="text-[10px] font-medium text-foreground/80">
-                    {node.label}
-                  </span>
-                </div>
-              </div>
-            );
-          })}
-        </div>
 
         {/* Central Glowing Breathing Orb Core */}
         <div className="animate-breathe-core relative z-10 flex h-28 w-28 flex-col items-center justify-center rounded-full border border-accent/40 bg-gradient-to-br from-surface-2 via-surface to-surface-3 shadow-2xl backdrop-blur-xl sm:h-36 sm:w-36">
