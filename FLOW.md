@@ -139,12 +139,39 @@ evidence (RepoSignals | description)
 
 ## Stage 4 — Diagram
 
-**Code:** `services/diagram.ts` — pure function `ServicePlan → mxGraph XML`
+**Code:** `src/lib/diagram.ts` — pure function `generateDiagramXml(plan, sdkEvidence?) → mxGraph XML`
 
-- Deterministic grid: category → row, index → column; nodes + pattern edges (+ flagged custom edges read-only).
-- Labels: XML-escaped, truncated ~200 chars, control chars stripped.
-- No diagramming library; icons `shape=mxgraph.aws4.*` (fallback `shape=image`+SVG where unverified).
-- Same plan in → byte-identical XML out (golden-file tested).
+Transforms a validated `ServicePlan` into standard, production-ready `.drawio` XML with collision-free layout, Well-Architected color-coded containers, orthogonal edge routing, and mathematical viewport centering.
+
+```
+ServicePlan (components, awsMappings, relationships)
+   │
+   ├─► Step 4.1: Deduplication & Normalization
+   │      - Duplicate generic mappings in same tier (e.g. multi-ALB/SecretsManager)
+   │        consolidated into master nodes; relationships re-routed.
+   │      - normalizeServiceName: maps IDs to official names ("Amazon ECS", "AWS Secrets Manager").
+   │      - wrapServiceName: wraps labels >16 chars into balanced lines (width ≤100px).
+   │
+   ├─► Step 4.2: Tier Classification & Layout (computeLayout)
+   │      - Partitions services into 5 Well-Architected tiers:
+   │        edge (banner) | vpc_public (DMZ) | vpc_compute (private) | vpc_data (isolated) | external.
+   │      - Dynamic bucketHeight(rows) computes container dimensions wrapping children with padding.
+   │      - Subnet columns: 4 for VPC subnets, 6 for edge, 2 for external.
+   │
+   ├─► Step 4.3: Mathematical Centering
+   │      - Computes tight bounding box (minX, minY, maxX, maxY) of all containers & nodes.
+   │      - Sets canvas size with uniform padding (CANVAS_PAD_X=64, CANVAS_PAD_Y=56).
+   │      - Translates every container and node by exact offset (shiftX, shiftY) → 0px margin differential.
+   │
+   ├─► Step 4.4: Orthogonal Edge Routing (routeEdges)
+   │      - Stepped gutter waypoints: midY = (srcBot + dstTop) / 2 prevents node pass-throughs.
+   │      - Horizontal branching bus: cleanly splits compute-to-data connections across tier gutters.
+   │      - Solid edges (#232F3E, 1.5px) for explicit evidence; dashed (#6B7280, 8 8) for inferred topology.
+   │      - Staggered label offsets with opaque white badges (labelBackgroundColor=#FFFFFF) prevent strikethrough.
+   │
+   ▼
+Emits: valid .drawio mxGraph XML (<mxfile>, <diagram>, <mxGraphModel>, containers, nodes, edges)
+```
 
 ---
 
@@ -196,17 +223,21 @@ Error paths:
 
 ## Stage 7 — Client render (in browser)
 
-**Code:** `client/components/*`, `client/api.ts`
+**Code:** `src/components/*`, `src/app/page.tsx`
 
 | UI element | Behavior |
 |------------|----------|
-| Results tabs | Diagram tab: draw.io iframe → postMessage `{action:'load', xml}`. Cost tab: rows table. |
-| User slider (100→1M) | **Pure client math** from cached `cost_rows` formulas — no network per tick. |
-| Region picker | Triggers `POST /api/prices` (Stage 5); spinner + disabled slider while loading. |
-| Download | `.drawio` blob = `diagram_xml` string; no server round-trip. |
-| Grounding banner | If `grounding='description'`: "Inferred from your description only — not verified against code." |
-| Assumptions disclosure | Expandable list of every cost default + its `source` (flaw 6). |
-| Insufficient-signal UI | Prompt + button switching input to freeform, pre-filled. |
+| **Architecture Workspace** | Embedded draw.io iframe (`embed.diagrams.net/?embed=1&ui=atlas&spin=1&modified=unsavedChanges&proto=json&fit=1`). Handshake: `init` event triggers `{action:'load', xml, autosize:1}` followed by `{action:'center'}`. Re-centers automatically on window resize. |
+| **Workspace Sizing** | Responsive container bounded at `max-w-6xl xl:max-w-7xl` with `mx-auto` on desktop to prevent edge-to-edge stretching, with large vertical viewport (`h-[74vh] min-h-[580px] max-h-[860px]`). |
+| **Fullscreen Mode** | Toolbar toggle switches the diagram workspace into an immersive `100vw × 100vh` modal canvas. |
+| **Download .drawio** | Client-side Blob download of `diagram_xml` string; opens directly in Diagrams.net / draw.io desktop without server round-trip. |
+| **External Editor** | Direct link button to `https://app.diagrams.net` for advanced external editing. |
+| **Loading Visualizer** | Calm central breathing core orb with `Layers` icon, ambient glow, concentric ripple rings, orbital SVG dashes, and live progress percentage counter. |
+| **User slider (100→1M)** | **Pure client math** from cached `cost_rows` formulas — no network per tick. |
+| **Region picker** | Triggers `POST /api/prices` (Stage 5); spinner + disabled slider while loading. |
+| **Grounding banner** | If `grounding='description'`: *"Inferred from your description only — not verified against code."* |
+| **Assumptions disclosure** | Expandable list of every cost default + its `source` (flaw 6). |
+| **Insufficient-signal UI** | Prompt + button switching input to freeform, pre-filled. |
 
 ## Side flows — Auth & History
 

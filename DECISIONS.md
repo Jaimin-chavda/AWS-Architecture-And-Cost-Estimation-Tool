@@ -23,6 +23,18 @@ Every decision made for this project, with the "why". Source of truth: `.plannin
 | 6 | **Frontend state = one `useAnalysis()` hook (`useState`/`useMemo`), no state library** | Results are ephemeral component state; a global store is added complexity for nothing. | Locked |
 | 7 | **Server-side-only secrets, github.com host allowlist, timeouts, content caps, rate limiting** | SSRF and secret leaks are security boundaries — never simplified away. | Locked |
 
+## Diagram & Visualization
+
+| # | Decision | Why | Status |
+|---|----------|-----|--------|
+| 8 | **Deterministic tier hierarchy & container sizing** | Resources map into Well-Architected security zones (Edge, Public DMZ, Compute, Isolated Data, External). Containers wrap their children with calculated padding; subnet titles sit top-left to avoid crossing vertical edges. | Locked |
+| 9 | **Full-label bounding boxes (`CELL_W=116px`, `CELL_H=80px`, `GAP=32px`) & multi-line wrapping (`wrapServiceName`)** | AWS service names up to 32 chars (`Application Load Balancer (ALB)`) collide if cells only accommodate the 56px icon. Word-wrapping at ≤16 chars/line keeps text width within ~100px, guaranteeing ≥40px horizontal and ≥28px vertical clearance. | Locked |
+| 10 | **Redundant service deduplication with semantic subtitle retention** | Multiple generic mappings to the same service in a tier (e.g. multi-ALB or Secrets Manager) clutter the diagram. Consolidating into a single master node with re-routed edges while retaining specific role subtitles (e.g. `(Static Assets)`) produces publication-grade diagrams. | Locked |
+| 11 | **Orthogonal gutter waypoints & opaque edge label badges (`routeEdges`)** | Direct lines cut across intermediate nodes. Routing edges through the midpoint gutter between tiers (`midY = (srcBot + dstTop) / 2`) creates a clean branching bus. Staggering edge labels with opaque white badges (`#FFFFFF`, padding, border) eliminates wire strikethrough. | Locked |
+| 12 | **Solid vs dashed edge semantics** | Explicitly confirmed connections (from manifests, compose, SDK calls) render as solid lines (`#232F3E`, 1.5px). Pattern-inferred topology hints render as dashed lines (`#6B7280`, 8 8, 1px) with tooltips, clearly distinguishing verified code connections from heuristics. | Locked |
+| 13 | **Mathematical diagram bounding box centering** | Prevents random diagram positioning and huge empty margins. Computes content bounding box `(minX, minY, maxX, maxY)` and translates all containers and nodes by exact offset `(shiftX, shiftY)` with uniform padding (`64px` X, `56px` Y), achieving 0px margin differential. | Locked |
+| 14 | **Responsive bounded workspace with viewport fit/center and fullscreen mode** | Stretching draw.io edge-to-edge on ultra-wide screens causes eye strain. Bounding to `max-w-7xl` with `mx-auto` provides comfortable margins while maximizing height (`h-[74vh]`). PostMessage `load` with `autosize: 1` and `{ action: 'center' }` on load and window resize ensures immediate centering. A fullscreen toggle provides an immersive workbench. | Locked |
+
 ## Inference & LLM
 
 | # | Decision | Why | Status |
@@ -109,4 +121,16 @@ Every decision made for this project, with the "why". Source of truth: `.plannin
 | I-13 | **`fetchRepoSignals` uses `raw.githubusercontent.com` for file content, GitHub Contents API as fallback** | The raw URL returns plain text; the Contents API returns base64-encoded JSON which requires decoding. Raw is faster and cleaner. Redirect following disabled (SSRF guard). |
 | I-14 | **`capConfidence` comparison: `ci >= mi ? c : max`** | `CONFIDENCE_ORDER = ["high","medium","low"]`; lower index = better. To cap at `max`, return `c` only if `c` is already worse-or-equal (`ci >= mi`); otherwise clamp to `max`. (Fixed off-by-one bug caught by tests.) |
 
-*Last updated: 2026-08-18 — Stage 2 complete. 41/41 tests pass, TypeScript clean.*
+### Stage 3 — Diagram generation, layout engine & workspace UX (BuildOrder step 3) · 2026-08-30
+
+| # | Decision | Why |
+|---|----------|-----|
+| I-15 | **`src/lib/diagram.ts` dynamically nests subnets inside VPC and anchors external column to VPC right extent** | Replaces rigid fixed-coordinate templates with dynamic packing (`computeLayout`) that auto-sizes containers around placed children. |
+| I-16 | **Orthogonal waypoint synthesis through mid-tier gutters (`midY = (srcBot + dstTop) / 2`)** | Guarantees connection wires do not pass through intermediate service nodes; creates a clean horizontal branching bus for compute-to-data edges. |
+| I-17 | **Dynamic cell allocation (`CELL_W = 116px`, `CELL_H = 80px`, `GAP = 32px`) with multi-line label wrapping (`wrapServiceName`)** | Resolves label collisions between adjacent nodes by guaranteeing ≥40px horizontal clearance and ≥28px vertical clearance without over-inflating canvas size. |
+| I-18 | **Mathematical diagram centering via bounding box translation (`shiftX`, `shiftY`)** | Eliminates asymmetric canvas whitespace; centers the complete architecture inside the canvas with uniform margins (0px left/right and top/bottom diff). |
+| I-19 | **Draw.io postMessage protocol with `autosize: 1` and `{ action: "center" }` on init and resize** | Ensures draw.io immediately fits and centers the diagram within the user's viewport without manual panning or unreadable down-scaling. |
+| I-20 | **Responsive workspace bounded at `max-w-7xl` with fullscreen workbench toggle** | Prevents wide desktop monitors from stretching the editor edge-to-edge; maintains large vertical workspace (`h-[74vh]`) and offers a dedicated 100vw × 100vh workbench. |
+| I-21 | **Focused loading visualizer removing orbiting badges while preserving breathing core orb** | Minimizes visual distraction during inference while maintaining clear progress feedback through central glow, rings, icon, and numeric percentage. |
+
+*Last updated: 2026-09-03 — Module A feature-complete end-to-end. 104/104 tests pass, TypeScript clean.*
