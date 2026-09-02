@@ -599,11 +599,9 @@ function emptySignals(repoName: string, _reason: string): RepoSignals {
  */
 export function isInsufficientSignal(signals: RepoSignals): boolean {
   const hasManifestOrCI = signals.keyFiles.some(
-    (f) => (f.kind === "manifest" || f.kind === "container_ci") && f.content !== null
+    (f) => f.kind === "manifest" || f.kind === "container_ci"
   );
-  const hasReadme = signals.readmeLength >= 30;
-  const hasAnyKeyFile = signals.keyFiles.some((f) => f.content !== null);
-  return !hasManifestOrCI && !hasReadme && !hasAnyKeyFile;
+  return !hasManifestOrCI && signals.readmeLength < 100;
 }
 
 import type { Grounding } from "./schema.ts";

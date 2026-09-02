@@ -61,7 +61,7 @@ export const PATTERN_IDS = [
 export type PatternId = (typeof PATTERN_IDS)[number];
 
 export const ArchitectureModelSchema = z.object({
-  appType: z.string().default("full-stack-web"),
+  appType: z.enum(PATTERN_IDS).default("full-stack-web"),
   appName: z.string().max(120).default("Cloud Application"),
   description: z.string().max(1000).default(""),
   components: z.array(ArchitectureComponentSchema).min(1),

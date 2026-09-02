@@ -18,6 +18,7 @@ import type {
   AwsServiceMapping,
 } from "./schema.ts";
 import type { ProjectProfile } from "./repoAnalyzer.ts";
+import type { PatternId } from "./architecture.ts";
 
 // ---------------------------------------------------------------------------
 // RuleInput — signals available to the rule engine
@@ -185,7 +186,7 @@ function detectServices(
         ? "corroborated by database connection configuration"
         : "corroborated by relational ORM configuration";
       add("RDS", "medium", `${weakLabel} dependency detected — ${corroboration} → RDS`);
-    } else {
+    } else if (!hasDocker) {
       add("RDS", "low", `${weakLabel} reference detected without connection configuration — suggested RDS`);
     }
   }
@@ -198,7 +199,7 @@ function detectServices(
   } else if (redisEv) {
     if (hasRedisConnectionString) {
       add("ElastiCache", "medium", `Redis dependency detected — corroborated by connection config → ElastiCache Redis`);
-    } else {
+    } else if (!hasDocker) {
       add("ElastiCache", "low", "Redis reference detected without connection config — suggested ElastiCache");
     }
   }
@@ -270,6 +271,32 @@ function detectServices(
   if (hasAny(combined, ["rekognition"])) add("Rekognition", "high", "Rekognition reference in repository files");
   if (hasAny(combined, ["comprehend"])) add("Comprehend", "high", "Comprehend reference in repository files");
 
+  // --- Static site / frontend hosting ---
+  const isStaticSite =
+    hasAny(combined, ["static site", "static website", "gatsby", "hugo", "jekyll", "astro"]) ||
+    fileHas(/vercel\.json|netlify\.toml|amplify\.yml/i) ||
+    (hasAny(combined, ["vite", "static"]) && !hasAny(combined, ["express", "fastify", "koa", "nestjs", "django", "flask", "spring", "docker", "serverless"]));
+
+  if (isStaticSite) {
+    if (!detected.some((s) => s.serviceId === "S3")) {
+      add("S3", "medium", "Static site generator or hosting config present → S3 for static hosting");
+    }
+    if (!detected.some((s) => s.serviceId === "CloudFront")) {
+      add("CloudFront", "medium", "Static site generator or hosting config present → CloudFront CDN in front of S3");
+    }
+  }
+
+  // --- Serverless Framework / SAM files ---
+  const hasServerlessFile = fileHas(/serverless\.(yml|yaml)/i) || fileHas(/(template|sam)\.(yml|yaml)/i);
+  if (hasServerlessFile) {
+    if (!detected.some((s) => s.serviceId === "Lambda")) {
+      add("Lambda", "high", "Serverless framework / SAM template in repository files");
+    }
+    if (!detected.some((s) => s.serviceId === "APIGateway")) {
+      add("APIGateway", "high", "Serverless API entry point");
+    }
+  }
+
   // --- Discovered components from repoAnalyzer (structural evidence) ---
   if (profile?.discoveredComponents?.length) {
     for (const dc of profile.discoveredComponents) {
@@ -323,15 +350,73 @@ function detectServices(
 }
 
 // ---------------------------------------------------------------------------
+// Pattern classifier
+// ---------------------------------------------------------------------------
+
+export function classifyPattern(services: DetectedService[]): PatternId {
+  if (!services || services.length === 0) return "generic";
+
+  const has = (id: ServiceId) => services.some((s) => s.serviceId === id);
+  const hasAnyId = (ids: ServiceId[]) => services.some((s) => ids.includes(s.serviceId));
+  const hasEvidence = (re: RegExp) => services.some((s) => re.test(s.evidence));
+
+  // 1. ML Pipeline (highest specificity — SageMaker, Rekognition, Comprehend)
+  if (hasAnyId(["SageMaker", "Rekognition", "Comprehend"]) || hasEvidence(/sagemaker|machine learning|ml model/i)) {
+    return "ml-pipeline";
+  }
+
+  // 2. Data Pipeline (ETL / Warehouse / Kinesis + S3)
+  if (
+    has("Redshift") ||
+    (has("Kinesis") && has("S3")) ||
+    hasEvidence(/data pipeline|etl|data warehouse|glue|athena/i)
+  ) {
+    return "data-pipeline";
+  }
+
+  // 3. Containerised App (ECS, Fargate, EKS, ECR)
+  const hasContainers = hasAnyId(["ECS", "Fargate", "EKS", "ECR"]) || hasEvidence(/docker|container|fargate|ecs|eks/i);
+  if (hasContainers) {
+    return "containerised-app";
+  }
+
+  // 4. Serverless API (SAM / serverless.yml / Lambda without container orchestrators)
+  if (has("Lambda") || hasEvidence(/serverless|sam|template\.yaml|aws-lambda/i)) {
+    return "serverless-api";
+  }
+
+  // 5. Event-Driven (Messaging / Queues without compute)
+  if (hasAnyId(["SQS", "SNS", "EventBridge", "Kinesis"])) {
+    return "event-driven";
+  }
+
+  // 6. Static Site (S3 + CloudFront / CDN without compute or databases)
+  const hasCompute = hasAnyId(["Lambda", "ECS", "EC2", "Fargate", "EKS", "Batch", "Lightsail", "SageMaker"]);
+  const hasDatabase = hasAnyId(["RDS", "Aurora", "DynamoDB", "Redshift", "DocumentDB"]);
+  const hasMessaging = hasAnyId(["SQS", "SNS", "EventBridge", "Kinesis"]);
+
+  if (!hasCompute && !hasDatabase && !hasMessaging) {
+    if ((has("S3") && has("CloudFront")) || hasEvidence(/static site|static asset|s3 for hosting|cloudfront cdn/i)) {
+      return "static-site";
+    }
+  }
+
+  return "generic";
+}
+
+// ---------------------------------------------------------------------------
 // Build ServicePlan from detected services (no pattern constraints)
 // ---------------------------------------------------------------------------
 
-function buildPlan(
+export function buildServicePlan(
   input: RuleInput,
   services: DetectedService[]
 ): ServicePlan {
+  // Cap at 12 distinct services
+  const cappedServices = services.slice(0, 12);
+
   // Convert detected services to DiscoveredComponent format
-  const components: DiscoveredComponent[] = services.map((s, i) => ({
+  const components: DiscoveredComponent[] = cappedServices.map((s, i) => ({
     id: `svc-${s.serviceId.toLowerCase()}`,
     type: serviceTypeFromId(s.serviceId),
     technology: s.serviceId,
@@ -361,7 +446,7 @@ function buildPlan(
   });
 
   // Build AWS mappings (1:1 with components)
-  const awsMappings: AwsServiceMapping[] = services.map((s) => ({
+  const awsMappings: AwsServiceMapping[] = cappedServices.map((s) => ({
     componentId: `svc-${s.serviceId.toLowerCase()}`,
     serviceId: s.serviceId,
     confidence: s.confidence,
@@ -375,7 +460,7 @@ function buildPlan(
     relationships,
     deploymentModel,
     awsMappings,
-    detectedPattern: "generic",
+    detectedPattern: classifyPattern(services),
     metadata: {
       grounding: input.grounding,
       truncated: input.truncated,
@@ -400,6 +485,8 @@ function buildPlan(
 
   return check.data;
 }
+
+const buildPlan = buildServicePlan;
 
 function serviceTypeFromId(serviceId: ServiceId): DiscoveredComponent["type"] {
   const map: Record<ServiceId, DiscoveredComponent["type"]> = {

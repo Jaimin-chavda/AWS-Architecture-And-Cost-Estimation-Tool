@@ -186,7 +186,7 @@ export function buildArchitecturePrompt(
       "\nEvery single tier MUST be an item in the 'components' array with a unique id."
     );
     if (description) {
-      parts.push(`\nProject description:\n${description}`);
+      parts.push(`\nProject description: ${description}`);
     }
   }
 
