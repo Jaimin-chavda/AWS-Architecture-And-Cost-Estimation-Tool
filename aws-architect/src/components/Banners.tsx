@@ -96,7 +96,6 @@ export function WarningsBanner({ warnings }: { warnings: string[] }) {
 
 export function AssumptionsDisclosure({ plan }: { plan: ServicePlan }) {
   const [open, setOpen] = useState(false);
-  const entries = Object.entries(plan.slots);
 
   return (
     <div className="mb-6 overflow-hidden rounded-2xl border border-border bg-surface/80 shadow-md backdrop-blur-md">
@@ -107,7 +106,7 @@ export function AssumptionsDisclosure({ plan }: { plan: ServicePlan }) {
       >
         <span className="flex items-center gap-2">
           <Info className="h-4 w-4 text-accent" />
-          Inference Rationale & Evidence ({entries.length} services)
+          Inference Rationale & Evidence ({plan.components.length} components, {plan.awsMappings.length} AWS services)
         </span>
         <ChevronDown
           className={`h-4 w-4 transition-transform duration-200 ${
@@ -118,26 +117,31 @@ export function AssumptionsDisclosure({ plan }: { plan: ServicePlan }) {
 
       {open && (
         <ul className="divide-y divide-border/60 border-t border-border bg-surface-2/30">
-          {entries.map(([slot, s]) => (
-            <li key={slot} className="flex flex-col gap-1 px-5 py-3 text-xs sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex items-center gap-2.5">
-                <span
-                  className={`inline-block rounded px-2 py-0.5 font-mono text-[10px] font-semibold uppercase ${
-                    s.confidence === "high"
-                      ? "bg-emerald-500/15 text-emerald-400"
-                      : s.confidence === "medium"
-                      ? "bg-sky-500/15 text-sky-400"
-                      : "bg-muted/20 text-muted"
-                  }`}
-                >
-                  {s.confidence}
-                </span>
-                <span className="font-bold text-foreground">{s.serviceId}</span>
-                <span className="font-mono text-muted">({slot})</span>
-              </div>
-              <p className="text-muted text-xs sm:text-right">{s.evidence}</p>
-            </li>
-          ))}
+          {plan.awsMappings.map((mapping, idx) => {
+            const component = plan.components.find((c) => c.id === mapping.componentId);
+            return (
+              <li key={`${mapping.componentId}-${mapping.serviceId}-${idx}`} className="flex flex-col gap-1 px-5 py-3 text-xs sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-center gap-2.5">
+                  <span
+                    className={`inline-block rounded px-2 py-0.5 font-mono text-[10px] font-semibold uppercase ${
+                      mapping.confidence === "high"
+                        ? "bg-emerald-500/15 text-emerald-400"
+                        : mapping.confidence === "medium"
+                        ? "bg-sky-500/15 text-sky-400"
+                        : "bg-muted/20 text-muted"
+                    }`}
+                  >
+                    {mapping.confidence}
+                  </span>
+                  <span className="font-bold text-foreground">{mapping.serviceId}</span>
+                  {component && (
+                    <span className="font-mono text-muted">({component.type})</span>
+                  )}
+                </div>
+                <p className="text-muted text-xs sm:text-right">{mapping.evidence}</p>
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>

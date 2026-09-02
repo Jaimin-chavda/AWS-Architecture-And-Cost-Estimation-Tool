@@ -1,11 +1,6 @@
 /**
  * llmClient.ts  —  LLM provider factory + structured repository understanding
  *
- * Decision 18: Primary = DeepSeek deepseek-v4-flash; Gemini Flash / Groq fallbacks.
- * Decision 16: generateObject + zod schema = provider-agnostic structured extraction.
- * Decision 21: temperature 0, ≤3 retries.
- * Decision 5:  Any error → return null (caller falls back to rules baseline).
- *
  * The LLM's ONLY job is to build the ArchitectureModel — a structured
  * understanding of the whole repository as a system (components, technologies,
  * databases, APIs, external services, build config, runtime relationships).
@@ -23,16 +18,15 @@ import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createGroq } from "@ai-sdk/groq";
 
-import { PATTERN_IDS } from "./schema.ts";
+import {
+  ArchitectureModelSchema,
+  validateArchitectureModel,
+} from "./architecture.ts";
+import { COMPONENT_TYPES } from "./schema.ts";
+import type { ArchitectureModel } from "./architecture.ts";
 import type { Grounding } from "./schema.ts";
 import type { RepoSignals } from "./repoFetcher.ts";
 import type { ProjectProfile } from "./repoAnalyzer.ts";
-import {
-  ArchitectureModelSchema,
-  COMPONENT_TYPES,
-  validateArchitectureModel,
-} from "./architecture.ts";
-import type { ArchitectureModel } from "./architecture.ts";
 
 // ---------------------------------------------------------------------------
 // Provider selection
@@ -41,7 +35,6 @@ import type { ArchitectureModel } from "./architecture.ts";
 interface ProviderConfig {
   name: string;
   model: string;
-  // Returns the model reference accepted by generateObject
   getModel: () => ReturnType<typeof createDeepSeek> extends (...args: unknown[]) => infer R ? R : never;
 }
 
@@ -58,8 +51,8 @@ function resolveProvider(): ProviderConfig | null {
     const client = createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY });
     return {
       name: "google",
-      model: "gemini-2.5-flash",
-      getModel: () => client("gemini-2.5-flash") as never,
+      model: "gemini-3.6-flash",
+      getModel: () => client("gemini-3.6-flash") as never,
     };
   }
   if (process.env.GROQ_API_KEY) {
@@ -73,10 +66,6 @@ function resolveProvider(): ProviderConfig | null {
   return null;
 }
 
-/**
- * Returns true if at least one LLM provider API key is configured.
- * Decision 5: if no key, the caller skips LLM silently.
- */
 export function llmConfigured(): boolean {
   return !!(
     process.env.DEEPSEEK_API_KEY ||
@@ -90,31 +79,37 @@ export function llmConfigured(): boolean {
 // ---------------------------------------------------------------------------
 
 function buildSystemPrompt(): string {
-  return `You are a software architecture analyst. You are given structured evidence extracted from a software repository (or a project description). Build a SINGLE structured model of the ENTIRE application as a system — how its parts fit and interact — not a list of isolated files.
+  return `You are a Senior Principal AWS Cloud Architect. You are given structured evidence extracted from a software repository or project description. Build a comprehensive, production-ready architectural model of the ENTIRE system for AWS deployment — how all tiers, services, and runtime parts connect together.
 
-The application model must capture:
-- appType: the deployment pattern that best fits the whole app. Valid values: ${PATTERN_IDS.join(", ")}.
-- appName: short repo/project name.
-- description: 1-2 sentence summary of what the application does.
-- components: the application's meaningful parts. Each component has: id (short unique slug, e.g. "web", "api", "db", "worker"), name, type, technology (the ACTUAL tech: e.g. "Next.js", "Express", "PostgreSQL", "Redis"), and optional details. Component types: ${COMPONENT_TYPES.join(", ")}.
-- languages, frameworks, databases, apis (endpoints / third-party APIs used), externalServices (non-AWS SaaS such as Stripe, Auth0, Twilio, SendGrid), dependencies, and buildConfig (Docker, CI/CD, serverless.yml, terraform, etc.).
-- relationships: runtime connections between components: { from: <component id>, to: <component id>, type: "calls" | "reads" | "writes" | "triggers" | "subscribes" | "sends" | "receives" }.
+A complete production architecture model must include all necessary layers:
+1. Client & Edge: End Users / Clients, DNS (Route 53), CDN (CloudFront), and Frontend Hosting (S3).
+2. Ingress & Security: Load Balancing (ALB), API Gateways, User Authentication / JWT (Cognito), and Secrets / Key Management (Secrets Manager).
+3. Compute Services: Containerized backends (ECS Fargate / EC2), and Serverless Workers / Functions (Lambda) for background processing, smart contract calls, or scheduled jobs.
+4. Data & Caching: Databases (DocumentDB for MongoDB, RDS/Aurora for SQL, DynamoDB for NoSQL), and in-memory caches (Redis / ElastiCache).
+5. Asynchronous Messaging: Message Queues (SQS) for job/transaction queues, Notification Topics (SNS), and Event Routers (EventBridge).
+6. Observability & IaC: Logging/Metrics (CloudWatch) and Infrastructure-as-Code (CloudFormation / CDK).
+7. External Services: Third-party integrations (e.g. MetaMask, Ethereum / Sepolia Testnet, Stripe, Auth0, external APIs).
 
-Rules:
-- The model describes the APPLICATION, NOT AWS. Never name AWS services inside components or technologies (use "PostgreSQL", never "RDS"; use the actual library or "object storage", never "S3").
-- Every component and relationship must be grounded in the evidence provided. Do NOT invent parts that the evidence does not support.
-- External SaaS (hosted by a third party, not self-hosted) belong in externalServices; only add an "external_service" component if the app talks to it at runtime.
-- Record a relationship for every real interaction you can justify (frontend → API, API → database, worker → queue, compute → storage).`;
+Output schema requirements:
+- appType: primary pattern (e.g. full-stack-web, containerised-app, serverless-api, event-driven, ml-pipeline, data-pipeline).
+- appName: clean project / system name (e.g. "Decentralized Voting System").
+- description: 1-2 sentence overview of the application.
+- components: array of ALL system components across frontend, backend, api, worker, database, cache, queue, object-storage, auth, proxy, external-service, messaging. Each component has { id, name, type, technology, details, evidence, confidence: "high" | "medium" | "low" }.
+- relationships: ALL runtime traffic connections between components: { from: <component id>, to: <component id>, type: "calls" | "reads" | "writes" | "triggers" | "sends" | "receives" | "subscribes" }.
+  Ensure edges flow logically: Users → Route 53 / CloudFront → S3 (Frontend) & ALB / API Gateway → Backend (ECS / Lambda) → Database / Cache / Secrets / SQS → SNS / CloudWatch.
+
+Do not limit the output to just 1 or 2 files. Provide the complete multi-tier architecture required for a realistic, enterprise-grade AWS deployment.`;
 }
 
 /**
- * Builds the evidence prompt for the architecture-model call (Fix 7).
+ * Builds the evidence prompt for the architecture-model call.
  * Contains ONLY:
  *   1. The structured summary string from repoAnalyzer (profile text).
  *   2. The repository file-path structure (paths, never raw contents).
  *   3. A README excerpt.
- *   4. The sdkEvidence[] array from Fix 3.
- *   5. The user's input description (if present).
+ *   4. The sdkEvidence[] array.
+ *   5. Discovered components from repoAnalyzer (CRITICAL - each is separate deployable unit).
+ *   6. The user's input description (if present).
  * Explicitly excludes raw file dumps to prevent token overflow and hallucinations.
  */
 export function buildArchitecturePrompt(
@@ -140,10 +135,10 @@ export function buildArchitecturePrompt(
     // 3. README excerpt
     const readme = signals?.keyFiles.find((f) => f.kind === "readme")?.content;
     if (readme) {
-      parts.push(`\nREADME EXCERPT:\n${readme.slice(0, 1500)}`);
+      parts.push(`\nREADME:\n${readme}`);
     }
 
-    // 4. sdkEvidence array (Fix 3)
+    // 4. sdkEvidence array
     if (signals?.sdkEvidence && signals.sdkEvidence.length > 0) {
       parts.push("\nEXTRACTED SDK / CODE SIGNALS:");
       for (const ev of signals.sdkEvidence) {
@@ -155,41 +150,58 @@ export function buildArchitecturePrompt(
       }
     }
 
-    // 5. User description (if present)
+    // 5. Discovered components — CRITICAL: each is a distinct deployable unit
+    if (profile.discoveredComponents.length > 0) {
+      parts.push(
+        "\nDISCOVERED DEPLOYABLE COMPONENTS (extracted from IaC and source code):" +
+        "\nEach entry below is a SEPARATE running process or data tier. " +
+        "You MUST model each one as its own component in the output — do NOT merge or collapse them.\n"
+      );
+      for (const dc of profile.discoveredComponents) {
+        const evidenceLine = dc.evidence.join("; ");
+        parts.push(
+          `  [${dc.type.toUpperCase()}] id="${dc.id}" name="${dc.name}" ` +
+          `technology="${dc.technology}" confidence=${dc.confidence}` +
+          (evidenceLine ? ` evidence="${evidenceLine}"` : "")
+        );
+      }
+    }
+
+    // 6. User description (if present)
     if (description) {
       parts.push(`\nADDITIONAL USER CONTEXT:\n${description}`);
     }
   } else {
     // Description path — no profile available
     parts.push(
-      "Analyze the following project description and build the architecture model of the described application as a system."
+      "Analyze the following project description and build a comprehensive multi-tier architecture model of the system." +
+      "\nYou MUST decompose the application into all distinct components mentioned or implied:" +
+      "\n- Frontend UI (e.g. React, Next.js, Vue, mobile web)" +
+      "\n- Backend Services / APIs (e.g. Express, FastAPI, Django, Spring)" +
+      "\n- Workers / Smart Contract Integrations (e.g. Web3/Solidity contract calls, background tasks)" +
+      "\n- Databases & Caches (e.g. MongoDB, PostgreSQL, DynamoDB, Redis)" +
+      "\n- Queues & Async Messaging (e.g. SQS vote processing queues, SNS topics)" +
+      "\n- Authentication & Secrets (e.g. JWT auth, API key secrets)" +
+      "\n- External services / Wallets (e.g. MetaMask, Ethereum Sepolia, third-party APIs)\n" +
+      "\nEvery single tier MUST be an item in the 'components' array with a unique id."
     );
     if (description) {
-      parts.push(`\nProject description: ${description}`);
+      parts.push(`\nProject description:\n${description}`);
     }
   }
 
-  return parts.join("\n\n").slice(0, 20_000);
+  return parts.join("\n\n");
 }
 
 // ---------------------------------------------------------------------------
 // Main call
 // ---------------------------------------------------------------------------
 
-/**
- * Calls the configured LLM provider to produce an ArchitectureModel.
- * Returns a validated, normalized model or null on any failure
- * (caller falls back to the rules baseline).
- *
- * Decision 5 / 16: gate = ArchitectureModelSchema.safeParse; failure → null.
- * Decision 21: temperature 0, maxRetries 3.
- */
 export async function analyzeArchitecture(opts: {
   signals: RepoSignals | null;
   description: string;
   inputKind: "github_url" | "description";
   grounding: Grounding;
-  /** Structured project profile from repoAnalyzer — used to build a pre-analyzed prompt */
   profile?: ProjectProfile | null;
 }): Promise<ArchitectureModel | null> {
   const provider = resolveProvider();
@@ -214,7 +226,6 @@ export async function analyzeArchitecture(opts: {
 
     return validateArchitectureModel(raw);
   } catch (err) {
-    // Any network error, provider error, timeout, malformed response → null
     console.warn("[llmClient] Architecture model call failed:", (err as Error).message ?? String(err));
     return null;
   }

@@ -290,6 +290,29 @@ export const SERVICE_DEFAULTS: Record<string, ServiceDefault> = {
     annotation: "100k 100-char units; source: Comprehend pricing page",
   },
 
+  // ── Security & Secrets ───────────────────────────────────────────────────
+  SecretsManager: {
+    unitLabel: "secret-months",
+    baseQuantity: 3,
+    serviceCode: "AWSSecretsManager",
+    usageTypePrefix: "Secrets",
+    annotation: "3 active secrets (JWT keys, DB credentials, API tokens); source: Secrets Manager pricing",
+  },
+  WAF: {
+    unitLabel: "web ACL + rules/mo",
+    baseQuantity: 1,
+    serviceCode: "awswaf",
+    usageTypePrefix: "WAF-WebACL",
+    annotation: "1 Web ACL with standard managed rule groups; source: WAF pricing page",
+  },
+  CloudFormation: {
+    unitLabel: "handler operations/mo",
+    baseQuantity: 100,
+    serviceCode: null,
+    usageTypePrefix: null,
+    annotation: "Free tier covers core IaC stacks; source: CloudFormation pricing page",
+  },
+
   // ── Misc ─────────────────────────────────────────────────────────────────
   SES: {
     unitLabel: "emails sent/mo",

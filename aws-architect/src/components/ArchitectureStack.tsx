@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import type { ServicePlan } from "@/lib/schema";
+import type { ServicePlan, DiscoveredComponent, AwsServiceMapping } from "@/lib/schema";
 import {
   Server,
   Database,
@@ -46,12 +46,33 @@ export interface ArchitectureStackProps {
   } | null;
 }
 
+function componentIcon(type: DiscoveredComponent["type"]) {
+  switch (type) {
+    case "frontend": return <Server className="h-4 w-4" />;
+    case "backend": return <Server className="h-4 w-4" />;
+    case "api": return <Cpu className="h-4 w-4" />;
+    case "worker": return <Activity className="h-4 w-4" />;
+    case "scheduler": return <Zap className="h-4 w-4" />;
+    case "database": return <Database className="h-4 w-4" />;
+    case "cache": return <HardDrive className="h-4 w-4" />;
+    case "queue": return <Layers className="h-4 w-4" />;
+    case "object-storage": return <Box className="h-4 w-4" />;
+    case "search": return <Activity className="h-4 w-4" />;
+    case "auth": return <ShieldCheck className="h-4 w-4" />;
+    case "websocket": return <Zap className="h-4 w-4" />;
+    case "proxy": return <Cpu className="h-4 w-4" />;
+    case "external-service": return <FileCode className="h-4 w-4" />;
+    case "messaging": return <Layers className="h-4 w-4" />;
+    default: return <Box className="h-4 w-4" />;
+  }
+}
+
 export function ArchitectureStack({
   plan,
   projectProfile,
   architectureModel,
 }: ArchitectureStackProps) {
-  const slotsEntries = Object.entries(plan.slots);
+  const { components, awsMappings, detectedPattern, metadata } = plan;
 
   return (
     <div className="flex flex-col gap-6">
@@ -67,30 +88,35 @@ export function ArchitectureStack({
                 Synthesized Pattern
               </span>
               <span className="rounded-full bg-accent/15 px-2 py-0.5 font-mono text-[10px] font-semibold text-accent uppercase">
-                {plan.pattern}
+                {detectedPattern ?? "generic"}
               </span>
             </div>
             <h3 className="text-lg font-bold text-foreground">
-              {plan.pattern
+              {((detectedPattern ?? "generic") as string)
                 .split("-")
                 .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-                .join(" ")}{" "}
-              Architecture
+                .join(" ")} Architecture
             </h3>
           </div>
         </div>
 
         <div className="flex items-center gap-4 text-xs font-mono">
           <div className="rounded-xl border border-border bg-surface-2 px-3.5 py-2">
-            <span className="text-muted">Target Slots: </span>
+            <span className="text-muted">Discovered Components: </span>
             <span className="font-semibold text-foreground">
-              {slotsEntries.length}
+              {components.length}
+            </span>
+          </div>
+          <div className="rounded-xl border border-border bg-surface-2 px-3.5 py-2">
+            <span className="text-muted">AWS Services Mapped: </span>
+            <span className="font-semibold text-foreground">
+              {awsMappings.length}
             </span>
           </div>
           <div className="rounded-xl border border-border bg-surface-2 px-3.5 py-2">
             <span className="text-muted">Grounding: </span>
             <span className="font-semibold text-accent">
-              {plan.metadata.grounding}
+              {metadata.grounding}
             </span>
           </div>
         </div>
@@ -195,26 +221,27 @@ export function ArchitectureStack({
           <div className="flex items-center gap-2">
             <Cpu className="h-4 w-4 text-accent" />
             <h4 className="text-xs font-semibold uppercase tracking-wider text-muted">
-              Inferred AWS Cloud Services ({slotsEntries.length} services)
+              Inferred AWS Cloud Services ({awsMappings.length} services)
             </h4>
           </div>
-          <span className="text-[11px] text-muted">Mapped to deployment pattern slots</span>
+          <span className="text-[11px] text-muted">Mapped from discovered components</span>
         </div>
 
         <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {slotsEntries.map(([slotKey, slot]) => {
-            const isHigh = slot.confidence === "high";
-            const isMedium = slot.confidence === "medium";
+          {awsMappings.map((mapping, idx) => {
+            const component = components.find((c) => c.id === mapping.componentId);
+            const isHigh = mapping.confidence === "high";
+            const isMedium = mapping.confidence === "medium";
 
             return (
               <div
-                key={slotKey}
+                key={`${mapping.componentId}-${mapping.serviceId}-${idx}`}
                 className="group relative flex flex-col justify-between rounded-2xl border border-border/80 bg-surface-2/50 p-4 transition-all hover:border-accent/40 hover:bg-surface-2/80 hover:shadow-lg"
               >
                 <div>
                   <div className="flex items-center justify-between">
                     <span className="font-mono text-xs uppercase tracking-wider text-muted">
-                      {slotKey}
+                      {component?.type ?? "component"}
                     </span>
                     <span
                       className={`inline-flex items-center rounded-full px-2 py-0.5 font-mono text-[10px] font-semibold uppercase ${
@@ -225,17 +252,25 @@ export function ArchitectureStack({
                           : "bg-amber-500/15 text-amber-400 border border-amber-500/30"
                       }`}
                     >
-                      {slot.confidence} confidence
+                      {mapping.confidence} confidence
                     </span>
                   </div>
 
-                  <div className="mt-2 text-lg font-bold text-foreground">
-                    {slot.serviceId}
+                  <div className="mt-2 flex items-center gap-2">
+                    {component ? componentIcon(component.type) : null}
+                    <span className="text-lg font-bold text-foreground">
+                      {mapping.serviceId}
+                    </span>
                   </div>
 
                   <p className="mt-2 text-xs leading-relaxed text-muted">
-                    {slot.evidence}
+                    {mapping.evidence}
                   </p>
+                  {component && component.evidence.length > 0 && (
+                    <p className="mt-1 text-[10px] text-muted/60">
+                      Source: {component.evidence[0]}
+                    </p>
+                  )}
                 </div>
               </div>
             );

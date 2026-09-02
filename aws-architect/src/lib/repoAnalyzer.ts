@@ -16,7 +16,49 @@
  * No network calls. No LLM. Pure TypeScript signal extraction.
  */
 
+import { parse as parseYaml } from "yaml";
 import type { RepoSignals, KeyFile } from "./repoFetcher.ts";
+
+// ---------------------------------------------------------------------------
+// Structural component discovery types
+// ---------------------------------------------------------------------------
+
+export type DiscoveredComponentType =
+  | "frontend"
+  | "backend"
+  | "worker"
+  | "scheduler"
+  | "database"
+  | "cache"
+  | "queue"
+  | "api"
+  | "auth"
+  | "storage"
+  | "other";
+
+/**
+ * A distinct running process or data-tier component discovered from IaC config
+ * or source-code evidence — BEFORE any AWS mapping.
+ *
+ * Unlike the tech bag in `ProjectProfile.frameworks/databases`, a
+ * DiscoveredComponent represents a *separate deployable unit* (e.g. a
+ * docker-compose service, a serverless function, a worker process file).
+ * Each one maps to a distinct AWS service in the rule engine and LLM prompt.
+ */
+export interface DiscoveredComponent {
+  /** Short kebab-case unique id within the profile (e.g. "dc-worker", "sc-redis") */
+  id: string;
+  /** Human-readable display name */
+  name: string;
+  type: DiscoveredComponentType;
+  /** Actual technology (PostgreSQL, Redis, Bull/BullMQ, …) — never an AWS name */
+  technology: string;
+  /** Ordered list of evidence strings (file path + snippet) */
+  evidence: string[];
+  confidence: "high" | "medium" | "low";
+  /** Which extraction pass found this component */
+  source: "docker-compose" | "serverless-yml" | "iac" | "source-code" | "file-naming";
+}
 
 // ---------------------------------------------------------------------------
 // Output types
@@ -47,6 +89,17 @@ export interface ProjectProfile {
   deploymentHints: DetectedTech[];
   /** File paths where structured manifest parsing failed */
   parseFailures?: string[];
+  /**
+   * Structurally distinct running processes/data-tiers discovered from
+   * docker-compose services, serverless functions, IaC resources, or
+   * source-code client instantiations / worker file naming.
+   *
+   * Each entry represents ONE deployable unit (an API server, a background
+   * worker, a Redis cache, a Postgres DB) — not a library or a tech signal.
+   * These feed into both the LLM prompt and the rule-engine fallback as
+   * "non-droppable" services (they come first before the 12-service cap).
+   */
+  discoveredComponents: DiscoveredComponent[];
   /**
    * A concise, structured summary of detected technologies.
    * This is what gets passed to the LLM instead of raw file content.
@@ -732,6 +785,317 @@ export const ENTRY_POINT_PATTERNS = [
 ];
 
 // ---------------------------------------------------------------------------
+// Pass A — IaC/config structural extraction (docker-compose, serverless.yml)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parses a docker-compose.yml and emits one DiscoveredComponent per service.
+ * Type is inferred from the image name first, then from the service name.
+ */
+function extractDockerComposeComponents(
+  content: string,
+  filePath: string
+): DiscoveredComponent[] {
+  const components: DiscoveredComponent[] = [];
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(content);
+  } catch {
+    return components;
+  }
+  if (typeof parsed !== "object" || parsed === null) return components;
+  const doc = parsed as Record<string, unknown>;
+  const services = doc["services"];
+  if (typeof services !== "object" || services === null) return components;
+
+  for (const [serviceName, serviceCfg] of Object.entries(
+    services as Record<string, unknown>
+  )) {
+    const cfg = (serviceCfg ?? {}) as Record<string, unknown>;
+    const image = String(cfg["image"] ?? "").toLowerCase();
+    const hasBuild = cfg["build"] !== undefined;
+
+    let type: DiscoveredComponentType = "other";
+    let technology = serviceName;
+
+    // Image-driven classification (strong signal)
+    if (/postgres|postgresql/.test(image)) {
+      type = "database"; technology = "PostgreSQL";
+    } else if (/mysql|mariadb/.test(image)) {
+      type = "database"; technology = "MySQL";
+    } else if (/mongo/.test(image)) {
+      type = "database"; technology = "MongoDB";
+    } else if (/redis/.test(image)) {
+      type = "cache"; technology = "Redis";
+    } else if (/memcached/.test(image)) {
+      type = "cache"; technology = "Memcached";
+    } else if (/rabbitmq/.test(image)) {
+      type = "queue"; technology = "RabbitMQ";
+    } else if (/kafka/.test(image)) {
+      type = "queue"; technology = "Kafka";
+    } else if (/nginx/.test(image)) {
+      type = "api"; technology = "Nginx";
+    } else if (/traefik|caddy/.test(image)) {
+      type = "api"; technology = image.includes("traefik") ? "Traefik" : "Caddy";
+    } else if (hasBuild || image === "") {
+      // Application code service — classify by service name
+      if (/worker|consumer|processor/.test(serviceName)) {
+        type = "worker"; technology = "custom";
+      } else if (/cron|scheduler|schedule/.test(serviceName)) {
+        type = "scheduler"; technology = "custom";
+      } else if (/frontend|web|client|ui/.test(serviceName)) {
+        type = "frontend"; technology = "custom";
+      } else {
+        type = "backend"; technology = "custom";
+      }
+    }
+
+    const evidence: string[] = [`${filePath} → services.${serviceName}`];
+    if (image) evidence.push(`image: ${image}`);
+    if (hasBuild) evidence.push("build: (local Dockerfile)");
+
+    components.push({
+      id: `dc-${serviceName}`,
+      name: serviceName,
+      type,
+      technology,
+      evidence,
+      confidence: "high",
+      source: "docker-compose",
+    });
+  }
+
+  return components;
+}
+
+/**
+ * Parses a serverless.yml / serverless.yaml and emits one DiscoveredComponent
+ * per function, classifying by event type (http → api, sqs/sns → worker,
+ * schedule → scheduler, none → backend Lambda).
+ */
+function extractServerlessComponents(
+  content: string,
+  filePath: string
+): DiscoveredComponent[] {
+  const components: DiscoveredComponent[] = [];
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(content);
+  } catch {
+    return components;
+  }
+  if (typeof parsed !== "object" || parsed === null) return components;
+  const doc = parsed as Record<string, unknown>;
+
+  // Only handle AWS provider
+  const provider = doc["provider"];
+  const providerName =
+    typeof provider === "object" && provider !== null
+      ? String((provider as Record<string, unknown>)["name"] ?? "")
+      : String(provider ?? "");
+  if (!providerName.toLowerCase().includes("aws")) return components;
+
+  const functions = doc["functions"];
+  if (typeof functions !== "object" || functions === null) return components;
+
+  for (const [fnName, fnCfg] of Object.entries(
+    functions as Record<string, unknown>
+  )) {
+    const cfg = (fnCfg ?? {}) as Record<string, unknown>;
+    const events = Array.isArray(cfg["events"]) ? cfg["events"] : [];
+
+    let type: DiscoveredComponentType = "backend";
+    for (const event of events) {
+      if (typeof event !== "object" || event === null) continue;
+      const keys = Object.keys(event as object);
+      if (keys.some((k) => k === "http" || k === "httpApi")) {
+        type = "api"; break;
+      }
+      if (keys.some((k) => k === "sqs" || k === "sns" || k === "stream" || k === "kafka")) {
+        type = "worker"; break;
+      }
+      if (keys.some((k) => k === "schedule")) {
+        type = "scheduler"; break;
+      }
+    }
+
+    // Name-based override (more specific than event type)
+    if (/worker|consumer|processor/.test(fnName)) type = "worker";
+    else if (/cron|scheduler|scheduled/.test(fnName)) type = "scheduler";
+
+    components.push({
+      id: `sls-${fnName}`,
+      name: fnName,
+      type,
+      technology: "AWS Lambda",
+      evidence: [`${filePath} → functions.${fnName}`],
+      confidence: "high",
+      source: "serverless-yml",
+    });
+  }
+
+  return components;
+}
+
+// ---------------------------------------------------------------------------
+// Passes B+C — Source-code instantiation + worker file naming
+// ---------------------------------------------------------------------------
+
+// Client-instantiation patterns → component type + technology.
+// Each pattern is tested against file content; the first match per
+// (type, technology) pair is recorded as a new DiscoveredComponent.
+const SOURCE_INSTANTIATION_PATTERNS: Array<{
+  pattern: RegExp;
+  type: DiscoveredComponentType;
+  technology: string;
+  confidence: "high" | "medium" | "low";
+}> = [
+  // PostgreSQL clients
+  {
+    pattern: /new\s+Pool\s*\(|pg\.Pool\s*\(|createPool\s*\(.*postgres/i,
+    type: "database", technology: "PostgreSQL", confidence: "high",
+  },
+  // MongoDB clients
+  {
+    pattern: /mongoose\.connect\s*\(|new\s+MongoClient\s*\(/i,
+    type: "database", technology: "MongoDB", confidence: "high",
+  },
+  // MySQL clients
+  {
+    pattern: /createConnection\s*\(\s*\{|mysql\.createPool\s*\(|mariadb\.createPool\s*\(/i,
+    type: "database", technology: "MySQL", confidence: "high",
+  },
+  // Redis clients (ioredis `new Redis(…)` OR node-redis `redis.createClient(…)`)
+  {
+    pattern: /redis\.createClient\s*\(|new\s+Redis\s*\(|createClient\s*\(\s*\{?\s*url\s*:\s*['"]redis/i,
+    type: "cache", technology: "Redis", confidence: "high",
+  },
+  // Bull / BullMQ queues
+  {
+    pattern: /new\s+Bull\s*\(|new\s+Queue\s*\(|new\s+Worker\s*\(.*[Bb]ull|BullMQ/i,
+    type: "queue", technology: "Bull/BullMQ", confidence: "high",
+  },
+  // Celery (Python)
+  {
+    pattern: /Celery\s*\(|celery\s*=\s*Celery\s*\(|@app\.task|@celery\.task/i,
+    type: "queue", technology: "Celery", confidence: "high",
+  },
+  // node-cron / cron
+  {
+    pattern: /cron\.schedule\s*\(|new\s+CronJob\s*\(|schedule\.scheduleJob\s*\(/i,
+    type: "scheduler", technology: "node-cron", confidence: "high",
+  },
+  // Python APScheduler
+  {
+    pattern: /APScheduler|BlockingScheduler\s*\(|BackgroundScheduler\s*\(/i,
+    type: "scheduler", technology: "APScheduler", confidence: "high",
+  },
+];
+
+// File-path patterns → component role (no content needed, Path B).
+const WORKER_FILE_PATH_PATTERNS: Array<{
+  pattern: RegExp;
+  type: DiscoveredComponentType;
+  nameHint: string;
+}> = [
+  {
+    pattern: /(?:^|\/)workers?\.(?:ts|js|mjs|py|go|java|rb)$/i,
+    type: "worker", nameHint: "worker",
+  },
+  {
+    pattern: /(?:^|\/)consumer\.(?:ts|js|mjs|py|go)$/i,
+    type: "worker", nameHint: "consumer",
+  },
+  {
+    pattern: /(?:^|\/)processor\.(?:ts|js|mjs|py|go)$/i,
+    type: "worker", nameHint: "processor",
+  },
+  {
+    pattern: /(?:^|\/)jobs?\.(?:ts|js|mjs|py|go)$/i,
+    type: "worker", nameHint: "job-runner",
+  },
+  {
+    pattern: /(?:^|\/)(?:cron|scheduler)\.(?:ts|js|mjs|py|go)$/i,
+    type: "scheduler", nameHint: "scheduler",
+  },
+];
+
+/**
+ * Scans all fetched key files for:
+ *   B) Client instantiation patterns in source content
+ *   C) Worker/scheduler role signals from file naming
+ *
+ * This is the critical pass for plain repos (no IaC) — a repo that just
+ * has `redis.createClient(…)` in src/cache.ts and a worker.ts file will
+ * produce a cache component and a worker component even with no docker-compose.
+ */
+function extractSourceCodeComponents(keyFiles: KeyFile[]): DiscoveredComponent[] {
+  const components: DiscoveredComponent[] = [];
+  // Deduplicate by (type, technology) for instantiation matches,
+  // by (type, nameHint) for file-naming matches.
+  const seenInstantiation = new Map<string, DiscoveredComponent>();
+  const seenFileNaming = new Set<string>();
+
+  for (const file of keyFiles) {
+    // --- Pass C: file-naming (runs on ALL files, no content needed) ---
+    for (const { pattern, type, nameHint } of WORKER_FILE_PATH_PATTERNS) {
+      if (!pattern.test(file.path)) continue;
+      const key = `${type}:${nameHint}`;
+      if (seenFileNaming.has(key)) continue;
+      seenFileNaming.add(key);
+      components.push({
+        id: `fn-${nameHint}`,
+        name: nameHint,
+        type,
+        technology: "custom",
+        evidence: [`${file.path} — filename indicates ${type} role`],
+        confidence: "medium",
+        source: "file-naming",
+      });
+    }
+
+    // --- Pass B: content instantiation (source + config files only) ---
+    if (!file.content) continue;
+    // Run on source files; also run on manifests and container_ci because
+    // docker-compose env-vars and serverless.yml handler paths sometimes
+    // contain the instantiation patterns.
+    if (
+      file.kind !== "source" &&
+      file.kind !== "manifest" &&
+      file.kind !== "container_ci"
+    ) continue;
+
+    for (const { pattern, type, technology, confidence } of SOURCE_INSTANTIATION_PATTERNS) {
+      const match = pattern.exec(file.content);
+      if (!match) continue;
+      const key = `${type}:${technology}`;
+      const snippet = match[0].trim().slice(0, 80);
+      const existing = seenInstantiation.get(key);
+      if (existing) {
+        // Accumulate evidence across multiple files (cap at 3 to avoid bloat)
+        if (existing.evidence.length < 3) {
+          existing.evidence.push(`${file.path} → ${snippet}`);
+        }
+      } else {
+        const comp: DiscoveredComponent = {
+          id: `sc-${technology.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+          name: technology.toLowerCase(),
+          type,
+          technology,
+          evidence: [`${file.path} → ${snippet}`],
+          confidence,
+          source: "source-code",
+        };
+        seenInstantiation.set(key, comp);
+        components.push(comp);
+      }
+    }
+  }
+
+  return components;
+}
+
+// ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
 
@@ -937,8 +1301,38 @@ export function analyzeProject(signals: RepoSignals): ProjectProfile {
     }
   }
 
-  // ── Build summary ──────────────────────────────────────────────────────────
+  // ── Pass A: IaC structural discovery (docker-compose, serverless.yml) ──────
 
+  const discoveredRaw: DiscoveredComponent[] = [];
+
+  for (const file of signals.keyFiles) {
+    if (!file.content) continue;
+    const fileName = file.path.split("/").pop() ?? file.path;
+
+    if (/^docker-compose(\.[^.]+)?\.(yml|yaml)$/i.test(fileName)) {
+      discoveredRaw.push(...extractDockerComposeComponents(file.content, file.path));
+    }
+    if (/^serverless(\.[^.]+)?\.(yml|yaml)$/i.test(fileName)) {
+      discoveredRaw.push(...extractServerlessComponents(file.content, file.path));
+    }
+  }
+
+  // ── Passes B+C: source-code instantiation + file-naming ─────────────────
+
+  discoveredRaw.push(...extractSourceCodeComponents(signals.keyFiles));
+
+  // Deduplicate discoveredComponents by id (first wins — IaC evidence is
+  // stronger than source-code inference for the same logical component).
+  const seenDiscoveredIds = new Set<string>();
+  const discoveredComponents: DiscoveredComponent[] = [];
+  for (const dc of discoveredRaw) {
+    if (!seenDiscoveredIds.has(dc.id)) {
+      seenDiscoveredIds.add(dc.id);
+      discoveredComponents.push(dc);
+    }
+  }
+
+  // ── Build summary ──────────────────────────────────────────
   const summary = buildSummary({
     languages,
     frameworks,
@@ -947,6 +1341,7 @@ export function analyzeProject(signals: RepoSignals): ProjectProfile {
     entryPoints,
     awsUsage,
     deploymentHints,
+    discoveredComponents,
     repoName: signals.repoName,
   });
 
@@ -959,6 +1354,7 @@ export function analyzeProject(signals: RepoSignals): ProjectProfile {
     awsUsage,
     deploymentHints,
     parseFailures,
+    discoveredComponents,
     summary,
   };
 }
@@ -967,61 +1363,76 @@ export function analyzeProject(signals: RepoSignals): ProjectProfile {
 // Summary builder
 // ---------------------------------------------------------------------------
 
-function buildSummary(data: Omit<ProjectProfile, "summary"> & { repoName: string }): string {
+function buildSummary(
+  data: Omit<ProjectProfile, "summary" | "parseFailures"> & { repoName: string }
+): string {
   const lines: string[] = [`Repository: ${data.repoName}`, ""];
   lines.push("DETECTED TECHNOLOGIES (extracted from repository files before inference):");
   lines.push("");
 
   if (data.languages.length > 0) {
-    lines.push(`Languages/Runtime: ${data.languages.map((l) => `${l.name} [${l.evidence}]`).join(", ")}`);
+    lines.push(
+      `Languages/Runtime: ${data.languages.map((l) => `${l.name} [${l.evidence}]`).join(", ")}`
+    );
   }
-
   if (data.frameworks.length > 0) {
-    lines.push(`Frameworks/Libraries:`);
+    lines.push("Frameworks/Libraries:");
     for (const f of data.frameworks) {
       lines.push(`  - ${f.name}  [evidence: ${f.evidence}]`);
     }
   }
-
   if (data.databases.length > 0) {
-    lines.push(`Databases:`);
+    lines.push("Databases:");
     for (const d of data.databases) {
       lines.push(`  - ${d.name}  [evidence: ${d.evidence}]`);
     }
   }
-
   if (data.infrastructure.length > 0) {
-    lines.push(`Infrastructure/DevOps:`);
+    lines.push("Infrastructure/DevOps:");
     for (const i of data.infrastructure) {
       lines.push(`  - ${i.name}  [evidence: ${i.evidence}]`);
     }
   }
-
   if (data.deploymentHints.length > 0) {
-    lines.push(`Deployment Hints:`);
+    lines.push("Deployment Hints:");
     for (const h of data.deploymentHints) {
       lines.push(`  - ${h.name}  [evidence: ${h.evidence}]`);
     }
   }
-
   if (data.awsUsage.length > 0) {
-    lines.push(`Explicit AWS SDK Usage:`);
+    lines.push("Explicit AWS SDK Usage:");
     for (const a of data.awsUsage) {
       lines.push(`  - ${a.name}  [evidence: ${a.evidence}]`);
     }
   } else {
-    lines.push(`Explicit AWS SDK Usage: none detected`);
+    lines.push("Explicit AWS SDK Usage: none detected");
   }
-
   if (data.entryPoints.length > 0) {
     lines.push(`Entry Points: ${data.entryPoints.join(", ")}`);
+  }
+
+  // Discovered components (distinct deployable units found in IaC / source)
+  if (data.discoveredComponents.length > 0) {
+    lines.push("");
+    lines.push("DISCOVERED DEPLOYABLE COMPONENTS:");
+    for (const dc of data.discoveredComponents) {
+      const evidenceSummary = dc.evidence.slice(0, 2).join("; ");
+      lines.push(
+        `  - [${dc.type}] ${dc.name} (${dc.technology}) — ${dc.confidence} confidence` +
+          (evidenceSummary ? ` [${evidenceSummary}]` : "")
+      );
+    }
+    lines.push(
+      "Each component above represents a SEPARATE deployable unit. " +
+        "Map each one to its own AWS service — do NOT collapse them."
+    );
   }
 
   lines.push("");
   lines.push(
     "This structured analysis is the evidence base for building the application's " +
-    "architecture model. Use only the technologies above; do not invent technologies " +
-    "absent from this analysis."
+      "architecture model. Use only the technologies above; do not invent technologies " +
+      "absent from this analysis."
   );
 
   return lines.join("\n");

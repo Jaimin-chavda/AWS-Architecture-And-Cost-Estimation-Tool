@@ -1,34 +1,40 @@
 /**
- * diagram.ts — Stage 4 (BuildOrder step 3–4)
+ * diagram.ts
  *
- * Pure function: ServicePlan → mxGraph XML (.drawio format).
+ * Generates clean, professional, publication-quality AWS architecture diagrams
+ * in .drawio (mxGraph XML) format matching official AWS architecture guidelines:
  *
- * Design decisions:
- * - No external dependencies; pure string generation.
- * - AWS icon styles use shape=mxgraph.aws4.* with a fallback to a plain rectangle.
- * - Labels are XML-escaped and control characters are stripped.
- * - Layout is a dynamic grid/subnet model: services are bucketed by tier,
- *   packed into rows of fixed cell size, and wrapped in VPC/subnet containers
- *   whose height grows with the row count (Fix B).
- * - Custom edges (from ServicePlan.customEdges) are appended after template edges.
- *
- * Exported:
- *   generateDiagramXml(plan: ServicePlan): string — the main entry point.
- *   computeLayout(slots): DiagramLayout — pure geometry, unit-tested.
+ * Layout Structure:
+ * 1. Title Banner: "<AppName> — AWS Architecture"
+ * 2. Top Edge / Client Tier:
+ *    - End Users / Clients
+ *    - Route 53 DNS, CloudFront CDN, S3 Frontend Bucket
+ *    - External SaaS / Wallets (e.g. MetaMask, Ethereum, Stripe)
+ * 3. VPC Container ("VPC — <app>-vpc") with AWS VPC badge:
+ *    - Public Subnet: Ingress tier (ALB, API Gateway)
+ *    - Private Subnet — Compute: Application tier (ECS Fargate, Lambda)
+ *    - Private Subnet — Data: Databases (DocumentDB / RDS / DynamoDB), Secrets Manager, Cognito, SQS, ElastiCache
+ *    - Observability & IaC Column: SNS, CloudWatch, CloudFormation
+ * 4. Distinct Colored Orthogonal Flow Arrows connecting all tiers seamlessly.
  */
 
-import type { ServicePlan, PatternId, ServiceId, ServiceSlot } from "./schema.ts";
+import type {
+  ServicePlan,
+  ServiceId,
+  DiscoveredComponent,
+  AwsServiceMapping,
+  ComponentRelationship,
+} from "./schema.ts";
+import type { SdkEvidence } from "./repoFetcher.ts";
 
 // ---------------------------------------------------------------------------
-// XML helpers
+// XML Helpers
 // ---------------------------------------------------------------------------
 
-/** Strips ASCII control characters (0x00–0x1F except TAB/LF/CR) from a string */
 function stripControlChars(s: string): string {
   return s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "");
 }
 
-/** Escapes a string for safe use inside an XML attribute value */
 function xmlAttr(s: string): string {
   return stripControlChars(s)
     .replace(/&/g, "&amp;")
@@ -39,632 +45,385 @@ function xmlAttr(s: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// AWS icon shape names (shape=mxgraph.aws4.*)
-// Fallback: plain rectangle with AWS orange fill.
+// AWS 4 Icon Styles
 // ---------------------------------------------------------------------------
 
-const AWS_ICON_STYLES: Partial<Record<string, string>> = {
-  // Compute
-  EC2: "shape=mxgraph.aws4.ec2;",
-  Lambda: "shape=mxgraph.aws4.lambda;",
-  ECS: "shape=mxgraph.aws4.ecs;",
-  EKS: "shape=mxgraph.aws4.eks;",
-  Fargate: "shape=mxgraph.aws4.fargate;",
-  Lightsail: "shape=mxgraph.aws4.lightsail;",
-  Batch: "shape=mxgraph.aws4.batch;",
-  // Storage
-  S3: "shape=mxgraph.aws4.s3;",
-  EBS: "shape=mxgraph.aws4.ebs;",
-  EFS: "shape=mxgraph.aws4.efs;",
-  Glacier: "shape=mxgraph.aws4.glacier;",
-  // Database
-  RDS: "shape=mxgraph.aws4.rds;",
-  DynamoDB: "shape=mxgraph.aws4.dynamodb;",
-  ElastiCache: "shape=mxgraph.aws4.elasticache;",
-  Aurora: "shape=mxgraph.aws4.aurora;",
-  Redshift: "shape=mxgraph.aws4.redshift;",
-  DocumentDB: "shape=mxgraph.aws4.documentdb;",
-  // Networking
-  CloudFront: "shape=mxgraph.aws4.cloudfront;",
-  APIGateway: "shape=mxgraph.aws4.api_gateway;",
-  ALB: "shape=mxgraph.aws4.application_load_balancer;",
-  Route53: "shape=mxgraph.aws4.route_53;",
-  VPC: "shape=mxgraph.aws4.vpc;",
-  NATGateway: "shape=mxgraph.aws4.nat_gateway;",
-  // Messaging
-  SQS: "shape=mxgraph.aws4.sqs;",
-  SNS: "shape=mxgraph.aws4.sns;",
-  EventBridge: "shape=mxgraph.aws4.eventbridge;",
-  Kinesis: "shape=mxgraph.aws4.kinesis;",
-  // Auth
-  Cognito: "shape=mxgraph.aws4.cognito;",
-  // DevOps / Observability
-  CloudWatch: "shape=mxgraph.aws4.cloudwatch;",
-  CodePipeline: "shape=mxgraph.aws4.codepipeline;",
-  ECR: "shape=mxgraph.aws4.ecr;",
-  // AI / ML
-  SageMaker: "shape=mxgraph.aws4.sagemaker;",
-  Rekognition: "shape=mxgraph.aws4.rekognition;",
-  Comprehend: "shape=mxgraph.aws4.comprehend;",
-  // Misc
-  SES: "shape=mxgraph.aws4.ses;",
-  Amplify: "shape=mxgraph.aws4.amplify;",
+interface AwsStyleConfig {
+  shape: string;
+  fillColor: string;
+}
+
+const AWS_STYLES: Record<string, AwsStyleConfig> = {
+  Route53: { shape: "shape=mxgraph.aws4.route_53;", fillColor: "#8C4FFF" },
+  CloudFront: { shape: "shape=mxgraph.aws4.cloudfront;", fillColor: "#8C4FFF" },
+  S3: { shape: "shape=mxgraph.aws4.s3;", fillColor: "#7AA116" },
+  ALB: { shape: "shape=mxgraph.aws4.application_load_balancer;", fillColor: "#8C4FFF" },
+  APIGateway: { shape: "shape=mxgraph.aws4.api_gateway;", fillColor: "#E7157B" },
+  ECS: { shape: "shape=mxgraph.aws4.ecs;", fillColor: "#FF9900" },
+  Fargate: { shape: "shape=mxgraph.aws4.fargate;", fillColor: "#FF9900" },
+  Lambda: { shape: "shape=mxgraph.aws4.lambda;", fillColor: "#FF9900" },
+  EC2: { shape: "shape=mxgraph.aws4.ec2;", fillColor: "#FF9900" },
+  EKS: { shape: "shape=mxgraph.aws4.eks;", fillColor: "#FF9900" },
+  RDS: { shape: "shape=mxgraph.aws4.rds;", fillColor: "#335E99" },
+  Aurora: { shape: "shape=mxgraph.aws4.aurora;", fillColor: "#335E99" },
+  DocumentDB: { shape: "shape=mxgraph.aws4.documentdb;", fillColor: "#C925D1" },
+  DynamoDB: { shape: "shape=mxgraph.aws4.dynamodb;", fillColor: "#335E99" },
+  ElastiCache: { shape: "shape=mxgraph.aws4.elasticache;", fillColor: "#C925D1" },
+  SecretsManager: { shape: "shape=mxgraph.aws4.secrets_manager;", fillColor: "#DD344C" },
+  Cognito: { shape: "shape=mxgraph.aws4.cognito;", fillColor: "#DD344C" },
+  SQS: { shape: "shape=mxgraph.aws4.sqs;", fillColor: "#E7157B" },
+  SNS: { shape: "shape=mxgraph.aws4.sns;", fillColor: "#E7157B" },
+  EventBridge: { shape: "shape=mxgraph.aws4.eventbridge;", fillColor: "#E7157B" },
+  Kinesis: { shape: "shape=mxgraph.aws4.kinesis;", fillColor: "#8C4FFF" },
+  CloudWatch: { shape: "shape=mxgraph.aws4.cloudwatch;", fillColor: "#E7157B" },
+  CloudFormation: { shape: "shape=mxgraph.aws4.cloudformation;", fillColor: "#E7157B" },
+  CodePipeline: { shape: "shape=mxgraph.aws4.codepipeline;", fillColor: "#E7157B" },
+  ECR: { shape: "shape=mxgraph.aws4.ecr;", fillColor: "#FF9900" },
+  WAF: { shape: "shape=mxgraph.aws4.waf;", fillColor: "#DD344C" },
+  SageMaker: { shape: "shape=mxgraph.aws4.sagemaker;", fillColor: "#01A88D" },
+  Rekognition: { shape: "shape=mxgraph.aws4.rekognition;", fillColor: "#01A88D" },
+  Comprehend: { shape: "shape=mxgraph.aws4.comprehend;", fillColor: "#01A88D" },
+  SES: { shape: "shape=mxgraph.aws4.ses;", fillColor: "#E7157B" },
+  Amplify: { shape: "shape=mxgraph.aws4.amplify;", fillColor: "#FF9900" },
+  User: { shape: "shape=mxgraph.aws4.user;", fillColor: "#232F3E" },
+  Wallet: { shape: "shape=mxgraph.aws4.client;", fillColor: "#FF9900" },
+  External: { shape: "shape=mxgraph.aws4.traditional_server;", fillColor: "#3B82F6" },
 };
 
-const FALLBACK_STYLE =
-  "rounded=1;whiteSpace=wrap;fillColor=#FF9900;fontColor=#232F3E;strokeColor=#232F3E;";
-
-function nodeStyle(serviceId: string): string {
-  const awsShape = AWS_ICON_STYLES[serviceId];
-  if (awsShape) {
-    // Full AWS icon style with standard sizing
-    return (
-      `${awsShape}` +
-      "sketch=0;fontStyle=0;aspect=fixed;" +
-      "fillColor=#FF9900;strokeColor=#232F3E;fontColor=#232F3E;"
-    );
-  }
-  return FALLBACK_STYLE;
-}
-
-// ---------------------------------------------------------------------------
-// Grid/subnet layout (Fix B)
-// ---------------------------------------------------------------------------
-
-const CELL_W = 78;
-const CELL_H = 78;
-const GAP = 16; // cell-to-cell gap inside a container
-const VGAP = 24; // container-to-container vertical gap
-const PAD = 12; // container interior padding
-const LABEL_H = 20; // container label bar height
-const MARGIN = 24; // canvas margin
-const SUBNET_COLS = 4; // columns per VPC subnet
-const EDGE_COLS = 8; // columns in the top edge banner
-const EXTERNAL_COLS = 2; // columns in the external column
-
-export interface Rect {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-/**
- * Tier per service — which VPC/subnet bucket a service lands in.
- * Unknown serviceIds default to the data tier (only the allowlist reaches here).
- */
-export const SERVICE_TIERS: Record<ServiceId, Tier> = {
-  // Edge / public entry points (top banner)
-  Route53: "edge",
-  CloudFront: "edge",
-  APIGateway: "edge",
-  ALB: "edge",
-  Cognito: "edge",
-  // Network infrastructure (public subnet)
-  VPC: "vpc_public",
-  NATGateway: "vpc_public",
-  // Compute (compute subnet)
-  EC2: "vpc_compute",
-  Lambda: "vpc_compute",
-  ECS: "vpc_compute",
-  EKS: "vpc_compute",
-  Fargate: "vpc_compute",
-  Lightsail: "vpc_compute",
-  Batch: "vpc_compute",
-  ECR: "vpc_compute",
-  // Data / storage / async / observability / ml (data subnet)
-  S3: "vpc_data",
-  EBS: "vpc_data",
-  EFS: "vpc_data",
-  Glacier: "vpc_data",
-  RDS: "vpc_data",
-  Aurora: "vpc_data",
-  DynamoDB: "vpc_data",
-  ElastiCache: "vpc_data",
-  Redshift: "vpc_data",
-  DocumentDB: "vpc_data",
-  SQS: "vpc_data",
-  SNS: "vpc_data",
-  EventBridge: "vpc_data",
-  Kinesis: "vpc_data",
-  CloudWatch: "vpc_data",
-  CodePipeline: "vpc_data",
-  SageMaker: "vpc_data",
-  Rekognition: "vpc_data",
-  Comprehend: "vpc_data",
-  // External services (column beside the VPC)
-  SES: "external",
-  Amplify: "external",
-};
-
-export type Tier = "edge" | "vpc_public" | "vpc_compute" | "vpc_data" | "external";
-
-const CONTAINER_LABELS: Record<ContainerKey, string> = {
-  edge: "Edge & Public Services",
-  vpc: "VPC",
-  public_subnet: "Public Subnet",
-  compute_subnet: "Compute Subnet",
-  data_subnet: "Data Subnet",
-  external: "External Services",
-};
-
-/** Container height for a given row count (label bar + rows + padding). */
-export function bucketHeight(rows: number): number {
-  if (rows <= 0) return 0;
-  return LABEL_H + rows * CELL_H + (rows - 1) * GAP + PAD;
-}
-
-interface BucketEntry {
-  slotName: string;
-  serviceId: string;
-}
-
-interface PlacedNode {
-  slotName: string;
-  serviceId: string;
-  x: number;
-  y: number;
-}
-
-interface PlacedBucket {
-  rect: Rect;
-  nodes: PlacedNode[];
-}
-
-/** Packs a bucket into `cols` columns starting at (x, y); null when empty. */
-function packGrid(
-  entries: BucketEntry[],
-  cols: number,
-  x: number,
-  y: number
-): PlacedBucket | null {
-  if (entries.length === 0) return null;
-  const rows = Math.ceil(entries.length / cols);
-  const w = cols * CELL_W + (cols - 1) * GAP;
-  const h = bucketHeight(rows);
-  const nodes: PlacedNode[] = entries.map((e, i) => ({
-    slotName: e.slotName,
-    serviceId: e.serviceId,
-    x: x + PAD + (i % cols) * (CELL_W + GAP),
-    y: y + LABEL_H + PAD + Math.floor(i / cols) * (CELL_H + GAP),
-  }));
-  return { rect: { x, y, w, h }, nodes };
-}
-
-export type ContainerKey =
-  | "edge"
-  | "vpc"
-  | "public_subnet"
-  | "compute_subnet"
-  | "data_subnet"
-  | "external";
-
-export interface DiagramLayout {
-  /** Rect for each container; null when that tier has no services. */
-  containers: Record<ContainerKey, Rect | null>;
-  /** Absolute node placement per slotName, with the id of its parent container. */
-  nodes: Record<string, { x: number; y: number; parent: string }>;
-  canvasW: number;
-  canvasH: number;
-}
-
-/**
- * Computes the full diagram geometry from a plan's slots.
- * Pure — no XML, no I/O — so the row-growth / shrink / omit behavior is unit-testable.
- */
-export function computeLayout(slots: Record<string, ServiceSlot>): DiagramLayout {
-  const buckets: Record<Tier, BucketEntry[]> = {
-    edge: [],
-    vpc_public: [],
-    vpc_compute: [],
-    vpc_data: [],
-    external: [],
-  };
-  for (const [slotName, slot] of Object.entries(slots)) {
-    const tier = SERVICE_TIERS[slot.serviceId as ServiceId] ?? "vpc_data";
-    buckets[tier].push({ slotName, serviceId: slot.serviceId });
-  }
-
-  const containers: DiagramLayout["containers"] = {
-    edge: null,
-    vpc: null,
-    public_subnet: null,
-    compute_subnet: null,
-    data_subnet: null,
-    external: null,
-  };
-  const nodes: DiagramLayout["nodes"] = {};
-
-  // Edge banner height is known up-front (fixed column count); its width is
-  // the full canvas width, resolved after the VPC area is laid out.
-  const edgeRows = buckets.edge.length > 0 ? Math.ceil(buckets.edge.length / EDGE_COLS) : 0;
-  const edgeH = bucketHeight(edgeRows);
-  const vpcY = MARGIN + (edgeRows > 0 ? edgeH + VGAP : 0);
-  const vpcX = MARGIN;
-
-  // 1. Public + compute subnets side by side at a fixed y.
-  const publicPlaced = packGrid(buckets.vpc_public, SUBNET_COLS, vpcX, vpcY);
-  const computePlaced = packGrid(
-    buckets.vpc_compute,
-    SUBNET_COLS,
-    vpcX + (publicPlaced ? publicPlaced.rect.w + GAP : 0),
-    vpcY
+function getServiceStyle(serviceId: string): string {
+  const conf = AWS_STYLES[serviceId] ?? { shape: "shape=mxgraph.aws4.generic_database;", fillColor: "#FF9900" };
+  return (
+    `sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;fillColor=${conf.fillColor};` +
+    `strokeColor=none;dashed=0;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;` +
+    `fontSize=11;fontStyle=0;aspect=fixed;${conf.shape}`
   );
-
-  // 2. Data subnet below the tallest of the two.
-  let dataPlaced: PlacedBucket | null = null;
-  const topBottom = Math.max(
-    publicPlaced ? publicPlaced.rect.y + publicPlaced.rect.h : 0,
-    computePlaced ? computePlaced.rect.y + computePlaced.rect.h : 0
-  );
-  if (buckets.vpc_data.length > 0) {
-    const dataY = topBottom > 0 ? topBottom + VGAP : vpcY;
-    dataPlaced = packGrid(buckets.vpc_data, SUBNET_COLS, vpcX, dataY);
-  }
-
-  // 3. VPC box wraps the three subnets.
-  const vpcEntries = [publicPlaced, computePlaced, dataPlaced].filter(
-    (p): p is PlacedBucket => p !== null
-  );
-  let vpcRect: Rect | null = null;
-  if (vpcEntries.length > 0) {
-    const vpcW =
-      Math.max(...vpcEntries.map((p) => p.rect.x + p.rect.w)) - vpcX + PAD;
-    const vpcBottom = Math.max(...vpcEntries.map((p) => p.rect.y + p.rect.h));
-    const vpcH = vpcBottom - vpcY + GAP;
-    vpcRect = { x: vpcX, y: vpcY, w: vpcW, h: vpcH };
-  }
-  containers.vpc = vpcRect;
-  if (publicPlaced) containers.public_subnet = publicPlaced.rect;
-  if (computePlaced) containers.compute_subnet = computePlaced.rect;
-  if (dataPlaced) containers.data_subnet = dataPlaced.rect;
-
-  // 4. External column anchored to the right edge of the VPC box.
-  let externalRect: Rect | null = null;
-  if (buckets.external.length > 0) {
-    const extX = vpcRect ? vpcRect.x + vpcRect.w + GAP : MARGIN;
-    const extY = vpcRect ? vpcRect.y : MARGIN;
-    const extPlaced = packGrid(buckets.external, EXTERNAL_COLS, extX, extY)!;
-    if (vpcRect) extPlaced.rect.h = Math.max(vpcRect.h, extPlaced.rect.h);
-    externalRect = extPlaced.rect;
-    for (const n of extPlaced.nodes) {
-      nodes[n.slotName] = { x: n.x, y: n.y, parent: "container-external" };
-    }
-  }
-  containers.external = externalRect;
-
-  // 5. Canvas size from final container geometry.
-  const rightExtent = Math.max(
-    vpcRect ? vpcRect.x + vpcRect.w : 0,
-    externalRect ? externalRect.x + externalRect.w : 0
-  );
-  const canvasW = rightExtent + PAD + MARGIN;
-
-  // 6. Edge banner spans the full canvas width.
-  if (buckets.edge.length > 0) {
-    const edgeW = canvasW - 2 * MARGIN;
-    const edgePlaced = packGrid(buckets.edge, EDGE_COLS, MARGIN, MARGIN)!;
-    edgePlaced.rect.w = edgeW;
-    containers.edge = edgePlaced.rect;
-    for (const n of edgePlaced.nodes) {
-      nodes[n.slotName] = { x: n.x, y: n.y, parent: "container-edge" };
-    }
-  }
-
-  // Attach subnet node placements (edge/external handled above).
-  const subnetPlacements: Array<[PlacedBucket | null, ContainerKey]> = [
-    [publicPlaced, "public_subnet"],
-    [computePlaced, "compute_subnet"],
-    [dataPlaced, "data_subnet"],
-  ];
-  for (const [placed, key] of subnetPlacements) {
-    if (!placed) continue;
-    for (const n of placed.nodes) {
-      nodes[n.slotName] = { x: n.x, y: n.y, parent: `container-${key}` };
-    }
-  }
-
-  const bottomExtent = Math.max(
-    edgeH > 0 ? MARGIN + edgeH : 0,
-    vpcRect ? vpcRect.y + vpcRect.h : 0,
-    externalRect ? externalRect.y + externalRect.h : 0
-  );
-  const canvasH = bottomExtent + MARGIN;
-
-  return { containers, nodes, canvasW, canvasH };
 }
 
 // ---------------------------------------------------------------------------
-// Template edges (slotName → slotName), dashed unless evidence-confirmed
+// Diagram Generation
 // ---------------------------------------------------------------------------
 
-interface NodeGeometry {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-const NODE_W = CELL_W;
-const NODE_H = CELL_H;
-
-/** Template edges for each pattern (slotName → slotName) */
-const PATTERN_EDGES: Record<PatternId, [string, string, string?][]> = {
-  "static-site": [
-    ["dns", "cdn", "DNS → CDN"],
-    ["cdn", "storage", "Origin"],
-  ],
-  "serverless-api": [
-    ["api", "compute", "invoke"],
-    ["compute", "database", "read/write"],
-    ["compute", "storage", "store"],
-    ["compute", "queue", "publish"],
-    ["api", "auth", "authorize"],
-  ],
-  "containerised-app": [
-    ["load_balancer", "compute", "route"],
-    ["compute", "database", "query"],
-    ["compute", "cache", "cache"],
-    ["compute", "storage", "store"],
-    ["registry", "compute", "pull image"],
-  ],
-  "event-driven": [
-    ["producer", "queue", "publish"],
-    ["queue", "consumer", "trigger"],
-    ["consumer", "compute", "process"],
-    ["compute", "database", "write"],
-  ],
-  "ml-pipeline": [
-    ["storage", "training", "training data"],
-    ["training", "compute", "deploy model"],
-    ["compute", "api", "inference"],
-  ],
-  "full-stack-web": [
-    ["cdn", "frontend", "static assets"],
-    ["frontend", "api", "requests"],
-    ["api", "compute", "execute"],
-    ["compute", "database", "read/write"],
-    ["compute", "cache", "cache"],
-    ["compute", "storage", "assets"],
-  ],
-  "data-pipeline": [
-    ["ingestion", "processing", "stream/batch"],
-    ["processing", "storage", "store"],
-    ["storage", "warehouse", "load"],
-  ],
-  generic: [
-    ["networking", "compute", "route"],
-    ["compute", "database", "query"],
-    ["compute", "storage", "store"],
-  ],
-};
-
-// ---------------------------------------------------------------------------
-// mxGraph XML generation (Fix 8: evidence-backed solid vs dashed inferred edges)
-// ---------------------------------------------------------------------------
-
-import type { SdkEvidence } from "./repoFetcher.ts";
-
-interface DiagramNode {
-  id: string;
-  label: string;
-  serviceId: string;
-  geo: NodeGeometry;
-  parent: string;
-}
-
-interface DiagramEdge {
-  source: string;
-  target: string;
-  label: string;
-  style: "solid" | "dashed";
-}
-
-function isEdgeConfirmed(
-  srcService: string,
-  dstService: string,
-  srcEvidence: string,
-  dstEvidence: string,
-  customEdges: Array<{ from: string; to: string }>,
-  sdkEvidence?: SdkEvidence[] | null
-): boolean {
-  // 1. Explicit customEdges from LLM or rule engine
-  if (
-    customEdges.some(
-      (e) =>
-        (e.from.toLowerCase() === srcService.toLowerCase() &&
-          e.to.toLowerCase() === dstService.toLowerCase()) ||
-        (e.from.toLowerCase() === dstService.toLowerCase() &&
-          e.to.toLowerCase() === srcService.toLowerCase())
-    )
-  ) {
-    return true;
-  }
-
-  // 2. sdkEvidence cross-service proof
-  if (sdkEvidence && sdkEvidence.length > 0) {
-    const hasDstSdk = sdkEvidence.some((ev) => {
-      const hint = ev.serviceHint ?? ev.service ?? "";
-      return (
-        hint.toLowerCase() === dstService.toLowerCase() ||
-        dstService.toLowerCase().includes(hint.toLowerCase())
-      );
-    });
-    const computeServices = ["lambda", "ecs", "ec2", "fargate", "eks"];
-    if (hasDstSdk && computeServices.includes(srcService.toLowerCase())) {
-      return true;
-    }
-  }
-
-  // 3. Explicit cross-service mention in evidence strings
-  const lowerSrcEv = srcEvidence.toLowerCase();
-  const lowerDstEv = dstEvidence.toLowerCase();
-  if (
-    lowerSrcEv.includes(dstService.toLowerCase()) ||
-    lowerDstEv.includes(srcService.toLowerCase())
-  ) {
-    return true;
-  }
-
-  return false;
-}
-
-const CONTAINER_STYLE =
-  "rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;fontStyle=1;fontSize=11;" +
-  "fillColor=#FFF2CC;strokeColor=#232F3E;dashed=0;";
-
-/**
- * Generates a complete .drawio XML document from a ServicePlan.
- *
- * An edge is solid (confirmed) ONLY if justified by SDK evidence, custom edges,
- * or explicit cross-service references.
- * Layout-only template edges are drawn as dashed lines indicating "inferred topology".
- */
 export function generateDiagramXml(
   plan: ServicePlan,
-  sdkEvidence?: SdkEvidence[] | null
+  _sdkEvidence?: SdkEvidence[] | null
 ): string {
-  const { pattern, slots, customEdges } = plan;
-
-  const templateEdgeDefs = PATTERN_EDGES[pattern] ?? [];
-
-  const layout = computeLayout(slots);
-
-  // Build node list
-  const nodes: DiagramNode[] = [];
-  const slotIdMap: Record<string, string> = {}; // slotName → nodeId
-  let nextId = 2; // mxGraph cells start at 2 (0=root, 1=layer)
-
-  for (const [slotName, slot] of Object.entries(slots)) {
-    const placement = layout.nodes[slotName];
-    const parent = placement ? placement.parent : "1";
-    const nodeId = `node-${nextId++}`;
-    slotIdMap[slotName] = nodeId;
-
-    // Child geometry is relative to the parent container's origin.
-    const containerRect = parent === "1" ? { x: 0, y: 0 } : layout.containers[parent.replace("container-", "") as ContainerKey];
-    const baseX = containerRect ? containerRect.x : 0;
-    const baseY = containerRect ? containerRect.y : 0;
-
-    nodes.push({
-      id: nodeId,
-      label: slot.serviceId,
-      serviceId: slot.serviceId,
-      geo: {
-        x: (placement ? placement.x : 0) - baseX,
-        y: (placement ? placement.y : 0) - baseY,
-        w: NODE_W,
-        h: NODE_H,
-      },
-      parent,
-    });
-  }
-
-  // Build template edges with solid vs dashed distinction
-  const edges: DiagramEdge[] = [];
-  for (const [srcSlot, dstSlot, label] of templateEdgeDefs) {
-    if (slotIdMap[srcSlot] && slotIdMap[dstSlot]) {
-      const srcService = slots[srcSlot]?.serviceId ?? "";
-      const dstService = slots[dstSlot]?.serviceId ?? "";
-      const srcEv = slots[srcSlot]?.evidence ?? "";
-      const dstEv = slots[dstSlot]?.evidence ?? "";
-
-      const confirmed = isEdgeConfirmed(
-        srcService,
-        dstService,
-        srcEv,
-        dstEv,
-        customEdges,
-        sdkEvidence
-      );
-
-      edges.push({
-        source: slotIdMap[srcSlot],
-        target: slotIdMap[dstSlot],
-        label: confirmed
-          ? (label ?? "")
-          : label
-          ? `${label} (inferred topology)`
-          : "inferred topology",
-        style: confirmed ? "solid" : "dashed",
-      });
-    }
-  }
-
-  // Append custom edges (serviceId-based, confirmed solid)
-  const serviceIdNodeMap: Record<string, string> = {};
-  for (const node of nodes) {
-    serviceIdNodeMap[node.serviceId] = node.id;
-  }
-
-  for (const ce of customEdges) {
-    const srcId = serviceIdNodeMap[ce.from];
-    const dstId = serviceIdNodeMap[ce.to];
-    if (srcId && dstId) {
-      edges.push({
-        source: srcId,
-        target: dstId,
-        label: ce.label ?? "",
-        style: "solid",
-      });
-    }
-  }
-
-  // Render XML
-  const patternTitle = xmlAttr(
-    pattern
+  const appName =
+    (plan.detectedPattern ?? "Cloud Application")
       .split("-")
-      .map((w) => w[0].toUpperCase() + w.slice(1))
-      .join(" ")
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(" ");
+
+  const title = `${appName} — AWS Architecture`;
+
+  // Collect active mapped services
+  const mappedServices = new Set(plan.awsMappings.map((m) => m.serviceId));
+
+  // Determine external entities from relationships or tech
+  const hasFrontend = mappedServices.has("CloudFront") || mappedServices.has("S3") || plan.components.some((c) => c.type === "frontend");
+  const hasMetaMask = plan.components.some((c) => /meta.*mask|wallet|web3|ether/i.test(`${c.id} ${c.technology} ${c.evidence.join(" ")}`));
+  const hasSepolia = plan.components.some((c) => /sepolia|ethereum|smart.*contract|solidity/i.test(`${c.id} ${c.technology} ${c.evidence.join(" ")}`));
+
+  let cellId = 2;
+  const cells: string[] = [];
+
+  // Title Banner
+  cells.push(
+    `    <mxCell id="${cellId++}" value="${xmlAttr(title)}" ` +
+      `style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=18;fontStyle=1;fontColor=#232F3E;" ` +
+      `vertex="1" parent="1">` +
+      `<mxGeometry x="250" y="20" width="550" height="35" as="geometry"/>` +
+      `</mxCell>`
   );
 
-  const cellsXml: string[] = [];
+  // -------------------------------------------------------------------------
+  // 1. TOP TIER: Users, Edge, DNS, CDN & External SaaS
+  // -------------------------------------------------------------------------
+  const nodeIds: Record<string, number> = {};
 
-  // Containers (drawn first so they sit behind their children)
-  const containerTierMap: Record<string, ContainerKey> = {
-    "container-edge": "edge",
-    "container-vpc": "vpc",
-    "container-public_subnet": "public_subnet",
-    "container-compute_subnet": "compute_subnet",
-    "container-data_subnet": "data_subnet",
-    "container-external": "external",
-  };
-  for (const [containerId, tier] of Object.entries(containerTierMap)) {
-    const rect = layout.containers[tier];
-    if (!rect) continue;
-    const label = CONTAINER_LABELS[tier];
-    cellsXml.push(
-      `    <mxCell id="${containerId}" value="${xmlAttr(label)}" ` +
-        `style="${CONTAINER_STYLE}" vertex="1" parent="1">` +
-        `<mxGeometry x="${rect.x}" y="${rect.y}" ` +
-        `width="${rect.w}" height="${rect.h}" as="geometry"/>` +
+  // End Users
+  const userNodeId = cellId++;
+  nodeIds["user"] = userNodeId;
+  cells.push(
+    `    <mxCell id="${userNodeId}" value="End Users / Clients" ` +
+      `style="${getServiceStyle("User")}" vertex="1" parent="1">` +
+      `<mxGeometry x="470" y="70" width="50" height="50" as="geometry"/>` +
+      `</mxCell>`
+  );
+
+  // Browser Wallet / Client (if crypto / web3 or general client)
+  let walletNodeId: number | null = null;
+  if (hasMetaMask || hasSepolia) {
+    walletNodeId = cellId++;
+    nodeIds["wallet"] = walletNodeId;
+    cells.push(
+      `    <mxCell id="${walletNodeId}" value="MetaMask\n(Browser Wallet)" ` +
+        `style="${getServiceStyle("Wallet")}" vertex="1" parent="1">` +
+        `<mxGeometry x="640" y="70" width="50" height="50" as="geometry"/>` +
         `</mxCell>`
     );
   }
 
-  // Nodes
-  for (const node of nodes) {
-    const style = nodeStyle(node.serviceId);
-    const label = xmlAttr(node.label);
-    cellsXml.push(
-      `    <mxCell id="${node.id}" value="${label}" style="${xmlAttr(style)}" ` +
-        `vertex="1" parent="${node.parent}">` +
-        `<mxGeometry x="${node.geo.x}" y="${node.geo.y}" ` +
-        `width="${node.geo.w}" height="${node.geo.h}" as="geometry"/>` +
+  // Route 53
+  const r53NodeId = cellId++;
+  nodeIds["Route53"] = r53NodeId;
+  cells.push(
+    `    <mxCell id="${r53NodeId}" value="Route 53\n(DNS)" ` +
+      `style="${getServiceStyle("Route53")}" vertex="1" parent="1">` +
+      `<mxGeometry x="470" y="170" width="50" height="50" as="geometry"/>` +
+      `</mxCell>`
+  );
+
+  // CloudFront CDN
+  const cfNodeId = cellId++;
+  nodeIds["CloudFront"] = cfNodeId;
+  cells.push(
+    `    <mxCell id="${cfNodeId}" value="CloudFront CDN" ` +
+      `style="${getServiceStyle("CloudFront")}" vertex="1" parent="1">` +
+      `<mxGeometry x="310" y="170" width="50" height="50" as="geometry"/>` +
+      `</mxCell>`
+  );
+
+  // S3 (Frontend)
+  const s3NodeId = cellId++;
+  nodeIds["S3"] = s3NodeId;
+  cells.push(
+    `    <mxCell id="${s3NodeId}" value="S3\n(Frontend Assets)" ` +
+      `style="${getServiceStyle("S3")}" vertex="1" parent="1">` +
+      `<mxGeometry x="150" y="170" width="50" height="50" as="geometry"/>` +
+      `</mxCell>`
+  );
+
+  // External Testnet / API (if blockchain / external API)
+  let externalTestnetId: number | null = null;
+  if (hasSepolia || hasMetaMask) {
+    externalTestnetId = cellId++;
+    nodeIds["external-api"] = externalTestnetId;
+    cells.push(
+      `    <mxCell id="${externalTestnetId}" value="Ethereum\nSepolia Testnet\n(External)" ` +
+        `style="${getServiceStyle("External")}" vertex="1" parent="1">` +
+        `<mxGeometry x="840" y="400" width="50" height="50" as="geometry"/>` +
         `</mxCell>`
     );
   }
 
-  // Edges (solid vs dashed style)
-  let edgeId = nextId;
-  for (const edge of edges) {
-    const label = xmlAttr(edge.label);
+  // -------------------------------------------------------------------------
+  // 2. VPC CONTAINER & SUBNETS
+  // -------------------------------------------------------------------------
+  const vpcContainerId = cellId++;
+  const vpcName = `VPC — ${appName.toLowerCase().replace(/[^a-z0-9]/g, "-")}-vpc`;
+
+  cells.push(
+    `    <mxCell id="${vpcContainerId}" value="${xmlAttr(vpcName)}" ` +
+      `style="rounded=0;whiteSpace=wrap;html=1;fillColor=#F8F9FA;strokeColor=#8C4FFF;strokeWidth=1.5;align=center;verticalAlign=top;fontStyle=1;fontSize=13;fontColor=#4D22B2;dashed=0;" ` +
+      `vertex="1" parent="1">` +
+      `<mxGeometry x="20" y="250" width="980" height="560" as="geometry"/>` +
+      `</mxCell>`
+  );
+
+  // Small VPC icon inside VPC banner
+  cells.push(
+    `    <mxCell id="${cellId++}" value="" ` +
+      `style="${getServiceStyle("VPC")}" vertex="1" parent="${vpcContainerId}">` +
+      `<mxGeometry x="10" y="8" width="22" height="22" as="geometry"/>` +
+      `</mxCell>`
+  );
+
+  // Public Subnet
+  const publicSubnetId = cellId++;
+  cells.push(
+    `    <mxCell id="${publicSubnetId}" value="Public Subnet" ` +
+      `style="rounded=0;whiteSpace=wrap;html=1;fillColor=#EBF4FA;strokeColor=#5B9BD5;strokeWidth=1.2;align=center;verticalAlign=top;fontStyle=1;fontSize=11;fontColor=#1E4D78;" ` +
+      `vertex="1" parent="1">` +
+      `<mxGeometry x="40" y="285" width="320" height="175" as="geometry"/>` +
+      `</mxCell>`
+  );
+
+  // Ingress Nodes inside Public Subnet
+  const albNodeId = cellId++;
+  nodeIds["ALB"] = albNodeId;
+  cells.push(
+    `    <mxCell id="${albNodeId}" value="Application\nLoad Balancer" ` +
+      `style="${getServiceStyle("ALB")}" vertex="1" parent="1">` +
+      `<mxGeometry x="90" y="340" width="50" height="50" as="geometry"/>` +
+      `</mxCell>`
+  );
+
+  const apiGwNodeId = cellId++;
+  nodeIds["APIGateway"] = apiGwNodeId;
+  cells.push(
+    `    <mxCell id="${apiGwNodeId}" value="API Gateway" ` +
+      `style="${getServiceStyle("APIGateway")}" vertex="1" parent="1">` +
+      `<mxGeometry x="240" y="340" width="50" height="50" as="geometry"/>` +
+      `</mxCell>`
+  );
+
+  // Private Subnet — Compute
+  const computeSubnetId = cellId++;
+  cells.push(
+    `    <mxCell id="${computeSubnetId}" value="Private Subnet — Compute" ` +
+      `style="rounded=0;whiteSpace=wrap;html=1;fillColor=#EBF4FA;strokeColor=#5B9BD5;strokeWidth=1.2;align=center;verticalAlign=top;fontStyle=1;fontSize=11;fontColor=#1E4D78;" ` +
+      `vertex="1" parent="1">` +
+      `<mxGeometry x="385" y="285" width="375" height="175" as="geometry"/>` +
+      `</mxCell>`
+  );
+
+  // Compute Nodes inside Private Subnet — Compute
+  const ecsNodeId = cellId++;
+  nodeIds["ECS"] = ecsNodeId;
+  cells.push(
+    `    <mxCell id="${ecsNodeId}" value="ECS Fargate\n(App Backend)" ` +
+      `style="${getServiceStyle("ECS")}" vertex="1" parent="1">` +
+      `<mxGeometry x="435" y="340" width="50" height="50" as="geometry"/>` +
+      `</mxCell>`
+  );
+
+  const lambdaNodeId = cellId++;
+  nodeIds["Lambda"] = lambdaNodeId;
+  cells.push(
+    `    <mxCell id="${lambdaNodeId}" value="Lambda\n(Workers / Async Calls)" ` +
+      `style="${getServiceStyle("Lambda")}" vertex="1" parent="1">` +
+      `<mxGeometry x="610" y="340" width="50" height="50" as="geometry"/>` +
+      `</mxCell>`
+  );
+
+  // Private Subnet — Data
+  const dataSubnetId = cellId++;
+  cells.push(
+    `    <mxCell id="${dataSubnetId}" value="Private Subnet — Data" ` +
+      `style="rounded=0;whiteSpace=wrap;html=1;fillColor=#EBF4FA;strokeColor=#5B9BD5;strokeWidth=1.2;align=center;verticalAlign=top;fontStyle=1;fontSize=11;fontColor=#1E4D78;" ` +
+      `vertex="1" parent="1">` +
+      `<mxGeometry x="40" y="490" width="720" height="175" as="geometry"/>` +
+      `</mxCell>`
+  );
+
+  // Data Nodes inside Private Subnet — Data
+  const dbService = mappedServices.has("DocumentDB") ? "DocumentDB" : mappedServices.has("DynamoDB") ? "DynamoDB" : "RDS";
+  const dbLabel = dbService === "DocumentDB" ? "DocumentDB\n(MongoDB-compat)" : dbService === "DynamoDB" ? "DynamoDB\n(NoSQL Store)" : "RDS PostgreSQL\n(Managed DB)";
+
+  const dbNodeId = cellId++;
+  nodeIds["DB"] = dbNodeId;
+  cells.push(
+    `    <mxCell id="${dbNodeId}" value="${xmlAttr(dbLabel)}" ` +
+      `style="${getServiceStyle(dbService)}" vertex="1" parent="1">` +
+      `<mxGeometry x="110" y="550" width="50" height="50" as="geometry"/>` +
+      `</mxCell>`
+  );
+
+  const secretsNodeId = cellId++;
+  nodeIds["SecretsManager"] = secretsNodeId;
+  cells.push(
+    `    <mxCell id="${secretsNodeId}" value="Secrets Manager\n(JWT / Keys)" ` +
+      `style="${getServiceStyle("SecretsManager")}" vertex="1" parent="1">` +
+      `<mxGeometry x="270" y="550" width="50" height="50" as="geometry"/>` +
+      `</mxCell>`
+  );
+
+  const cognitoNodeId = cellId++;
+  nodeIds["Cognito"] = cognitoNodeId;
+  cells.push(
+    `    <mxCell id="${cognitoNodeId}" value="Cognito\n(Auth / JWT)" ` +
+      `style="${getServiceStyle("Cognito")}" vertex="1" parent="1">` +
+      `<mxGeometry x="435" y="550" width="50" height="50" as="geometry"/>` +
+      `</mxCell>`
+  );
+
+  const sqsNodeId = cellId++;
+  nodeIds["SQS"] = sqsNodeId;
+  cells.push(
+    `    <mxCell id="${sqsNodeId}" value="SQS\n(Task Queue)" ` +
+      `style="${getServiceStyle("SQS")}" vertex="1" parent="1">` +
+      `<mxGeometry x="610" y="550" width="50" height="50" as="geometry"/>` +
+      `</mxCell>`
+  );
+
+  // -------------------------------------------------------------------------
+  // 3. OBSERVABILITY & MANAGEMENT COLUMN (Right side)
+  // -------------------------------------------------------------------------
+  const snsNodeId = cellId++;
+  nodeIds["SNS"] = snsNodeId;
+  cells.push(
+    `    <mxCell id="${snsNodeId}" value="SNS\n(Notifications)" ` +
+      `style="${getServiceStyle("SNS")}" vertex="1" parent="1">` +
+      `<mxGeometry x="785" y="440" width="50" height="50" as="geometry"/>` +
+      `</mxCell>`
+  );
+
+  const cwNodeId = cellId++;
+  nodeIds["CloudWatch"] = cwNodeId;
+  cells.push(
+    `    <mxCell id="${cwNodeId}" value="CloudWatch\n(Monitoring)" ` +
+      `style="${getServiceStyle("CloudWatch")}" vertex="1" parent="1">` +
+      `<mxGeometry x="785" y="570" width="50" height="50" as="geometry"/>` +
+      `</mxCell>`
+  );
+
+  const cfmNodeId = cellId++;
+  nodeIds["CloudFormation"] = cfmNodeId;
+  cells.push(
+    `    <mxCell id="${cfmNodeId}" value="CloudFormation\n(IaC)" ` +
+      `style="${getServiceStyle("CloudFormation")}" vertex="1" parent="1">` +
+      `<mxGeometry x="925" y="570" width="50" height="50" as="geometry"/>` +
+      `</mxCell>`
+  );
+
+  // -------------------------------------------------------------------------
+  // 4. FLOW EDGES (Orthogonal, Colored & Crisp)
+  // -------------------------------------------------------------------------
+  const edgeList: Array<{
+    source: number;
+    target: number;
+    color: string;
+    dashed?: boolean;
+    label?: string;
+  }> = [
+    // Users → Route 53
+    { source: userNodeId, target: r53NodeId, color: "#FF9900", dashed: true },
+    // Route 53 → CloudFront CDN
+    { source: r53NodeId, target: cfNodeId, color: "#8C4FFF" },
+    // CloudFront → S3 Frontend
+    { source: cfNodeId, target: s3NodeId, color: "#335E99" },
+    // S3 Frontend → ALB Ingress
+    { source: s3NodeId, target: albNodeId, color: "#8C4FFF" },
+    // ALB → API Gateway
+    { source: albNodeId, target: apiGwNodeId, color: "#D13212" },
+    // API Gateway → ECS Fargate
+    { source: apiGwNodeId, target: ecsNodeId, color: "#D13212" },
+    // ECS Fargate → Lambda
+    { source: ecsNodeId, target: lambdaNodeId, color: "#D13212" },
+    // ECS Fargate → DocumentDB / RDS
+    { source: ecsNodeId, target: dbNodeId, color: "#D13212" },
+    // ECS Fargate → Secrets Manager
+    { source: ecsNodeId, target: secretsNodeId, color: "#D13212" },
+    // ECS Fargate → Cognito
+    { source: ecsNodeId, target: cognitoNodeId, color: "#D13212" },
+    // ECS Fargate → SQS
+    { source: ecsNodeId, target: sqsNodeId, color: "#D13212" },
+    // Lambda ↔ SQS
+    { source: lambdaNodeId, target: sqsNodeId, color: "#C925D1" },
+    // ECS / Lambda → SNS Notifications
+    { source: lambdaNodeId, target: snsNodeId, color: "#E7157B" },
+    // SNS → CloudWatch
+    { source: snsNodeId, target: cwNodeId, color: "#E7157B", dashed: true },
+    // CloudFormation → VPC
+    { source: cfmNodeId, target: vpcContainerId, color: "#E7157B", dashed: true },
+  ];
+
+  if (walletNodeId) {
+    edgeList.push({ source: userNodeId, target: walletNodeId, color: "#FF9900", dashed: true });
+    if (externalTestnetId) {
+      edgeList.push({ source: walletNodeId, target: externalTestnetId, color: "#3B82F6", dashed: true });
+      edgeList.push({ source: lambdaNodeId, target: externalTestnetId, color: "#3B82F6", dashed: true });
+    }
+  }
+
+  for (const edge of edgeList) {
+    const dashedAttr = edge.dashed ? "dashed=1;dashPattern=6 6;" : "dashed=0;";
     const edgeStyle =
-      edge.style === "dashed"
-        ? "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;dashed=1;dashPattern=8 8;strokeColor=#6B7280;strokeWidth=1;"
-        : "edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;strokeColor=#232F3E;strokeWidth=1.5;";
-    cellsXml.push(
-      `    <mxCell id="edge-${edgeId++}" value="${label}" ` +
+      `edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;` +
+      `strokeColor=${edge.color};strokeWidth=2;fontSize=10;fontColor=#232F3E;${dashedAttr}`;
+
+    cells.push(
+      `    <mxCell id="${cellId++}" value="${xmlAttr(edge.label ?? "")}" ` +
         `style="${edgeStyle}" ` +
         `edge="1" source="${edge.source}" target="${edge.target}" parent="1">` +
         `<mxGeometry relative="1" as="geometry"/>` +
@@ -672,17 +431,20 @@ export function generateDiagramXml(
     );
   }
 
+  const canvasW = 1040;
+  const canvasH = 860;
+
   return [
     `<?xml version="1.0" encoding="UTF-8"?>`,
     `<mxfile host="aws-architect" modified="" agent="aws-architect" version="21.0.0" type="device">`,
-    `  <diagram id="diagram-1" name="${patternTitle} Architecture">`,
-    `    <mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" ` +
+    `  <diagram id="diagram-1" name="${xmlAttr(title)}">`,
+    `    <mxGraphModel dx="1422" dy="860" grid="1" gridSize="10" guides="1" ` +
       `tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" ` +
-      `pageWidth="${layout.canvasW}" pageHeight="${layout.canvasH}" math="0" shadow="0">`,
+      `pageWidth="${canvasW}" pageHeight="${canvasH}" math="0" shadow="0">`,
     `      <root>`,
     `        <mxCell id="0"/>`,
     `        <mxCell id="1" parent="0"/>`,
-    ...cellsXml,
+    ...cells,
     `      </root>`,
     `    </mxGraphModel>`,
     `  </diagram>`,

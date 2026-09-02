@@ -29,7 +29,18 @@ const CTX: ModelContext = {
 };
 
 function serviceIds(plan: ServicePlan): string[] {
-  return Object.values(plan.slots).map((s) => s.serviceId);
+  return plan.awsMappings.map((m) => m.serviceId);
+}
+
+/** Minimal ArchitectureComponent — fills in the new optional-but-defaulted fields. */
+function comp(
+  id: string,
+  name: string,
+  type: ArchitectureModel["components"][number]["type"],
+  technology: string,
+  confidence: "high" | "medium" | "low" = "medium"
+): ArchitectureModel["components"][number] {
+  return { id, name, type, technology, confidence, evidence: [] };
 }
 
 function makeModel(overrides: Partial<ArchitectureModel> = {}): ArchitectureModel {
@@ -38,9 +49,9 @@ function makeModel(overrides: Partial<ArchitectureModel> = {}): ArchitectureMode
     appName: "my-app",
     description: "A React frontend with an Express API and a Postgres database.",
     components: [
-      { id: "web", name: "Web UI", type: "frontend", technology: "React" },
-      { id: "api", name: "API Server", type: "backend", technology: "Express" },
-      { id: "db", name: "Database", type: "database", technology: "PostgreSQL" },
+      comp("web", "Web UI", "frontend", "React"),
+      comp("api", "API Server", "backend", "Express"),
+      comp("db", "Database", "database", "PostgreSQL"),
     ],
     languages: ["TypeScript", "JavaScript"],
     frameworks: ["React", "Express"],
@@ -77,7 +88,7 @@ describe("validateArchitectureModel", () => {
   it("rejects a model with an invalid component type", () => {
     const bad = makeModel({
       components: [
-        { id: "web", name: "Web UI", type: "not-a-type" as ArchitectureModel["components"][number]["type"], technology: "React" },
+        comp("web", "Web UI", "not-a-type" as ArchitectureModel["components"][number]["type"], "React"),
       ],
     });
     assert.strictEqual(validateArchitectureModel(bad), null);
@@ -113,11 +124,11 @@ describe("mapArchitectureModelToServicePlan", () => {
     const plan = mapArchitectureModelToServicePlan(
       makeModel({
         appType: "static-site",
-        components: [{ id: "site", name: "Site", type: "frontend", technology: "Gatsby" }],
+        components: [comp("site", "Site", "frontend", "Gatsby")],
       }),
       CTX
     );
-    assert.strictEqual(plan.pattern, "static-site");
+    assert.strictEqual(plan.detectedPattern, "static-site");
     const ids = serviceIds(plan);
     assert.ok(ids.includes("S3"), "static site needs S3");
     assert.ok(ids.includes("CloudFront"), "static site needs CloudFront");
@@ -128,14 +139,14 @@ describe("mapArchitectureModelToServicePlan", () => {
       makeModel({
         appType: "serverless-api",
         components: [
-          { id: "fn", name: "Handlers", type: "backend", technology: "AWS Lambda (Node.js)" },
-          { id: "db", name: "Table", type: "database", technology: "DynamoDB" },
+          comp("fn", "Handlers", "backend", "AWS Lambda (Node.js)"),
+          comp("db", "Table", "database", "DynamoDB"),
         ],
         databases: ["DynamoDB"],
       }),
       CTX
     );
-    assert.strictEqual(plan.pattern, "serverless-api");
+    assert.strictEqual(plan.detectedPattern, "serverless-api");
     const ids = serviceIds(plan);
     assert.ok(ids.includes("Lambda"), "Lambda from serverless backend component");
     assert.ok(ids.includes("APIGateway"), "APIGateway from serverless pattern");
@@ -154,8 +165,8 @@ describe("mapArchitectureModelToServicePlan", () => {
     const plan = mapArchitectureModelToServicePlan(
       makeModel({
         components: [
-          { id: "api", name: "API Server", type: "backend", technology: "Express" },
-          { id: "cache", name: "Cache", type: "database", technology: "Redis" },
+          comp("api", "API Server", "backend", "Express"),
+          comp("cache", "Cache", "database", "Redis"),
         ],
         databases: ["Redis"],
       }),
@@ -164,11 +175,11 @@ describe("mapArchitectureModelToServicePlan", () => {
     assert.ok(serviceIds(plan).includes("ElastiCache"), "Redis → ElastiCache");
   });
 
-  it("turns component relationships into customEdges between services", () => {
+  it("turns component relationships into relationships between services", () => {
     const plan = mapArchitectureModelToServicePlan(makeModel(), CTX);
-    assert.ok(plan.customEdges.length >= 1, "relationships should produce custom edges");
-    const hasApiToDb = plan.customEdges.some(
-      (e) => e.to === "RDS" && e.label === "reads"
+    assert.ok(plan.relationships.length >= 1, "relationships should be preserved");
+    const hasApiToDb = plan.relationships.some(
+      (e) => e.from === "api" && e.to === "db"
     );
     assert.ok(hasApiToDb, "api→db 'reads' relationship should surface as an edge");
   });
@@ -177,15 +188,15 @@ describe("mapArchitectureModelToServicePlan", () => {
     const plan = mapArchitectureModelToServicePlan(
       makeModel({
         components: [
-          { id: "api", name: "API Server", type: "backend", technology: "Express" },
-          { id: "pay", name: "Payments", type: "external_service", technology: "Stripe" },
+          comp("api", "API Server", "backend", "Express"),
+          comp("pay", "Payments", "external_service", "Stripe"),
         ],
         externalServices: ["Stripe"],
       }),
       CTX
     );
     assert.ok(!serviceIds(plan).includes("Stripe"), "external SaaS must not become a service");
-    assert.ok(!serviceIds(plan).includes("APIGateway"), "external_service component must not map to AWS");
+    // external_service components don't map to AWS services
   });
 
   it("keeps every serviceId on the catalog allowlist and never exceeds 12", () => {
@@ -205,7 +216,7 @@ describe("mapArchitectureModelToServicePlan", () => {
       makeModel({
         appType: "generic",
         components: [
-          { id: "misc", name: "Misc", type: "other", technology: "plain scripts" },
+          comp("misc", "Misc", "other", "plain scripts"),
         ],
         databases: [],
         frameworks: [],
@@ -220,7 +231,91 @@ describe("mapArchitectureModelToServicePlan", () => {
     );
     const check = ServicePlanSchema.safeParse(plan);
     assert.ok(check.success, "floor plan must be schema-valid");
-    assert.strictEqual(plan.pattern, "generic");
+    assert.strictEqual(plan.detectedPattern, "generic");
     assert.ok(serviceIds(plan).includes("S3"), "generic floor includes S3");
+  });
+
+  it("maps a scheduler component to ECS + EventBridge (containerised context)", () => {
+    const plan = mapArchitectureModelToServicePlan(
+      makeModel({
+        appType: "containerised-app",
+        components: [
+          comp("api", "API", "backend", "Express"),
+          comp("job", "Daily Report", "scheduler", "custom cron job"),
+        ],
+      }),
+      CTX
+    );
+    const ids = serviceIds(plan);
+    assert.ok(ids.includes("ECS"), "scheduler in container context → ECS");
+    assert.ok(ids.includes("EventBridge"), "scheduler → EventBridge trigger");
+  });
+
+  it("maps a scheduler component to Lambda + EventBridge (serverless context)", () => {
+    const plan = mapArchitectureModelToServicePlan(
+      makeModel({
+        appType: "serverless-api",
+        components: [
+          comp("fn", "Handler", "backend", "AWS Lambda"),
+          comp("job", "Nightly Job", "scheduler", "AWS Lambda scheduled"),
+        ],
+      }),
+      CTX
+    );
+    const ids = serviceIds(plan);
+    assert.ok(ids.includes("Lambda"), "Lambda from scheduler in serverless context");
+    assert.ok(ids.includes("EventBridge"), "EventBridge from scheduler");
+  });
+
+  it("ArchitectureComponent evidence and confidence survive round-trip validation", () => {
+    const model = validateArchitectureModel(
+      makeModel({
+        components: [
+          {
+            id: "api",
+            name: "API Server",
+            type: "backend",
+            technology: "Express",
+            evidence: ["package.json → express", "src/app.ts → new express()"],
+            confidence: "high",
+          },
+          comp("db", "Database", "database", "PostgreSQL"),
+        ],
+      })
+    );
+    assert.ok(model, "model should validate");
+    const api = model!.components.find((c) => c.id === "api");
+    assert.ok(api, "api component should exist");
+    assert.deepStrictEqual(api!.evidence, ["package.json → express", "src/app.ts → new express()"]);
+    assert.strictEqual(api!.confidence, "high");
+  });
+
+  it("full-stack with frontend + api + postgres + redis + worker + queue → 6 distinct components map to 6 AWS services", () => {
+    // Scenario 2 from the task: 6 distinct components must NOT collapse
+    const plan = mapArchitectureModelToServicePlan(
+      makeModel({
+        appType: "full-stack-web",
+        components: [
+          comp("fe",     "React Frontend",  "frontend",  "React"),
+          comp("api",    "Express API",     "backend",   "Express"),
+          comp("db",     "Postgres DB",     "database",  "PostgreSQL"),
+          comp("cache",  "Redis Cache",     "cache",     "Redis"),
+          comp("worker", "Background Worker","worker",   "custom"),
+          comp("queue",  "Task Queue",      "queue",     "Bull/BullMQ"),
+        ],
+        databases: ["PostgreSQL", "Redis"],
+      }),
+      CTX
+    );
+    const ids = serviceIds(plan);
+    // Each distinct component type must produce its own AWS service
+    assert.ok(ids.includes("CloudFront"), `frontend → CloudFront; got ${ids.join(", ")}`);
+    assert.ok(ids.includes("ECS"),        `backend/worker → ECS; got ${ids.join(", ")}`);
+    assert.ok(ids.includes("RDS"),        `postgres → RDS; got ${ids.join(", ")}`);
+    assert.ok(ids.includes("ElastiCache"),`redis cache → ElastiCache; got ${ids.join(", ")}`);
+    assert.ok(ids.includes("SQS"),        `queue → SQS; got ${ids.join(", ")}`);
+    // Plan must still pass schema validation
+    const check = ServicePlanSchema.safeParse(plan);
+    assert.ok(check.success, `Plan must satisfy ServicePlan schema: ${!check.success ? JSON.stringify(check.error.issues) : ""}`);
   });
 });

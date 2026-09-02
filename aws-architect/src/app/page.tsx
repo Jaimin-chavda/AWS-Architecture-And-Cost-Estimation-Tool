@@ -42,6 +42,9 @@ import {
   HelpCircle,
   Code,
   ShieldAlert,
+  Download,
+  Copy,
+  Check,
 } from "lucide-react";
 
 function GithubIcon({ className = "h-4 w-4" }: { className?: string }) {
@@ -98,6 +101,78 @@ const SAMPLE_PROMPTS = [
   "Containerized microservices with Docker, background Celery queue, and RDS PostgreSQL.",
 ];
 
+function formatAnalysisReport(res: AnalyzeResponse): string {
+  const lines: string[] = [];
+  lines.push("================================================================================");
+  lines.push("AWS ARCHITECTURE & SERVICE REQUIREMENTS ANALYSIS REPORT");
+  lines.push("================================================================================");
+  lines.push(`Input Kind:         ${res.input_kind}`);
+  lines.push(`Grounding Level:    ${res.grounding}`);
+  lines.push(`Detected Pattern:   ${res.service_plan.detectedPattern ?? "generic"}`);
+  lines.push(`Mapped AWS Services: ${res.service_plan.awsMappings.length}`);
+  if (res.cost_rows) {
+    lines.push(`Monthly Estimate:   $${res.cost_rows.totalMonthlyUsd.toFixed(2)} USD/mo (${res.cost_rows.region}, 10,000 users)`);
+  }
+  lines.push("================================================================================\n");
+
+  lines.push("1. INFERRED AWS CLOUD SERVICES REQUIRED");
+  lines.push("--------------------------------------------------------------------------------");
+  res.service_plan.awsMappings.forEach((m, idx) => {
+    lines.push(`[${idx + 1}] Service:    ${m.serviceId}`);
+    lines.push(`    Component:  ${m.componentId}`);
+    lines.push(`    Confidence: ${m.confidence.toUpperCase()}`);
+    lines.push(`    Evidence:   ${m.evidence}`);
+    lines.push("");
+  });
+
+  lines.push("2. DISCOVERED APPLICATION COMPONENTS");
+  lines.push("--------------------------------------------------------------------------------");
+  res.service_plan.components.forEach((c, idx) => {
+    lines.push(`[${idx + 1}] ID:         ${c.id}`);
+    lines.push(`    Type:       ${c.type}`);
+    lines.push(`    Technology: ${c.technology}`);
+    lines.push(`    Status:     ${c.status} (${c.confidence} confidence)`);
+    if (c.evidence.length > 0) {
+      lines.push(`    Evidence:   ${c.evidence.join("; ")}`);
+    }
+    lines.push("");
+  });
+
+  if (res.project_profile) {
+    const p = res.project_profile;
+    lines.push("3. REPOSITORY CODE SIGNALS & TECH STACK");
+    lines.push("--------------------------------------------------------------------------------");
+    if (p.languages?.length) {
+      lines.push(`Languages:      ${p.languages.map((l) => `${l.name} (${l.evidence})`).join(", ")}`);
+    }
+    if (p.frameworks?.length) {
+      lines.push(`Frameworks:     ${p.frameworks.map((f) => `${f.name} (${f.evidence})`).join(", ")}`);
+    }
+    if (p.databases?.length) {
+      lines.push(`Databases:      ${p.databases.map((d) => `${d.name} (${d.evidence})`).join(", ")}`);
+    }
+    if (p.infrastructure?.length) {
+      lines.push(`Infrastructure: ${p.infrastructure.map((i) => `${i.name} (${i.evidence})`).join(", ")}`);
+    }
+    if (p.awsUsage?.length) {
+      lines.push(`AWS SDK Calls:  ${p.awsUsage.map((a) => `${a.name} (${a.evidence})`).join(", ")}`);
+    }
+    lines.push("");
+  }
+
+  if (res.warnings?.length) {
+    lines.push("4. WARNINGS & ADVISORIES");
+    lines.push("--------------------------------------------------------------------------------");
+    res.warnings.forEach((w) => lines.push(`• ${w}`));
+    lines.push("");
+  }
+
+  lines.push("================================================================================");
+  lines.push("END OF REPORT");
+  lines.push("================================================================================");
+  return lines.join("\n");
+}
+
 export default function Home() {
   // Input state
   const [activeTab, setActiveTab] = useState<"github" | "description">("github");
@@ -112,7 +187,8 @@ export default function Home() {
   const [result, setResult] = useState<AnalyzeResponse | null>(null);
   const [insufficientSignal, setInsufficientSignal] =
     useState<InsufficientSignalResponse | null>(null);
-  const [resultTab, setResultTab] = useState<"diagram" | "cost" | "stack" | "assumptions">("diagram");
+  const [resultTab, setResultTab] = useState<"diagram" | "cost" | "stack" | "assumptions" | "raw">("diagram");
+  const [copiedText, setCopiedText] = useState(false);
 
   // Keep track of what was submitted for the visualizer
   const submittedValueRef = useRef("");
@@ -194,7 +270,7 @@ export default function Home() {
   }, []);
 
   const diagramFilename = result
-    ? `${result.service_plan.pattern}-architecture.drawio`
+    ? `${result.service_plan.detectedPattern ?? "generic"}-architecture.drawio`
     : "architecture.drawio";
 
   return (
@@ -267,14 +343,13 @@ export default function Home() {
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="inline-flex items-center gap-1.5 rounded-full border border-accent/30 bg-accent/10 px-3 py-1 font-mono text-xs font-semibold text-accent-light">
                       <Sparkles className="h-3 w-3 text-accent" />
-                      {result.service_plan.pattern
+                      {(result.service_plan.detectedPattern ?? "generic")
                         .split("-")
                         .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-                        .join(" ")}{" "}
-                      Architecture
+                        .join(" ")} Architecture
                     </span>
                     <span className="rounded-full bg-surface-2 px-2.5 py-0.5 text-xs text-muted">
-                      {Object.keys(result.service_plan.slots).length} Cloud Services Mapped
+                      {result.service_plan.awsMappings.length} Cloud Services Mapped
                     </span>
                   </div>
 
@@ -316,6 +391,7 @@ export default function Home() {
                   { id: "diagram" as const, label: "Architecture Diagram", icon: Layers },
                   { id: "cost" as const, label: "Cost Estimation & Scaling", icon: DollarSign },
                   { id: "stack" as const, label: "Detected Stack & Cloud Services", icon: Code },
+                  { id: "raw" as const, label: "Services List (.txt) & Diagnostics", icon: FileText },
                   { id: "assumptions" as const, label: "Inference Rationale", icon: HelpCircle },
                 ].map((tab) => {
                   const isActive = resultTab === tab.id;
@@ -349,7 +425,7 @@ export default function Home() {
                   <DiagramViewer
                     diagramXml={result.diagram_xml}
                     filename={diagramFilename}
-                    patternTitle={result.service_plan.pattern}
+                    patternTitle={result.service_plan.detectedPattern ?? "generic"}
                   />
                 ) : (
                   <div className="flex h-64 items-center justify-center rounded-2xl border border-border bg-surface text-center text-sm text-muted">
@@ -375,6 +451,71 @@ export default function Home() {
                   projectProfile={result.project_profile}
                   architectureModel={result.architecture_model}
                 />
+              )}
+
+              {resultTab === "raw" && (
+                <div className="flex flex-col gap-4 animate-fadeIn">
+                  {/* Action Bar */}
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border bg-surface-2 p-4">
+                    <div>
+                      <h3 className="text-sm font-bold text-foreground">
+                        Raw Analysis & Inferred Services Report
+                      </h3>
+                      <p className="text-xs text-muted">
+                        Plain-text inspection of repository signals, component discovery, and mapped AWS services.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const text = formatAnalysisReport(result);
+                          navigator.clipboard.writeText(text);
+                          setCopiedText(true);
+                          setTimeout(() => setCopiedText(false), 2000);
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-3.5 py-1.5 text-xs font-medium text-muted transition-all hover:text-foreground hover:border-accent/40 active:scale-95"
+                      >
+                        {copiedText ? (
+                          <>
+                            <Check className="h-3.5 w-3.5 text-emerald-400" />
+                            <span className="text-emerald-300">Copied!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="h-3.5 w-3.5" />
+                            <span>Copy Text</span>
+                          </>
+                        )}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const text = formatAnalysisReport(result);
+                          const blob = new Blob([text], { type: "text/plain" });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement("a");
+                          a.href = url;
+                          a.download = `${diagramFilename.replace(/\.drawio$/, "")}-analysis.txt`;
+                          a.click();
+                          URL.revokeObjectURL(url);
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-accent/30 bg-accent/15 px-4 py-1.5 text-xs font-semibold text-accent-light shadow-sm transition-all hover:bg-accent/25 active:scale-95"
+                      >
+                        <Download className="h-3.5 w-3.5 text-accent" />
+                        <span>Download .txt</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Preformatted Monospace Code Block */}
+                  <div className="overflow-x-auto rounded-2xl border border-border bg-surface p-5 shadow-lg">
+                    <pre className="font-mono text-xs text-foreground/90 whitespace-pre-wrap leading-relaxed">
+                      {formatAnalysisReport(result)}
+                    </pre>
+                  </div>
+                </div>
               )}
 
               {resultTab === "assumptions" && (

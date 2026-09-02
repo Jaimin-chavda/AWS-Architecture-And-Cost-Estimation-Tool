@@ -18,7 +18,7 @@
  *   computeCostRows(plan, region, userCount) → Promise<CostResult>
  */
 
-import type { ServicePlan } from "./schema.ts";
+import type { ServicePlan, AwsServiceMapping } from "./schema.ts";
 import { getUnitPrice } from "./prices.ts";
 import { SERVICE_DEFAULTS, BASE_USER_COUNT } from "./SERVICE_DEFAULTS.ts";
 
@@ -28,7 +28,7 @@ import { SERVICE_DEFAULTS, BASE_USER_COUNT } from "./SERVICE_DEFAULTS.ts";
 
 export interface CostRow {
   serviceId: string;
-  slotName: string;
+  componentId: string;
   unitLabel: string;
   quantity: number;
   unitPrice: number;
@@ -39,7 +39,7 @@ export interface CostRow {
 
 export interface UnpricedRow {
   serviceId: string;
-  slotName: string;
+  componentId: string;
   note: string;
 }
 
@@ -49,7 +49,6 @@ export interface CostResult {
   totalMonthlyUsd: number;
   region: string;
   userCount: number;
-  /** ISO timestamp of when this estimate was computed */
   computedAt: string;
 }
 
@@ -58,7 +57,7 @@ export interface CostResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Computes monthly cost estimates for every service slot in the ServicePlan.
+ * Computes monthly cost estimates for every service in the ServicePlan.
  *
  * @param plan       The inferred ServicePlan
  * @param region     AWS region string (e.g. "us-east-1")
@@ -75,22 +74,20 @@ export async function computeCostRows(
   const userScaleFactor = Math.max(userCount, 1) / BASE_USER_COUNT;
 
   // Fetch prices for all services in parallel
-  const slotEntries = Object.entries(plan.slots);
-
-  const pricePromises = slotEntries.map(async ([slotName, slot]) => {
-    const defaults = SERVICE_DEFAULTS[slot.serviceId];
+  const pricePromises = plan.awsMappings.map(async (mapping) => {
+    const defaults = SERVICE_DEFAULTS[mapping.serviceId];
 
     if (!defaults) {
       unpricedRows.push({
-        serviceId: slot.serviceId,
-        slotName,
-        note: `No pricing baseline configured for "${slot.serviceId}".`,
+        serviceId: mapping.serviceId,
+        componentId: mapping.componentId,
+        note: `No pricing baseline configured for "${mapping.serviceId}".`,
       });
       return null;
     }
 
     const { price, source } = await getUnitPrice(
-      slot.serviceId,
+      mapping.serviceId,
       defaults.serviceCode,
       defaults.usageTypePrefix,
       region
@@ -100,8 +97,8 @@ export async function computeCostRows(
     const monthlyUsd = price * scaledQuantity;
 
     const row: CostRow = {
-      serviceId: slot.serviceId,
-      slotName,
+      serviceId: mapping.serviceId,
+      componentId: mapping.componentId,
       unitLabel: defaults.unitLabel,
       quantity: scaledQuantity,
       unitPrice: price,

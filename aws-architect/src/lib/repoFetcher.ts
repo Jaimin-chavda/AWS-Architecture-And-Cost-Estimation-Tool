@@ -121,10 +121,6 @@ const SOURCE_GLOB_PATTERNS = [
 ];
 
 const MAX_TREE_PATHS = 50_000;
-const MAX_FILES = 40;
-const MAX_FILE_BYTES = 4 * 1024; // 4 KB per file (Fix 3)
-const MAX_TOTAL_PAYLOAD_BYTES = 150 * 1024; // 150 KB total payload (Fix 3)
-const MAX_COMPACT_TOP_LEVEL = 40;
 const GITHUB_API = "https://api.github.com";
 const FETCH_TIMEOUT_MS = 10_000;
 
@@ -184,51 +180,23 @@ export function classifyFile(
 function compactJson(raw: string): { content: string; truncated: boolean } {
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      Array.isArray(parsed)
-    ) {
-      // Not a plain object — return raw (capped) rather than corrupted
-      return { content: raw, truncated: false };
-    }
-    const obj = parsed as Record<string, unknown>;
-    const keys = Object.keys(obj);
-    if (keys.length <= MAX_COMPACT_TOP_LEVEL) {
-      return { content: JSON.stringify(obj, null, 2), truncated: false };
-    }
-    const compact: Record<string, unknown> = {};
-    for (const k of keys.slice(0, MAX_COMPACT_TOP_LEVEL)) compact[k] = obj[k];
-    return { content: JSON.stringify(compact, null, 2), truncated: true };
+    return { content: JSON.stringify(parsed, null, 2), truncated: false };
   } catch {
-    return { content: raw, truncated: false }; // unparseable — caller marks parseError
+    return { content: raw, truncated: false };
   }
 }
 
 function compactYaml(raw: string): { content: string; truncated: boolean; error?: boolean } {
   try {
     const parsed: unknown = parseYaml(raw);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      return { content: raw, truncated: false };
-    }
-    const obj = parsed as Record<string, unknown>;
-    const keys = Object.keys(obj);
-    if (keys.length <= MAX_COMPACT_TOP_LEVEL) {
-      return { content: stringifyYaml(obj), truncated: false };
-    }
-    const compact: Record<string, unknown> = {};
-    for (const k of keys.slice(0, MAX_COMPACT_TOP_LEVEL)) compact[k] = obj[k];
-    return { content: stringifyYaml(compact), truncated: true };
+    return { content: stringifyYaml(parsed), truncated: false };
   } catch {
     return { content: raw, truncated: false, error: true };
   }
 }
 
-/** Line-trim for TOML/XML/prose (never raw-truncate mid-structure for YAML/JSON) */
-function lineLimit(raw: string, maxLines: number): { content: string; truncated: boolean } {
-  const lines = raw.split("\n");
-  if (lines.length <= maxLines) return { content: raw, truncated: false };
-  return { content: lines.slice(0, maxLines).join("\n"), truncated: true };
+function lineLimit(raw: string): { content: string; truncated: boolean } {
+  return { content: raw, truncated: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -244,8 +212,7 @@ function processContent(
 
   if (ext === "json") {
     const result = compactJson(raw);
-    // If compactJson couldn't even parse, the raw is returned — detect that
-    try { JSON.parse(raw); } catch { parseErrors.push(path); return { content: raw.slice(0, 1000), truncated: true }; }
+    try { JSON.parse(raw); } catch { parseErrors.push(path); return { content: raw, truncated: false }; }
     return result;
   }
 
@@ -253,16 +220,15 @@ function processContent(
     const result = compactYaml(raw);
     if (result.error) {
       parseErrors.push(path);
-      return { content: raw.slice(0, 1000), truncated: true };
+      return { content: raw, truncated: false };
     }
-    return { content: result.content, truncated: result.truncated };
+    return { content: result.content, truncated: false };
   }
 
   if (ext === "toml" || ext === "xml") {
-    return lineLimit(raw, 200);
+    return lineLimit(raw);
   }
 
-  // Prose / README / plain text: just line-cap (already byte-capped before this call)
   return { content: raw, truncated: false };
 }
 
@@ -472,7 +438,7 @@ export async function fetchRepoSignals(
         .slice(0, MAX_TREE_PATHS);
     }
   } catch {
-    // fall through with empty tree — freeform description still works
+    // fall through with empty tree — fallback probing will run below
   }
 
   // 3. Classify and relevance-sort files (Fix 3)
@@ -483,6 +449,22 @@ export async function fetchRepoSignals(
     if (c) candidates.push({ path, ...c });
   }
 
+  // Fallback probing: if tree API returned nothing (e.g. rate limit / 403), probe raw.githubusercontent.com directly
+  if (candidates.length === 0) {
+    const PROBE_LIST = [
+      "README.md", "Readme.md", "readme.md", "README.rst",
+      "package.json", "requirements.txt", "pyproject.toml",
+      "go.mod", "Cargo.toml", "Dockerfile", "docker-compose.yml",
+      "docker-compose.yaml", "serverless.yml", "pom.xml",
+      "build.gradle", "Gemfile", "composer.json",
+      "index.js", "index.ts", "app.js", "app.ts", "server.js", "server.ts", "main.py"
+    ];
+    for (const f of PROBE_LIST) {
+      const c = classifyFile(f);
+      if (c) candidates.push({ path: f, ...c });
+    }
+  }
+
   // Sort by relevance score desc, with shorter path length as tiebreaker
   candidates.sort((a, b) =>
     a.score !== b.score
@@ -490,31 +472,16 @@ export async function fetchRepoSignals(
       : a.path.length - b.path.length
   );
 
-  // Apply 40-file cap
-  const selected = candidates.slice(0, MAX_FILES);
-  if (candidates.length > MAX_FILES) overallTruncated = true;
+  const selected = candidates;
 
-  // 4. Fetch each selected file (enforcing 4KB/file and 150KB total payload cap)
+  // 4. Fetch each selected file without payload limits
   const keyFiles: KeyFile[] = [];
   let readmeLength = 0;
-  let totalPayloadBytes = 0;
 
   for (const candidate of selected) {
-    if (totalPayloadBytes >= MAX_TOTAL_PAYLOAD_BYTES) {
-      overallTruncated = true;
-      keyFiles.push({
-        path: candidate.path,
-        kind: candidate.kind,
-        content: null,
-        sizeBytes: 0,
-        truncated: true,
-      });
-      continue;
-    }
-
     let raw: string | null = null;
     let sizeBytes = 0;
-    let fileTruncated = false;
+    const fileTruncated = false;
 
     try {
       const rawRes = await ghFetch(
@@ -526,7 +493,7 @@ export async function fetchRepoSignals(
       const rawTimer = setTimeout(() => rawController.abort(), FETCH_TIMEOUT_MS);
       let rawContent: string;
       try {
-        const rawFetch = await fetch(
+        let rawFetch = await fetch(
           `https://raw.githubusercontent.com/${owner}/${repo}/${defaultBranch}/${candidate.path}`,
           {
             headers: githubToken ? { Authorization: `Bearer ${githubToken}` } : {},
@@ -534,35 +501,26 @@ export async function fetchRepoSignals(
             redirect: "error",
           }
         );
-        clearTimeout(rawTimer);
-        if (!rawFetch.ok) throw new Error(`HTTP ${rawFetch.status}`);
-        // Read up to MAX_FILE_BYTES (4KB) from file start
-        const reader = rawFetch.body?.getReader();
-        if (!reader) throw new Error("No body reader");
-        const chunks: Uint8Array[] = [];
-        let bytesRead = 0;
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) {
-            chunks.push(value);
-            bytesRead += value.byteLength;
-            if (bytesRead >= MAX_FILE_BYTES) {
-              fileTruncated = true;
-              overallTruncated = true;
-              break;
-            }
+        if (!rawFetch.ok && (defaultBranch === "main" || defaultBranch === "master")) {
+          const altBranch = defaultBranch === "main" ? "master" : "main";
+          try {
+            const altFetch = await fetch(
+              `https://raw.githubusercontent.com/${owner}/${repo}/${altBranch}/${candidate.path}`,
+              {
+                headers: githubToken ? { Authorization: `Bearer ${githubToken}` } : {},
+                signal: rawController.signal,
+                redirect: "error",
+              }
+            );
+            if (altFetch.ok) rawFetch = altFetch;
+          } catch {
+            // keep original rawFetch
           }
         }
-        reader.cancel().catch(() => {});
-        sizeBytes = bytesRead;
-        const mergedBytes = chunks.reduce((acc, c) => {
-          const merged = new Uint8Array(acc.byteLength + c.byteLength);
-          merged.set(acc);
-          merged.set(c, acc.byteLength);
-          return merged;
-        }, new Uint8Array(0));
-        rawContent = new TextDecoder().decode(mergedBytes.slice(0, MAX_FILE_BYTES));
+        clearTimeout(rawTimer);
+        if (!rawFetch.ok) throw new Error(`HTTP ${rawFetch.status}`);
+        rawContent = await rawFetch.text();
+        sizeBytes = Buffer.byteLength(rawContent, "utf8");
         raw = rawContent;
       } catch {
         clearTimeout(rawTimer);
@@ -572,11 +530,7 @@ export async function fetchRepoSignals(
           sizeBytes = data.size ?? 0;
           if (data.content) {
             const decoded = Buffer.from(data.content.replace(/\n/g, ""), "base64").toString("utf8");
-            raw = decoded.slice(0, MAX_FILE_BYTES);
-            if (decoded.length > MAX_FILE_BYTES) {
-              fileTruncated = true;
-              overallTruncated = true;
-            }
+            raw = decoded;
           }
         }
       }
@@ -598,21 +552,15 @@ export async function fetchRepoSignals(
       readmeLength = raw.length;
     }
 
-    // Process / compact content
+    // Process content without size truncation
     const processed = processContent(candidate.path, raw, parseErrors);
-    if (processed.truncated) { fileTruncated = true; overallTruncated = true; }
-
-    totalPayloadBytes += processed.content.length;
-    if (totalPayloadBytes > MAX_TOTAL_PAYLOAD_BYTES) {
-      overallTruncated = true;
-    }
 
     keyFiles.push({
       path: candidate.path,
       kind: candidate.kind,
       content: processed.content,
       sizeBytes,
-      truncated: fileTruncated,
+      truncated: false,
     });
   }
 
@@ -651,9 +599,11 @@ function emptySignals(repoName: string, _reason: string): RepoSignals {
  */
 export function isInsufficientSignal(signals: RepoSignals): boolean {
   const hasManifestOrCI = signals.keyFiles.some(
-    (f) => f.kind === "manifest" || f.kind === "container_ci"
+    (f) => (f.kind === "manifest" || f.kind === "container_ci") && f.content !== null
   );
-  return !hasManifestOrCI && signals.readmeLength < 100;
+  const hasReadme = signals.readmeLength >= 30;
+  const hasAnyKeyFile = signals.keyFiles.some((f) => f.content !== null);
+  return !hasManifestOrCI && !hasReadme && !hasAnyKeyFile;
 }
 
 import type { Grounding } from "./schema.ts";

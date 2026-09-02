@@ -15,8 +15,9 @@ describe("Fix 7 — LLM prompt hygiene & no raw file leakage", () => {
       entryPoints: ["src/main.py"],
       awsUsage: [{ name: "AWS SDK (boto3)", evidence: "src/main.py → boto3", confidence: "high" }],
       deploymentHints: [],
-      summary: "Repository: user/my-app\nDETECTED TECHNOLOGIES:\n- FastAPI\n- PostgreSQL",
-    };
+    discoveredComponents: [],
+    summary: "Repository: user/my-app\nDETECTED TECHNOLOGIES:\n- FastAPI\n- PostgreSQL",
+  };
 
     const signals: RepoSignals = {
       repoName: "user/my-app",

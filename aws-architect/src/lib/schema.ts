@@ -2,77 +2,31 @@
  * schema.ts
  *
  * Single source of truth for the ServicePlan contract.
- * The same schema is used by:
- *   - RuleEngine (produces it)
- *   - LLMClient (generateObject target — Stage 2)
- *   - DiagramGenerator (consumes it — Stage 3/4)
- *   - CostService (consumes it — Stage 5)
- *   - /api/analyze route (validates it at the boundary)
- *
- * Decision 2: one JSON contract `ServicePlan` drives both diagram and cost.
- * Decision 16: output contract = single zod ServicePlan schema, identical for every provider.
- * Decision 17: catalog allowlist (~30–40 fixed service enum).
+ * New design: open component discovery, no pattern/slot constraints.
+ * Patterns only participate in final AWS mapping as sanity-check lookup.
  */
 
 import { z } from "zod";
 
 // ---------------------------------------------------------------------------
-// Catalog allowlist (Decision 17)
-// ~35 services; hallucinated IDs are rejected at the safeParse gate.
-// To add a service: append here + add rules in ruleEngine.ts + pricing in Stage 5.
+// Catalog allowlist (~35 services)
 // ---------------------------------------------------------------------------
 export const SERVICE_IDS = [
-  // Compute
-  "EC2",
-  "Lambda",
-  "ECS",
-  "EKS",
-  "Fargate",
-  "Lightsail",
-  "Batch",
-  // Storage
-  "S3",
-  "EBS",
-  "EFS",
-  "Glacier",
-  // Database
-  "RDS",
-  "DynamoDB",
-  "ElastiCache",
-  "Aurora",
-  "Redshift",
-  "DocumentDB",
-  // Networking
-  "CloudFront",
-  "APIGateway",
-  "ALB",
-  "Route53",
-  "VPC",
-  "NATGateway",
-  // Messaging / Async
-  "SQS",
-  "SNS",
-  "EventBridge",
-  "Kinesis",
-  // Auth / Identity
-  "Cognito",
-  // DevOps / Observability
-  "CloudWatch",
-  "CodePipeline",
-  "ECR",
-  // AI / ML
-  "SageMaker",
-  "Rekognition",
-  "Comprehend",
-  // Misc
-  "SES",
-  "Amplify",
+  "EC2", "Lambda", "ECS", "EKS", "Fargate", "Lightsail", "Batch",
+  "S3", "EBS", "EFS", "Glacier",
+  "RDS", "DynamoDB", "ElastiCache", "Aurora", "Redshift", "DocumentDB",
+  "CloudFront", "APIGateway", "ALB", "Route53", "VPC", "NATGateway", "WAF",
+  "SQS", "SNS", "EventBridge", "Kinesis",
+  "Cognito", "SecretsManager",
+  "CloudWatch", "CodePipeline", "ECR", "CloudFormation",
+  "SageMaker", "Rekognition", "Comprehend",
+  "SES", "Amplify",
 ] as const;
 
 export type ServiceId = (typeof SERVICE_IDS)[number];
 
 // ---------------------------------------------------------------------------
-// Service categories — fine-grained category mapping.
+// Service categories
 // ---------------------------------------------------------------------------
 export const SERVICE_CATEGORIES: Record<ServiceId, string> = {
   EC2: "compute", Lambda: "compute", ECS: "compute", EKS: "compute",
@@ -80,177 +34,115 @@ export const SERVICE_CATEGORIES: Record<ServiceId, string> = {
   S3: "storage", EBS: "storage", EFS: "storage", Glacier: "storage",
   RDS: "relational_db", Aurora: "relational_db",
   DynamoDB: "nosql_db", DocumentDB: "nosql_db",
-  ElastiCache: "cache",
-  Redshift: "warehouse",
+  ElastiCache: "cache", Redshift: "warehouse",
   CloudFront: "networking", APIGateway: "networking", ALB: "networking",
-  Route53: "networking", VPC: "networking", NATGateway: "networking",
+  Route53: "networking", VPC: "networking", NATGateway: "networking", WAF: "security",
   SQS: "messaging", SNS: "messaging", EventBridge: "messaging", Kinesis: "messaging",
-  Cognito: "auth",
-  CloudWatch: "observability", CodePipeline: "observability", ECR: "observability",
+  Cognito: "auth", SecretsManager: "security",
+  CloudWatch: "observability", CodePipeline: "observability", ECR: "observability", CloudFormation: "observability",
   SageMaker: "ml", Rekognition: "ml", Comprehend: "ml",
   SES: "misc", Amplify: "misc",
 };
 
 // ---------------------------------------------------------------------------
-// Service substitutes — explicit direct 1-to-1 substitute mappings.
-// Used during plan merging: a baseline service is dropped ONLY if the LLM
-// returned an exact match OR a designated direct substitute.
+// Component types (open-ended, no pattern limits)
 // ---------------------------------------------------------------------------
-export const SERVICE_SUBSTITUTES: Record<ServiceId, readonly ServiceId[]> = {
-  RDS: ["Aurora"],
-  Aurora: ["RDS"],
-  EC2: ["Lightsail"],
-  Lightsail: ["EC2"],
-  Lambda: [],
-  ECS: [],
-  EKS: [],
-  Fargate: [],
-  Batch: [],
-  S3: [],
-  EBS: [],
-  EFS: [],
-  Glacier: [],
-  DynamoDB: [],
-  ElastiCache: [],
-  Redshift: [],
-  DocumentDB: [],
-  CloudFront: [],
-  APIGateway: [],
-  ALB: [],
-  Route53: [],
-  VPC: [],
-  NATGateway: [],
-  SQS: [],
-  SNS: [],
-  EventBridge: [],
-  Kinesis: [],
-  Cognito: [],
-  CloudWatch: [],
-  CodePipeline: [],
-  ECR: [],
-  SageMaker: [],
-  Rekognition: [],
-  Comprehend: [],
-  SES: [],
-  Amplify: [],
-};
-
-// ---------------------------------------------------------------------------
-// Architecture pattern templates (Decision in PROJECT.md — 5–8 patterns).
-// These drive diagram layout (Stage 3/4) and slot validation.
-// ---------------------------------------------------------------------------
-export const PATTERN_IDS = [
-  "static-site",
-  "serverless-api",
-  "containerised-app",
-  "event-driven",
-  "ml-pipeline",
-  "full-stack-web",
-  "data-pipeline",
-  "generic",
+export const COMPONENT_TYPES = [
+  "frontend", "backend", "api", "worker", "scheduler", "database",
+  "cache", "queue", "object-storage", "search", "auth",
+  "websocket", "proxy", "external-service", "messaging",
 ] as const;
-
-export type PatternId = (typeof PATTERN_IDS)[number];
+export type ComponentType = (typeof COMPONENT_TYPES)[number];
 
 // ---------------------------------------------------------------------------
-// Confidence tiers (Decision 19: description-grounded capped at "low")
+// Component status
+// ---------------------------------------------------------------------------
+export const COMPONENT_STATUS = ["detected", "inferred"] as const;
+export type ComponentStatus = (typeof COMPONENT_STATUS)[number];
+
+// ---------------------------------------------------------------------------
+// Confidence tiers
 // ---------------------------------------------------------------------------
 export const CONFIDENCE_TIERS = ["high", "medium", "low"] as const;
 export type ConfidenceTier = (typeof CONFIDENCE_TIERS)[number];
 
 // ---------------------------------------------------------------------------
-// Grounding modes (Decision 39: input_kind != grounding — they may differ)
-// Fix 2: Evidence-derived grounding modes (repo, repoFiles, description, filenameOnly, unfounded)
+// Grounding modes
 // ---------------------------------------------------------------------------
 export const GROUNDING_VALUES = [
-  "repo",
-  "repoFiles",
-  "description",
-  "filenameOnly",
-  "unfounded",
+  "repo", "repoFiles", "description", "filenameOnly", "unfounded",
 ] as const;
 export type Grounding = (typeof GROUNDING_VALUES)[number];
 
 // ---------------------------------------------------------------------------
-// Per-slot entry: one service in one named slot of the pattern template
+// Discovered Component (open schema, no slot limit)
 // ---------------------------------------------------------------------------
-export const ServiceSlotSchema = z.object({
-  /** Must be in SERVICE_IDS — allowlist gate enforced by ServicePlanSchema.refine */
-  serviceId: z.string(),
+export const DiscoveredComponentSchema = z.object({
+  id: z.string().min(1).max(64),
+  type: z.enum(COMPONENT_TYPES),
+  technology: z.string().min(1).max(80),
+  evidence: z.array(z.string().max(200)).max(5).default([]),
   confidence: z.enum(CONFIDENCE_TIERS),
-  /** Short human-readable note on why this service was inferred */
+  status: z.enum(COMPONENT_STATUS),
+});
+export type DiscoveredComponent = z.infer<typeof DiscoveredComponentSchema>;
+
+// ---------------------------------------------------------------------------
+// Component Relationship (open, no cap)
+// ---------------------------------------------------------------------------
+export const ComponentRelationshipSchema = z.object({
+  from: z.string().min(1).max(64),
+  to: z.string().min(1).max(64),
+  type: z.string().max(40).optional(),
+  evidence: z.string().max(200).optional(),
+});
+export type ComponentRelationship = z.infer<typeof ComponentRelationshipSchema>;
+
+// ---------------------------------------------------------------------------
+// Deployment Model per component (inferred, not templated)
+// ---------------------------------------------------------------------------
+export const DeploymentModelSchema = z.object({
+  componentId: z.string(),
+  public: z.boolean(),
+  needsVpc: z.boolean(),
+  needsMultiAz: z.boolean(),
+  needsAutoscaling: z.boolean(),
+  /** "detected" = explicit config found (e.g. k8s replicas); "recommended" = heuristic */
+  source: z.enum(["detected", "recommended"]),
+  notes: z.string().max(200).optional(),
+});
+export type DeploymentModel = z.infer<typeof DeploymentModelSchema>;
+
+// ---------------------------------------------------------------------------
+// AWS Service Mapping (one per component, patterns as lookup only)
+// ---------------------------------------------------------------------------
+export const AwsServiceMappingSchema = z.object({
+  componentId: z.string(),
+  serviceId: z.enum(SERVICE_IDS),
+  confidence: z.enum(CONFIDENCE_TIERS),
   evidence: z.string().max(200),
+  /** If true, this mapping came from a pattern lookup table (sanity-check only) */
+  fromPattern: z.boolean().default(false),
 });
-export type ServiceSlot = z.infer<typeof ServiceSlotSchema>;
+export type AwsServiceMapping = z.infer<typeof AwsServiceMappingSchema>;
 
 // ---------------------------------------------------------------------------
-// Custom edge (for hybrid/unclassifiable patterns — flagged for manual review)
+// Root ServicePlan (new design)
 // ---------------------------------------------------------------------------
-export const CustomEdgeSchema = z.object({
-  from: z.string(),
-  to: z.string(),
-  label: z.string().max(80).optional(),
+export const ServicePlanSchema = z.object({
+  inputKind: z.enum(["github_url", "description"]),
+  /** Open array — no max length, no pattern slots */
+  components: z.array(DiscoveredComponentSchema),
+  relationships: z.array(ComponentRelationshipSchema),
+  deploymentModel: z.array(DeploymentModelSchema),
+  awsMappings: z.array(AwsServiceMappingSchema),
+  /** Pattern detection for UI label only — never constrains output */
+  detectedPattern: z.string().optional(),
+  metadata: z.object({
+    grounding: z.enum(GROUNDING_VALUES),
+    truncated: z.boolean(),
+    parseErrors: z.array(z.string()),
+  }),
 });
-export type CustomEdge = z.infer<typeof CustomEdgeSchema>;
-
-// ---------------------------------------------------------------------------
-// Metadata block
-// ---------------------------------------------------------------------------
-export const ServicePlanMetadataSchema = z.object({
-  grounding: z.enum(GROUNDING_VALUES),
-  /** True if any fetched file was size- or count-capped */
-  truncated: z.boolean(),
-  /** Paths of files that failed to parse (YAML/JSON errors) */
-  parseErrors: z.array(z.string()),
-});
-export type ServicePlanMetadata = z.infer<typeof ServicePlanMetadataSchema>;
-
-// ---------------------------------------------------------------------------
-// Root ServicePlan schema
-// Decision 2: one contract for diagram + cost.
-// slots is a Record<slotName, ServiceSlot>; slotNames are pattern-specific.
-// Max 12 distinct services (flaw 3 bound).
-// ---------------------------------------------------------------------------
-export const ServicePlanSchema = z
-  .object({
-    /** Mirrors the input_kind that started this request */
-    inputKind: z.enum(["github_url", "description"]),
-    pattern: z.enum(PATTERN_IDS),
-    /**
-     * Named slots for the chosen pattern template.
-     * Keys are slot names (e.g. "frontend", "api", "database").
-     * Values are ServiceSlot objects.
-     */
-    slots: z.record(z.string(), ServiceSlotSchema),
-    /**
-     * Additional edges for hybrid/unclassifiable repos.
-     * Flagged in the UI as requiring manual review.
-     */
-    customEdges: z.array(CustomEdgeSchema),
-    /**
-     * Weak-signal services that were detected but not corroborated (Fix 5)
-     */
-    suggestedServices: z.array(ServiceSlotSchema).optional().default([]),
-    metadata: ServicePlanMetadataSchema,
-  })
-  .refine(
-    (plan) => {
-      // Catalog allowlist gate (Decision 17): every serviceId must be in SERVICE_IDS
-      const ids = Object.values(plan.slots).map((s) => s.serviceId);
-      return ids.every((id) => (SERVICE_IDS as readonly string[]).includes(id));
-    },
-    {
-      message:
-        "ServicePlan contains one or more serviceIds not in the catalog allowlist",
-    }
-  )
-  .refine(
-    (plan) => {
-      // Max 12 distinct services (flaw 3 bound)
-      const unique = new Set(Object.values(plan.slots).map((s) => s.serviceId));
-      return unique.size <= 12;
-    },
-    { message: "ServicePlan may not contain more than 12 distinct services" }
-  );
 
 export type ServicePlan = z.infer<typeof ServicePlanSchema>;

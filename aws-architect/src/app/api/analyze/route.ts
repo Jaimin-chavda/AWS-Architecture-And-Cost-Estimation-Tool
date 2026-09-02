@@ -46,7 +46,7 @@ interface AnalyzeRequestBody {
 // ---------------------------------------------------------------------------
 // Input validation constants (Decision 7)
 // ---------------------------------------------------------------------------
-const MAX_DESCRIPTION_LENGTH = 8_000; // chars
+const MAX_DESCRIPTION_LENGTH = 100_000; // chars
 const MAX_URL_LENGTH = 2_000; // chars
 const ALLOWED_GITHUB_HOSTS = ["github.com"]; // SSRF allowlist
 

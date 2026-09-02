@@ -40,14 +40,19 @@ function makeRuleInput(overrides: Partial<RuleInput> = {}): RuleInput {
 function makePlan(overrides: Partial<ServicePlan> = {}): ServicePlan {
   return {
     inputKind: "description",
-    pattern: "serverless-api",
-    slots: {
-      compute: { serviceId: "Lambda", confidence: "high", evidence: "explicit lambda" },
-      database: { serviceId: "DynamoDB", confidence: "high", evidence: "dynamo ref" },
-      monitoring: { serviceId: "CloudWatch", confidence: "medium", evidence: "always present" },
-    },
-    customEdges: [],
-    suggestedServices: [],
+    components: [
+      { id: "comp1", type: "backend", technology: "Lambda", evidence: ["explicit lambda"], confidence: "high", status: "detected" },
+      { id: "comp2", type: "database", technology: "DynamoDB", evidence: ["dynamo ref"], confidence: "high", status: "detected" },
+      { id: "comp3", type: "proxy", technology: "CloudWatch", evidence: ["always present"], confidence: "medium", status: "inferred" },
+    ],
+    awsMappings: [
+      { componentId: "comp1", serviceId: "Lambda", confidence: "high", evidence: "explicit lambda", fromPattern: false },
+      { componentId: "comp2", serviceId: "DynamoDB", confidence: "high", evidence: "dynamo ref", fromPattern: false },
+      { componentId: "comp3", serviceId: "CloudWatch", confidence: "medium", evidence: "always present", fromPattern: false },
+    ],
+    relationships: [],
+    deploymentModel: [],
+    detectedPattern: "serverless-api",
     metadata: { grounding: "repo", truncated: false, parseErrors: [] },
     ...overrides,
   };
@@ -103,15 +108,17 @@ describe("Decision 19 — Grounding confidence cap", () => {
   it("does not cap confidence for repo / repoFiles grounding", () => {
     for (const g of ["repo", "repoFiles"] as const) {
       const result = applyGroundingCap(makePlan(), g);
-      assert.strictEqual(result.slots.compute.confidence, "high", `grounding=${g} must not cap`);
+      // Check that high confidence remains high
+      const highConf = result.awsMappings.find(m => m.confidence === "high");
+      assert.ok(highConf, `grounding=${g} must not cap high confidence`);
     }
   });
 
   it("caps all confidence to 'low' for description / filenameOnly / unfounded grounding", () => {
     for (const g of ["description", "filenameOnly", "unfounded"] as const) {
       const result = applyGroundingCap(makePlan(), g);
-      for (const slot of Object.values(result.slots)) {
-        assert.strictEqual(slot.confidence, "low", `grounding=${g}: expected 'low' got '${slot.confidence}'`);
+      for (const mapping of result.awsMappings) {
+        assert.strictEqual(mapping.confidence, "low", `grounding=${g}: expected 'low' got '${mapping.confidence}'`);
       }
     }
   });

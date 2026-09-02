@@ -268,7 +268,7 @@ export function CostCalculator({
             <tbody className="divide-y divide-border/60 bg-transparent">
               {scaledCost.rows.map((row) => (
                 <tr
-                  key={row.serviceId}
+                  key={`${row.componentId}-${row.serviceId}`}
                   className="transition-colors hover:bg-surface-2/40"
                 >
                   <td className="whitespace-nowrap px-5 py-3.5">
@@ -276,7 +276,7 @@ export function CostCalculator({
                       {row.serviceId}
                     </div>
                     <div className="text-[11px] text-muted">
-                      {row.slotName} · {row.annotation}
+                      {row.componentId} · {row.annotation}
                     </div>
                   </td>
                   <td className="whitespace-nowrap px-4 py-3.5 text-xs text-muted">

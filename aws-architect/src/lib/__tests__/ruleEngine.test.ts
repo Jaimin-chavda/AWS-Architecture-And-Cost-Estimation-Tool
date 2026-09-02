@@ -31,7 +31,7 @@ function makeInput(overrides: Partial<RuleInput> = {}): RuleInput {
 }
 
 function serviceIds(plan: ReturnType<typeof runRuleEngine>): string[] {
-  return Object.values(plan.slots).map((s) => s.serviceId);
+  return plan.awsMappings.map((m) => m.serviceId);
 }
 
 // ---------------------------------------------------------------------------
@@ -60,7 +60,7 @@ describe("runRuleEngine — always produces a valid ServicePlan", () => {
     }
   });
 
-  it("every serviceId in slots is in the catalog allowlist", () => {
+  it("every serviceId in awsMappings is in the catalog allowlist", () => {
     const plan = runRuleEngine(makeInput({
       description: "react app with express api postgres s3 cloudfront cloudwatch cognito sqs sns",
       fileContent: "DATABASE_URL=postgresql://localhost:5432/db",
@@ -84,13 +84,13 @@ describe("runRuleEngine — always produces a valid ServicePlan", () => {
   });
 });
 
-describe("runRuleEngine — pattern classification", () => {
+describe("runRuleEngine — pattern classification (detectedPattern for UI label only)", () => {
   it("classifies static site correctly", () => {
     const plan = runRuleEngine(makeInput({
       description: "a gatsby static site deployed to s3 with cloudfront cdn",
       fileNames: ["vercel.json"],
     }));
-    assert.strictEqual(plan.pattern, "static-site");
+    assert.strictEqual(plan.detectedPattern, "static-site");
   });
 
   it("classifies serverless API correctly — serverless.yml signal", () => {
@@ -98,7 +98,7 @@ describe("runRuleEngine — pattern classification", () => {
       fileNames: ["serverless.yml"],
       fileContent: "aws-lambda handler dynamodb apigateway",
     }));
-    assert.strictEqual(plan.pattern, "serverless-api");
+    assert.strictEqual(plan.detectedPattern, "serverless-api");
   });
 
   it("classifies serverless API — SAM template.yaml signal", () => {
@@ -106,7 +106,7 @@ describe("runRuleEngine — pattern classification", () => {
       fileNames: ["template.yaml"],
       fileContent: "AWS::Lambda::Function AWS::ApiGateway::RestApi",
     }));
-    assert.strictEqual(plan.pattern, "serverless-api");
+    assert.strictEqual(plan.detectedPattern, "serverless-api");
   });
 
   it("classifies containerised app — Dockerfile present", () => {
@@ -114,28 +114,28 @@ describe("runRuleEngine — pattern classification", () => {
       fileNames: ["Dockerfile", "docker-compose.yml"],
       fileContent: "FROM node:22\nfargate ecs",
     }));
-    assert.strictEqual(plan.pattern, "containerised-app");
+    assert.strictEqual(plan.detectedPattern, "containerised-app");
   });
 
   it("classifies ML pipeline", () => {
     const plan = runRuleEngine(makeInput({
       description: "sagemaker training job pytorch model with s3 dataset and inference endpoint",
     }));
-    assert.strictEqual(plan.pattern, "ml-pipeline");
+    assert.strictEqual(plan.detectedPattern, "ml-pipeline");
   });
 
   it("classifies event-driven when SQS/Kinesis signals dominate", () => {
     const plan = runRuleEngine(makeInput({
       description: "kafka consumer producer sqs eventbridge async message queue worker",
     }));
-    assert.strictEqual(plan.pattern, "event-driven");
+    assert.strictEqual(plan.detectedPattern, "event-driven");
   });
 
   it("classifies data pipeline", () => {
     const plan = runRuleEngine(makeInput({
       description: "ETL data pipeline kinesis s3 glue redshift athena data warehouse",
     }));
-    assert.strictEqual(plan.pattern, "data-pipeline");
+    assert.strictEqual(plan.detectedPattern, "data-pipeline");
   });
 
   it("falls back to generic when signals are too weak", () => {
@@ -146,7 +146,7 @@ describe("runRuleEngine — pattern classification", () => {
 });
 
 describe("Fix 5 — Two-tier signals & CloudWatch gating", () => {
-  it("(a) Docker-only repo → RDS/ElastiCache do NOT appear in services, only suggestedServices", () => {
+  it("(a) Docker-only repo → RDS/ElastiCache do NOT appear in services, only suggested (low confidence)", () => {
     const plan = runRuleEngine(makeInput({
       fileNames: ["Dockerfile"],
       fileContent: "FROM node:22\nCOPY . .\nCMD ['node', 'index.js']\n// mentioning postgres and redis in comments only",
@@ -155,9 +155,11 @@ describe("Fix 5 — Two-tier signals & CloudWatch gating", () => {
     assert.ok(!ids.includes("RDS"), "RDS must not appear in services[] for Docker-only repo without DB connection/infra");
     assert.ok(!ids.includes("ElastiCache"), "ElastiCache must not appear in services[] for Docker-only repo");
 
-    const suggestedIds = (plan.suggestedServices ?? []).map((s) => s.serviceId);
-    assert.ok(suggestedIds.includes("RDS"), "RDS should appear in suggestedServices");
-    assert.ok(suggestedIds.includes("ElastiCache"), "ElastiCache should appear in suggestedServices");
+    // Check low confidence mappings exist
+    const rdsMapping = plan.awsMappings.find(m => m.serviceId === "RDS");
+    const ecMapping = plan.awsMappings.find(m => m.serviceId === "ElastiCache");
+    if (rdsMapping) assert.strictEqual(rdsMapping.confidence, "low", "RDS should be low confidence");
+    if (ecMapping) assert.strictEqual(ecMapping.confidence, "low", "ElastiCache should be low confidence");
   });
 
   it("(b) Docker + Postgres connection string → RDS promoted to services[]", () => {
@@ -244,5 +246,127 @@ describe("runRuleEngine — metadata passthrough", () => {
     assert.strictEqual(planGh.inputKind, "github_url");
     const planDesc = runRuleEngine(makeInput({ inputKind: "description" }));
     assert.strictEqual(planDesc.inputKind, "description");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// discoveredComponents integration (Fix DC)
+// ---------------------------------------------------------------------------
+
+import type { ProjectProfile } from "../repoAnalyzer.ts";
+import type { DiscoveredComponent } from "../repoAnalyzer.ts";
+
+function makeProfile(components: DiscoveredComponent[]): ProjectProfile {
+  return {
+    languages: [],
+    frameworks: [],
+    databases: [],
+    infrastructure: [],
+    entryPoints: [],
+    awsUsage: [],
+    deploymentHints: [],
+    discoveredComponents: components,
+    summary: "",
+  };
+}
+
+function dc(
+  id: string,
+  name: string,
+  type: DiscoveredComponent["type"],
+  technology: string,
+  source: DiscoveredComponent["source"] = "docker-compose"
+): DiscoveredComponent {
+  return { id, name, type, technology, evidence: [`docker-compose.yml → services.${name}`], confidence: "high", source };
+}
+
+describe("Fix DC — discoveredComponents drive rule engine service detection", () => {
+  it("static site: static site repo still maps to just S3 + CloudFront (no padding)", () => {
+    // The three-scenario regression test from the task.
+    const plan = runRuleEngine(makeInput({
+      description: "a gatsby static site",
+      fileNames: ["vercel.json", "package.json"],
+      fileContent: "gatsby vite static",
+      profile: makeProfile([]),
+    }));
+    assert.strictEqual(plan.detectedPattern, "static-site");
+    const ids = serviceIds(plan);
+    assert.ok(ids.includes("S3"), "static site needs S3");
+    assert.ok(ids.includes("CloudFront"), "static site needs CloudFront");
+    // Must NOT be padded with unwarranted services
+    assert.ok(!ids.includes("ECS"), "static site must not gain ECS");
+    assert.ok(!ids.includes("SQS"), "static site must not gain SQS");
+    assert.ok(!ids.includes("RDS"), "static site must not gain RDS");
+  });
+
+  it("docker-compose with api + worker + postgres + redis + queue → all five show up as distinct services", () => {
+    const plan = runRuleEngine(makeInput({
+      fileNames: ["docker-compose.yml", "Dockerfile"],
+      fileContent: "FROM node:22",
+      profile: makeProfile([
+        dc("dc-api",      "api",      "backend",  "custom"),
+        dc("dc-worker",   "worker",   "worker",   "custom"),
+        dc("dc-postgres", "postgres", "database", "PostgreSQL"),
+        dc("dc-redis",    "redis",    "cache",    "Redis"),
+        dc("dc-queue",    "queue",    "queue",    "Bull/BullMQ"),
+      ]),
+    }));
+
+    const ids = serviceIds(plan);
+    assert.ok(
+      ids.includes("ECS"),
+      `Expected ECS for containerised backend/worker, got: ${ids.join(", ")}`
+    );
+    assert.ok(
+      ids.includes("RDS"),
+      `Expected RDS for PostgreSQL service, got: ${ids.join(", ")}`
+    );
+    assert.ok(
+      ids.includes("ElastiCache"),
+      `Expected ElastiCache for Redis service, got: ${ids.join(", ")}`
+    );
+    assert.ok(
+      ids.includes("SQS"),
+      `Expected SQS for queue service, got: ${ids.join(", ")}`
+    );
+    // CloudWatch gated on compute — ECS is present so CloudWatch should appear
+    assert.ok(ids.includes("CloudWatch"), "CloudWatch should be present when ECS is present");
+  });
+
+  it("docker-compose services drive discovered components independently of keyword matching", () => {
+    // This repo has NO keyword text in fileContent mentioning postgres/redis/SQS —
+    // the only evidence is the discoveredComponents from docker-compose parsing.
+    const plan = runRuleEngine(makeInput({
+      description: "",
+      fileContent: "FROM node:22\nCOPY . .\nCMD node dist/server.js",
+      fileNames: ["docker-compose.yml", "Dockerfile"],
+      profile: makeProfile([
+        dc("dc-backend", "backend", "backend", "custom"),
+        dc("dc-db",      "db",      "database", "PostgreSQL"),
+        dc("dc-cache",   "cache",   "cache",    "Redis"),
+      ]),
+    }));
+
+    const ids = serviceIds(plan);
+    assert.ok(ids.includes("RDS"), "RDS must come from discoveredComponent, not keyword");
+    assert.ok(ids.includes("ElastiCache"), "ElastiCache must come from discoveredComponent, not keyword");
+    assert.ok(ids.includes("ECS"), "ECS from container pattern");
+  });
+
+  it("serverless.yml functions appear as distinct Lambda + EventBridge for scheduler", () => {
+    const plan = runRuleEngine(makeInput({
+      fileNames: ["serverless.yml"],
+      fileContent: "provider: aws\nruntime: nodejs22.x",
+      profile: makeProfile([
+        dc("sls-api",       "api-handler",  "api",       "AWS Lambda", "serverless-yml"),
+        dc("sls-worker",    "msg-processor","worker",    "AWS Lambda", "serverless-yml"),
+        dc("sls-scheduler", "daily-report", "scheduler", "AWS Lambda", "serverless-yml"),
+      ]),
+    }));
+
+    const ids = serviceIds(plan);
+    assert.ok(ids.includes("Lambda"), "Lambda from serverless functions");
+    assert.ok(ids.includes("APIGateway"), "APIGateway from api-type function");
+    assert.ok(ids.includes("EventBridge"), "EventBridge from scheduler function");
   });
 });

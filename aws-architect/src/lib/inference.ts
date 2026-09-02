@@ -1,18 +1,13 @@
 /**
  * inference.ts  —  FLOW.md Stage 3: Inference orchestration
  *
- * Central reasoning pipeline:
+ * New pipeline (avoids collapse problem by construction):
  *   RepoSignals/description → LLM → ArchitectureModel → validation
  *     → deterministic AWS service mapping → ServicePlan
  *
  * The LLM never picks AWS services directly. It builds a single structured
- * ArchitectureModel of the whole application; architecture.ts maps that model
- * to the ServicePlan. Downstream (diagram, cost) consume the ServicePlan.
- *
- * Decision 3:  Rules-first — baseline never fails.
- * Decision 5:  LLM failure → baseline silently (no error page).
- * Decision 19: description-grounded → cap all confidence to "low".
- * Decision 21: retries capped at 3 inside llmClient.
+ * ArchitectureModel of the whole application as a system; architecture.ts maps
+ * that model to the ServicePlan. Downstream (diagram, cost) consume the ServicePlan.
  */
 
 import { runRuleEngine } from "./ruleEngine.ts";
@@ -21,7 +16,6 @@ import { mapArchitectureModelToServicePlan } from "./architecture.ts";
 import type { ArchitectureModel } from "./architecture.ts";
 import type {
   ServicePlan,
-  ServiceSlot,
   Grounding,
 } from "./schema.ts";
 import type { RuleInput } from "./ruleEngine.ts";
@@ -29,12 +23,9 @@ import type { RepoSignals } from "./repoFetcher.ts";
 import type { ProjectProfile } from "./repoAnalyzer.ts";
 
 // ---------------------------------------------------------------------------
-// Grounding derivation (Fix 2)
+// Grounding derivation
 // ---------------------------------------------------------------------------
 
-/**
- * Derives grounding directly and only from evidence actually consumed (Fix 2).
- */
 export function deriveGrounding(opts: {
   description?: string;
   fetchedFiles?: { content: string | null }[];
@@ -54,15 +45,13 @@ export function deriveGrounding(opts: {
   return "unfounded";
 }
 
-/** Caps all slot confidence to "low" for non-code grounded results (Decision 19 / Fix 2). */
+/** Caps all component confidence to "low" for non-code grounded results. */
 export function applyGroundingCap(plan: ServicePlan, grounding: Grounding): ServicePlan {
   if (grounding === "repo" || grounding === "repoFiles") return plan;
 
-  const cappedSlots: Record<string, ServiceSlot> = {};
-  for (const [name, slot] of Object.entries(plan.slots)) {
-    cappedSlots[name] = { ...slot, confidence: "low" };
-  }
-  return { ...plan, slots: cappedSlots };
+  const cappedComponents = plan.components.map((c) => ({ ...c, confidence: "low" as const }));
+  const cappedMappings = plan.awsMappings.map((m) => ({ ...m, confidence: "low" as const }));
+  return { ...plan, components: cappedComponents, awsMappings: cappedMappings };
 }
 
 // ---------------------------------------------------------------------------
@@ -71,24 +60,13 @@ export function applyGroundingCap(plan: ServicePlan, grounding: Grounding): Serv
 
 export interface InferenceInput {
   ruleInput: RuleInput;
-  /** Populated when input_kind is github_url and RepoFetcher succeeded */
   signals: RepoSignals | null;
-  /** Freeform description text (used on description path, or for LLM context on repo path) */
   description: string;
-  /**
-   * Structured project profile from repoAnalyzer (github_url path only).
-   * Forwarded to the LLM as the evidence base for building the architecture model.
-   */
   profile?: ProjectProfile | null;
 }
 
 export interface InferenceResult {
-  /** The ServicePlan consumed by diagram + cost (derived from the model, or rules baseline). */
   plan: ServicePlan;
-  /**
-   * The ArchitectureModel produced by the LLM (null when the LLM was not
-   * configured or failed and the rules baseline was used).
-   */
   architectureModel: ArchitectureModel | null;
 }
 
