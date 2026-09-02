@@ -316,7 +316,13 @@ export default function Home() {
       </header>
 
       {/* Main Content Area */}
-      <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-8 sm:px-6 sm:py-12">
+      <main
+        className={`mx-auto flex w-full flex-1 flex-col px-4 py-6 sm:px-6 sm:py-8 transition-all duration-300 ${
+          !loading && showResults && resultTab === "diagram"
+            ? "max-w-[96vw] 2xl:max-w-[1760px]"
+            : "max-w-5xl"
+        }`}
+      >
         {/* ========================================================================= */}
         {/* 1. LOADING / ANALYSIS ANIMATED EXPERIENCE (The Star Feature)              */}
         {/* ========================================================================= */}
@@ -419,7 +425,7 @@ export default function Home() {
             <WarningsBanner warnings={result.warnings} />
 
             {/* Tab Views */}
-            <div className="min-h-[450px]">
+            <div className="flex flex-1 flex-col min-h-[500px]">
               {resultTab === "diagram" &&
                 (result.diagram_xml ? (
                   <DiagramViewer

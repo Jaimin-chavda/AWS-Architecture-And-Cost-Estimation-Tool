@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-import { Download, ExternalLink, RefreshCw, ZoomIn } from "lucide-react";
+import { Download, ExternalLink, RefreshCw, Maximize2, Minimize2, Sparkles } from "lucide-react";
 
 export interface DiagramViewerProps {
   diagramXml: string;
@@ -19,6 +19,7 @@ export function DiagramViewer({
 }: DiagramViewerProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [ready, setReady] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   useEffect(() => {
     setReady(false);
@@ -53,22 +54,52 @@ export function DiagramViewer({
   }
 
   function handleOpenDrawio() {
-    // Open diagrams.net web editor
     window.open("https://app.diagrams.net", "_blank");
   }
 
   return (
-    <div className="flex flex-col gap-4">
-      {/* Top Toolbar */}
-      <div className="flex flex-wrap items-center justify-between gap-3 px-1">
-        <div className="flex items-center gap-2">
-          <span className="flex h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]" />
-          <p className="text-xs text-muted">
-            Interactive AWS architecture canvas. You can drag and rearrange nodes directly in the diagram.
-          </p>
+    <div
+      className={
+        isFullscreen
+          ? "fixed inset-0 z-50 flex flex-col bg-background/95 p-4 sm:p-6 backdrop-blur-xl animate-fadeIn"
+          : "flex flex-1 flex-col gap-3.5 w-full min-h-0"
+      }
+    >
+      {/* Top Workspace Toolbar */}
+      <div className="flex flex-wrap items-center justify-between gap-3 px-1 py-1">
+        <div className="flex items-center gap-2.5">
+          <span className="flex h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.9)]" />
+          <div className="flex flex-col sm:flex-row sm:items-center sm:gap-2">
+            <span className="text-xs font-semibold text-foreground">
+              Architecture Workspace
+            </span>
+            <span className="hidden sm:inline text-xs text-muted/60">•</span>
+            <p className="text-xs text-muted">
+              Interactive AWS canvas. Drag nodes, adjust zoom, or click to edit relationships.
+            </p>
+          </div>
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Maximize / Viewport expand button */}
+          <button
+            onClick={() => setIsFullscreen(!isFullscreen)}
+            className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface-2/80 px-3.5 py-1.5 text-xs font-medium text-foreground shadow-sm transition-all hover:border-accent/40 hover:bg-surface-3 active:scale-95"
+            title={isFullscreen ? "Exit fullscreen" : "Expand canvas to fullscreen"}
+          >
+            {isFullscreen ? (
+              <>
+                <Minimize2 className="h-3.5 w-3.5 text-accent" />
+                <span>Exit Fullscreen</span>
+              </>
+            ) : (
+              <>
+                <Maximize2 className="h-3.5 w-3.5 text-accent" />
+                <span className="hidden sm:inline">Fullscreen</span>
+              </>
+            )}
+          </button>
+
           <button
             onClick={handleDownload}
             className="inline-flex items-center gap-1.5 rounded-full border border-accent/30 bg-accent/10 px-4 py-1.5 text-xs font-medium text-accent-light shadow-sm transition-all hover:border-accent/60 hover:bg-accent/20 active:scale-95"
@@ -89,22 +120,33 @@ export function DiagramViewer({
         </div>
       </div>
 
-      {/* Frame Container */}
-      <div className="relative overflow-hidden rounded-2xl border border-border bg-surface-2/70 shadow-xl backdrop-blur-md">
+      {/* Frame Container — Responsive Full-Sized Workspace */}
+      <div
+        className={`relative flex flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-surface-2/70 shadow-2xl backdrop-blur-md transition-all ${
+          isFullscreen
+            ? "h-[calc(100vh-100px)] w-full"
+            : "h-[74vh] min-h-[640px] max-h-[960px] w-full"
+        }`}
+      >
         {!ready && (
           <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-surface/90 backdrop-blur-sm">
-            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-accent/10 border border-accent/20">
-              <RefreshCw className="h-5 w-5 animate-spin text-accent" />
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-accent/10 border border-accent/25 shadow-lg">
+              <RefreshCw className="h-6 w-6 animate-spin text-accent" />
             </div>
-            <span className="font-mono text-xs text-muted">
-              Rendering cloud topology canvas…
-            </span>
+            <div className="text-center">
+              <p className="font-mono text-xs font-medium text-foreground">
+                Rendering AWS Architecture Topology…
+              </p>
+              <p className="text-[11px] text-muted mt-1">
+                Synthesizing VPC tiers, subnets, icons, and routing edges
+              </p>
+            </div>
           </div>
         )}
         <iframe
           ref={iframeRef}
           src={DRAWIO_EMBED_URL}
-          className="h-[540px] w-full sm:h-[600px]"
+          className="h-full w-full flex-1 border-0"
           title="AWS Architecture Blueprint"
           sandbox="allow-scripts allow-same-origin allow-popups allow-forms"
         />

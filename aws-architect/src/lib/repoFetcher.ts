@@ -478,74 +478,78 @@ export async function fetchRepoSignals(
   const keyFiles: KeyFile[] = [];
   let readmeLength = 0;
 
-  for (const candidate of selected) {
-    let raw: string | null = null;
-    let sizeBytes = 0;
-    const fileTruncated = false;
+    const isProbed = treePaths.length === 0;
+    for (const candidate of selected) {
+      let raw: string | null = null;
+      let sizeBytes = 0;
+      const fileTruncated = false;
 
-    try {
-      const rawRes = await ghFetch(
-        `${GITHUB_API}/repos/${owner}/${repo}/contents/${candidate.path}`,
-        githubToken
-      );
-      // Request raw content
-      const rawController = new AbortController();
-      const rawTimer = setTimeout(() => rawController.abort(), FETCH_TIMEOUT_MS);
-      let rawContent: string;
       try {
-        let rawFetch = await fetch(
-          `https://raw.githubusercontent.com/${owner}/${repo}/${defaultBranch}/${candidate.path}`,
-          {
-            headers: githubToken ? { Authorization: `Bearer ${githubToken}` } : {},
-            signal: rawController.signal,
-            redirect: "error",
-          }
+        const rawRes = await ghFetch(
+          `${GITHUB_API}/repos/${owner}/${repo}/contents/${candidate.path}`,
+          githubToken
         );
-        if (!rawFetch.ok && (defaultBranch === "main" || defaultBranch === "master")) {
-          const altBranch = defaultBranch === "main" ? "master" : "main";
-          try {
-            const altFetch = await fetch(
-              `https://raw.githubusercontent.com/${owner}/${repo}/${altBranch}/${candidate.path}`,
-              {
-                headers: githubToken ? { Authorization: `Bearer ${githubToken}` } : {},
-                signal: rawController.signal,
-                redirect: "error",
-              }
-            );
-            if (altFetch.ok) rawFetch = altFetch;
-          } catch {
-            // keep original rawFetch
+        // Request raw content
+        const rawController = new AbortController();
+        const rawTimer = setTimeout(() => rawController.abort(), FETCH_TIMEOUT_MS);
+        let rawContent: string;
+        try {
+          let rawFetch = await fetch(
+            `https://raw.githubusercontent.com/${owner}/${repo}/${defaultBranch}/${candidate.path}`,
+            {
+              headers: githubToken ? { Authorization: `Bearer ${githubToken}` } : {},
+              signal: rawController.signal,
+              redirect: "error",
+            }
+          );
+          if (!rawFetch.ok && (defaultBranch === "main" || defaultBranch === "master")) {
+            const altBranch = defaultBranch === "main" ? "master" : "main";
+            try {
+              const altFetch = await fetch(
+                `https://raw.githubusercontent.com/${owner}/${repo}/${altBranch}/${candidate.path}`,
+                {
+                  headers: githubToken ? { Authorization: `Bearer ${githubToken}` } : {},
+                  signal: rawController.signal,
+                  redirect: "error",
+                }
+              );
+              if (altFetch.ok) rawFetch = altFetch;
+            } catch {
+              // keep original rawFetch
+            }
+          }
+          clearTimeout(rawTimer);
+          if (!rawFetch.ok) throw new Error(`HTTP ${rawFetch.status}`);
+          rawContent = await rawFetch.text();
+          sizeBytes = Buffer.byteLength(rawContent, "utf8");
+          raw = rawContent;
+        } catch {
+          clearTimeout(rawTimer);
+          // Try the JSON contents API as fallback (returns base64)
+          if (rawRes.ok) {
+            const data = (await rawRes.json()) as { content?: string; size?: number };
+            sizeBytes = data.size ?? 0;
+            if (data.content) {
+              const decoded = Buffer.from(data.content.replace(/\n/g, ""), "base64").toString("utf8");
+              raw = decoded;
+            }
           }
         }
-        clearTimeout(rawTimer);
-        if (!rawFetch.ok) throw new Error(`HTTP ${rawFetch.status}`);
-        rawContent = await rawFetch.text();
-        sizeBytes = Buffer.byteLength(rawContent, "utf8");
-        raw = rawContent;
       } catch {
-        clearTimeout(rawTimer);
-        // Try the JSON contents API as fallback (returns base64)
-        if (rawRes.ok) {
-          const data = (await rawRes.json()) as { content?: string; size?: number };
-          sizeBytes = data.size ?? 0;
-          if (data.content) {
-            const decoded = Buffer.from(data.content.replace(/\n/g, ""), "base64").toString("utf8");
-            raw = decoded;
-          }
-        }
+        // File fetch failed entirely — ignore if this was a speculative probe
+        if (isProbed) continue;
+        parseErrors.push(candidate.path);
+        keyFiles.push({ path: candidate.path, kind: candidate.kind, content: null, sizeBytes: 0, truncated: false });
+        continue;
       }
-    } catch {
-      // File fetch failed entirely — filename-only signal
-      parseErrors.push(candidate.path);
-      keyFiles.push({ path: candidate.path, kind: candidate.kind, content: null, sizeBytes: 0, truncated: false });
-      continue;
-    }
 
-    if (raw === null) {
-      parseErrors.push(candidate.path);
-      keyFiles.push({ path: candidate.path, kind: candidate.kind, content: null, sizeBytes, truncated: false });
-      continue;
-    }
+      if (raw === null) {
+        // Probe 404: file does not exist in the repository
+        if (isProbed) continue;
+        parseErrors.push(candidate.path);
+        keyFiles.push({ path: candidate.path, kind: candidate.kind, content: null, sizeBytes, truncated: false });
+        continue;
+      }
 
     // Track README length (before compaction)
     if (candidate.kind === "readme") {

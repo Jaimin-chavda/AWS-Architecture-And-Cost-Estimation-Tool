@@ -51,8 +51,8 @@ function resolveProvider(): ProviderConfig | null {
     const client = createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY });
     return {
       name: "google",
-      model: "gemini-3.6-flash",
-      getModel: () => client("gemini-3.6-flash") as never,
+      model: "gemini-3.5-flash",
+      getModel: () => client("gemini-3.5-flash") as never,
     };
   }
   if (process.env.GROQ_API_KEY) {
