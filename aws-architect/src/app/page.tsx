@@ -317,9 +317,9 @@ export default function Home() {
 
       {/* Main Content Area */}
       <main
-        className={`mx-auto flex w-full flex-1 flex-col px-4 py-6 sm:px-6 sm:py-8 transition-all duration-300 ${
+        className={`mx-auto flex w-full flex-1 flex-col px-4 py-6 sm:px-6 lg:px-8 sm:py-8 transition-all duration-300 ${
           !loading && showResults && resultTab === "diagram"
-            ? "max-w-[96vw] 2xl:max-w-[1760px]"
+            ? "max-w-6xl xl:max-w-7xl"
             : "max-w-5xl"
         }`}
       >

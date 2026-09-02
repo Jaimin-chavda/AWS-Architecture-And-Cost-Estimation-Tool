@@ -10,7 +10,7 @@ export interface DiagramViewerProps {
 }
 
 const DRAWIO_EMBED_URL =
-  "https://embed.diagrams.net/?embed=1&ui=atlas&spin=1&modified=unsavedChanges&proto=json";
+  "https://embed.diagrams.net/?embed=1&ui=atlas&spin=1&modified=unsavedChanges&proto=json&fit=1";
 
 export function DiagramViewer({
   diagramXml,
@@ -28,11 +28,17 @@ export function DiagramViewer({
       try {
         const msg = JSON.parse(ev.data as string) as { event: string };
         if (msg.event === "init") {
-          // draw.io iframe is ready — send the XML
+          // draw.io iframe is ready — send the XML with autosize and center
           iframeRef.current?.contentWindow?.postMessage(
-            JSON.stringify({ action: "load", xml: diagramXml }),
+            JSON.stringify({ action: "load", xml: diagramXml, autosize: 1 }),
             "*"
           );
+          setTimeout(() => {
+            iframeRef.current?.contentWindow?.postMessage(
+              JSON.stringify({ action: "center" }),
+              "*"
+            );
+          }, 200);
           setReady(true);
         }
       } catch {
@@ -42,6 +48,19 @@ export function DiagramViewer({
     window.addEventListener("message", handler);
     return () => window.removeEventListener("message", handler);
   }, [diagramXml]);
+
+  useEffect(() => {
+    function onResize() {
+      if (ready && iframeRef.current?.contentWindow) {
+        iframeRef.current.contentWindow.postMessage(
+          JSON.stringify({ action: "center" }),
+          "*"
+        );
+      }
+    }
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [ready]);
 
   function handleDownload() {
     const blob = new Blob([diagramXml], { type: "application/xml" });
