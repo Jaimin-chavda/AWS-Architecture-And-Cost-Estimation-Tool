@@ -49,7 +49,14 @@
 
 - None — research complete (HIGH confidence). Phase 1 flag: verify icon style names during implementation; fallback `shape=image` data URIs.
 
+### Quick Tasks Completed
+
+| ID | Task | Date | Commits | Artifacts |
+|----|------|------|---------|-----------|
+| 260903-nly | Fix LLM over-inference (evidence-citation prompts + evidence backstop) and diagram container width overflow | 2026-09-03 | 6286583, 401807a | [260903-nly-fix-llm-over-inference-and-diagram-conta](./quick/260903-nly-fix-llm-over-inference-and-diagram-conta/) |
+
 ## Session Continuity
 
 - 2026-08-07: Project initialized; research complete; roadmap created (6 phases, 21/21 coverage).
+- 2026-09-03: Quick task 260903-nly — LLM prompts now require per-component evidence citations, `normalizeArchitectureModel()` drops evidence-free components, and `computeLayout()` clamps container widths with `Math.max`. Suite 166 → 175 passing. Residual: `applyPatternBaselines()` still injects Route53/CloudWatch/SecretsManager/CloudFormation (+ECS) unconditionally — out of scope, see SUMMARY.md.
 - Next session: plan Phase 1 after user approval.
