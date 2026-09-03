@@ -79,26 +79,45 @@ export function llmConfigured(): boolean {
 // ---------------------------------------------------------------------------
 
 function buildSystemPrompt(): string {
-  return `You are a Senior Principal AWS Cloud Architect. You are given structured evidence extracted from a software repository or project description. Build a comprehensive, production-ready architectural model of the ENTIRE system for AWS deployment — how all tiers, services, and runtime parts connect together.
+  return `You are a Senior Principal AWS Cloud Architect. You are given structured evidence extracted from a software repository or project description. Build a model of the system that ACTUALLY EXISTS in that evidence — nothing more.
 
-A complete production architecture model must include all necessary layers:
-1. Client & Edge: End Users / Clients, DNS (Route 53), CDN (CloudFront), and Frontend Hosting (S3).
-2. Ingress & Security: Load Balancing (ALB), API Gateways, User Authentication / JWT (Cognito), and Secrets / Key Management (Secrets Manager).
-3. Compute Services: Containerized backends (ECS Fargate / EC2), and Serverless Workers / Functions (Lambda) for background processing, smart contract calls, or scheduled jobs.
-4. Data & Caching: Databases (DocumentDB for MongoDB, RDS/Aurora for SQL, DynamoDB for NoSQL), and in-memory caches (Redis / ElastiCache).
-5. Asynchronous Messaging: Message Queues (SQS) for job/transaction queues, Notification Topics (SNS), and Event Routers (EventBridge).
-6. Observability & IaC: Logging/Metrics (CloudWatch) and Infrastructure-as-Code (CloudFormation / CDK).
-7. External Services: Third-party integrations (e.g. MetaMask, Ethereum / Sepolia Testnet, Stripe, Auth0, external APIs).
+THE EVIDENCE RULE (non-negotiable):
+Every component you output MUST cite at least one concrete piece of the evidence
+below in its "evidence" array. A citation is a specific file path, dependency
+entry, config key, README sentence, or phrase from the user's description — for
+example "package.json → express", "docker-compose.yml → service: redis",
+"serverless.yml → functions.processOrder", "README: 'stores uploads in S3'".
+"Typical for this kind of app", "best practice", "production systems need this",
+and "implied by the stack" are NOT evidence. If you cannot cite something
+specific, DO NOT emit the component. A component with an empty evidence array
+will be discarded, so emitting one only loses you information.
+
+MINIMAL ARCHITECTURES ARE CORRECT ARCHITECTURES:
+There is no required number of components and no required set of layers. Most of
+the seven classic tiers (edge, ingress, compute, data, messaging, observability,
+external) will be ABSENT from any given project, and that is the right answer.
+A repository of static HTML, CSS and JavaScript with no server code is a frontend
+component and NOTHING ELSE — no Lambda, no API Gateway, no DynamoDB, no Secrets
+Manager, no queue, no auth. A single script with no database is one component.
+Do not add a database because "apps have databases", an auth component because
+"apps have logins", or a queue because "apps do background work". Emit ONLY the
+tiers the evidence proves. One component is a perfectly valid answer.
+
+Report what you find, not what a mature system would eventually grow into. Do not
+compensate for a small repository by inventing scale.
 
 Output schema requirements:
-- appType: primary pattern (e.g. full-stack-web, containerised-app, serverless-api, event-driven, ml-pipeline, data-pipeline).
-- appName: clean project / system name (e.g. "Decentralized Voting System").
-- description: 1-2 sentence overview of the application.
-- components: array of ALL system components across frontend, backend, api, worker, database, cache, queue, object-storage, auth, proxy, external-service, messaging. Each component has { id, name, type, technology, details, evidence, confidence: "high" | "medium" | "low" }.
-- relationships: ALL runtime traffic connections between components: { from: <component id>, to: <component id>, type: "calls" | "reads" | "writes" | "triggers" | "sends" | "receives" | "subscribes" }.
-  Ensure edges flow logically: Users → Route 53 / CloudFront → S3 (Frontend) & ALB / API Gateway → Backend (ECS / Lambda) → Database / Cache / Secrets / SQS → SNS / CloudWatch.
+- appType: primary pattern (static-site, serverless-api, containerised-app, event-driven, ml-pipeline, full-stack-web, data-pipeline, generic). Pick the one the evidence supports — "static-site" and "generic" are ordinary answers, not failures.
+- appName: clean project / system name taken from the repo or description.
+- description: 1-2 sentence overview of the application as it actually is.
+- components: the system components the evidence proves, drawn from frontend, backend, api, worker, database, cache, queue, object-storage, auth, proxy, external-service, messaging. Each has { id, name, type, technology, details, evidence, confidence }.
+  - evidence: array of specific citations, as defined by THE EVIDENCE RULE. Never empty.
+  - confidence: "high" when the evidence is a direct declaration (a dependency, a compose service, an IaC resource); "medium" when inferred from strong indirect signals such as an import or a README statement; "low" when the signal is weak. Do not report "high" for a guess — prefer omitting the component entirely.
+- relationships: runtime connections you can actually justify between components you emitted: { from: <component id>, to: <component id>, type: "calls" | "reads" | "writes" | "triggers" | "sends" | "receives" | "subscribes" }. Both ids must refer to emitted components. If the project has one component, relationships is an empty array.
 
-Do not limit the output to just 1 or 2 files. Provide the complete multi-tier architecture required for a realistic, enterprise-grade AWS deployment.`;
+You are NOT choosing AWS services. Name the real technologies the project uses
+("PostgreSQL", "Express", "React", "Redis"); AWS service selection happens later,
+deterministically, from your model.`;
 }
 
 /**
@@ -121,6 +140,15 @@ export function buildArchitecturePrompt(
   const parts: string[] = [];
 
   if (profile && (grounding === "repo" || grounding === "repoFiles" || grounding === "filenameOnly")) {
+    parts.push(
+      "Build the architecture model of this repository from the evidence below. " +
+      "The evidence below is the ONLY thing you may model. Cite a specific line of " +
+      "it in the 'evidence' array of every component you emit; emit no component " +
+      "you cannot cite. If the repository turns out to be a single tier — a static " +
+      "site, one script, one service with no database — say exactly that and stop. " +
+      "Absent tiers are the expected result, not a gap for you to fill."
+    );
+
     // 1. Structured analysis summary from repoAnalyzer
     parts.push(profile.summary);
 
@@ -154,8 +182,11 @@ export function buildArchitecturePrompt(
     if (profile.discoveredComponents.length > 0) {
       parts.push(
         "\nDISCOVERED DEPLOYABLE COMPONENTS (extracted from IaC and source code):" +
-        "\nEach entry below is a SEPARATE running process or data tier. " +
-        "You MUST model each one as its own component in the output — do NOT merge or collapse them.\n"
+        "\nEach entry below is a SEPARATE running process or data tier, already " +
+        "backed by the evidence shown on its line. Model each one as its own " +
+        "component — do NOT merge or collapse them — and carry that evidence " +
+        "through into the component's 'evidence' array. This list is a floor, " +
+        "not a template: do not invent sibling tiers to 'complete' it.\n"
       );
       for (const dc of profile.discoveredComponents) {
         const evidenceLine = dc.evidence.join("; ");
@@ -174,16 +205,20 @@ export function buildArchitecturePrompt(
   } else {
     // Description path — no profile available
     parts.push(
-      "Analyze the following project description and build a comprehensive multi-tier architecture model of the system." +
-      "\nYou MUST decompose the application into all distinct components mentioned or implied:" +
-      "\n- Frontend UI (e.g. React, Next.js, Vue, mobile web)" +
-      "\n- Backend Services / APIs (e.g. Express, FastAPI, Django, Spring)" +
-      "\n- Workers / Smart Contract Integrations (e.g. Web3/Solidity contract calls, background tasks)" +
-      "\n- Databases & Caches (e.g. MongoDB, PostgreSQL, DynamoDB, Redis)" +
-      "\n- Queues & Async Messaging (e.g. SQS vote processing queues, SNS topics)" +
-      "\n- Authentication & Secrets (e.g. JWT auth, API key secrets)" +
-      "\n- External services / Wallets (e.g. MetaMask, Ethereum Sepolia, third-party APIs)\n" +
-      "\nEvery single tier MUST be an item in the 'components' array with a unique id."
+      "Analyze the following project description and model the system it describes." +
+      "\nThe description is your only evidence. Decompose it into the components it" +
+      "\nactually states or unambiguously implies, and cite the phrase you took each" +
+      "\none from in that component's 'evidence' array (e.g. evidence:" +
+      "\n[\"description: 'stores votes in MongoDB'\"])." +
+      "\n\nComponent types available: frontend, backend, api, worker, scheduler," +
+      "\ndatabase, cache, queue, object-storage, auth, proxy, messaging," +
+      "\nexternal-service." +
+      "\n\nEmit a tier ONLY where the description supports it. A description that" +
+      "\nmentions no database gets no database; one that mentions no background" +
+      "\nprocessing gets no worker and no queue; one that mentions no login gets no" +
+      "\nauth component. Do not pad a short description into a multi-tier system —" +
+      "\nif it describes one thing, return one component. Every component needs a" +
+      "\nunique id, and relationships may only reference ids you emitted."
     );
     if (description) {
       parts.push(`\nProject description: ${description}`);

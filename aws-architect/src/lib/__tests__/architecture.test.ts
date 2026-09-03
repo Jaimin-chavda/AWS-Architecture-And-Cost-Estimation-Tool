@@ -32,15 +32,20 @@ function serviceIds(plan: ServicePlan): string[] {
   return plan.awsMappings.map((m) => m.serviceId);
 }
 
-/** Minimal ArchitectureComponent — fills in the new optional-but-defaulted fields. */
+/**
+ * Minimal ArchitectureComponent — fills in the new optional-but-defaulted fields.
+ * Evidence defaults to a citation because normalizeArchitectureModel() drops
+ * evidence-free components; pass `[]` explicitly to exercise that rejection.
+ */
 function comp(
   id: string,
   name: string,
   type: ArchitectureModel["components"][number]["type"],
   technology: string,
-  confidence: "high" | "medium" | "low" = "medium"
+  confidence: "high" | "medium" | "low" = "medium",
+  evidence: string[] = [`package.json → ${technology}`]
 ): ArchitectureModel["components"][number] {
-  return { id, name, type, technology, confidence, evidence: [] };
+  return { id, name, type, technology, confidence, evidence };
 }
 
 function makeModel(overrides: Partial<ArchitectureModel> = {}): ArchitectureModel {
@@ -112,6 +117,113 @@ describe("validateArchitectureModel", () => {
     );
     assert.strictEqual(model!.relationships.length, 1);
     assert.strictEqual(model!.relationships[0].from, "web");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Evidence backstop against LLM over-inference
+//
+// The system prompt forbids emitting a component that cites no evidence.
+// normalizeArchitectureModel() is the code-level guarantee for when the LLM
+// ignores that — the "static HTML repo sprouts Lambda + API Gateway + DynamoDB
+// + Secrets Manager" failure mode.
+// ---------------------------------------------------------------------------
+
+describe("evidence backstop — components without evidence are dropped", () => {
+  it("drops an evidence-free component while keeping its evidence-backed siblings", () => {
+    const model = validateArchitectureModel(
+      makeModel({
+        components: [
+          comp("web", "Web UI", "frontend", "React", "high", ["package.json → react"]),
+          // No citation — an invented tier.
+          comp("fn", "Serverless Handlers", "backend", "AWS Lambda", "high", []),
+        ],
+      })
+    );
+
+    assert.ok(model, "model with at least one evidenced component still validates");
+    const ids = model!.components.map((c) => c.id);
+    assert.deepStrictEqual(ids, ["web"], `evidence-free component must be dropped; got ${ids.join(", ")}`);
+  });
+
+  it("treats blank and whitespace-only citations as no evidence", () => {
+    const model = validateArchitectureModel(
+      makeModel({
+        components: [
+          comp("api", "API", "backend", "Express", "high", ["package.json → express"]),
+          comp("db", "Database", "database", "DynamoDB", "high", ["", "   "]),
+        ],
+      })
+    );
+
+    assert.ok(model);
+    assert.deepStrictEqual(model!.components.map((c) => c.id), ["api"]);
+  });
+
+  it("drops relationships whose endpoint was dropped for lacking evidence", () => {
+    const model = validateArchitectureModel(
+      makeModel({
+        components: [
+          comp("web", "Web UI", "frontend", "React", "high", ["index.html"]),
+          comp("q", "Job Queue", "queue", "SQS", "high", []),
+        ],
+        relationships: [{ from: "web", to: "q", type: "sends" }],
+      })
+    );
+
+    assert.ok(model);
+    assert.strictEqual(
+      model!.relationships.length,
+      0,
+      "an edge into a dropped component must not survive"
+    );
+  });
+
+  it("static HTML/CSS/JS repo stays a single frontend component — no backend tiers", () => {
+    // The reported bug: zero backend evidence, yet the LLM emits a full stack.
+    const model = validateArchitectureModel(
+      makeModel({
+        appType: "static-site",
+        components: [
+          comp("site", "Static Site", "frontend", "HTML/CSS/JS", "high", [
+            "index.html",
+            "assets/styles.css",
+          ]),
+          comp("api", "REST API", "api", "API Gateway", "high", []),
+          comp("fn", "Handlers", "backend", "AWS Lambda", "high", []),
+          comp("db", "Table", "database", "DynamoDB", "medium", []),
+          comp("secrets", "Secrets", "auth", "Secrets Manager", "low", []),
+        ],
+        databases: [],
+        frameworks: [],
+      })
+    );
+
+    assert.ok(model, "the one evidenced component keeps the model alive");
+    assert.strictEqual(model!.components.length, 1, "only the evidenced frontend survives");
+    assert.strictEqual(model!.components[0].id, "site");
+
+    const plan = mapArchitectureModelToServicePlan(model!, CTX);
+    const componentBacked = plan.awsMappings.filter((m) => !m.fromPattern).map((m) => m.serviceId);
+    for (const hallucinated of ["Lambda", "APIGateway", "DynamoDB"]) {
+      assert.ok(
+        !componentBacked.includes(hallucinated),
+        `${hallucinated} must not be component-backed; got ${componentBacked.join(", ")}`
+      );
+    }
+  });
+
+  it("returns null when every component lacks evidence, so inference falls back to rules", () => {
+    const model = validateArchitectureModel(
+      makeModel({
+        components: [
+          comp("fn", "Handlers", "backend", "AWS Lambda", "high", []),
+          comp("db", "Table", "database", "DynamoDB", "high", []),
+        ],
+      })
+    );
+
+    assert.strictEqual(model, null, "a fully evidence-free model is discarded entirely");
   });
 });
 

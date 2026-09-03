@@ -92,14 +92,29 @@ function dedupeStrings(arr: string[]): string[] {
   return out;
 }
 
+/**
+ * Normalizes a parsed architecture model.
+ *
+ * Drops any component with an empty `evidence` array. A component that cites
+ * nothing is a guess, not an observation — the prompt forbids emitting one, and
+ * this is the backstop for when the LLM does it anyway (the "static HTML repo
+ * gets Lambda + API Gateway + DynamoDB" failure mode). Blank/whitespace-only
+ * citations count as no evidence.
+ */
 export function normalizeArchitectureModel(model: ArchitectureModel): ArchitectureModel {
-  const ids = new Set(model.components.map((c) => c.id));
   const seenIds = new Set<string>();
-  const components = model.components.filter((c) => {
-    if (seenIds.has(c.id)) return false;
+  const components = model.components.reduce<ArchitectureComponent[]>((acc, c) => {
+    if (seenIds.has(c.id)) return acc;
+    const evidence = c.evidence.map((e) => e.trim()).filter((e) => e.length > 0);
+    if (evidence.length === 0) return acc;
     seenIds.add(c.id);
-    return true;
-  });
+    acc.push({ ...c, evidence });
+    return acc;
+  }, []);
+
+  // Relationship endpoints resolve against the SURVIVING components, so an edge
+  // pointing at a dropped component is dropped with it.
+  const ids = seenIds;
 
   return {
     ...model,
@@ -126,7 +141,17 @@ export function validateArchitectureModel(raw: unknown): ArchitectureModel | nul
     );
     return null;
   }
-  return normalizeArchitectureModel(result.data);
+  const model = normalizeArchitectureModel(result.data);
+  if (model.components.length === 0) {
+    // Every component was an evidence-free guess. An empty model would render as
+    // pattern baselines with nothing behind them; the deterministic rule engine
+    // upstream is the better fallback, and it takes over when we return null.
+    console.warn(
+      "[architecture] every LLM component lacked evidence — discarding model, falling back to rules"
+    );
+    return null;
+  }
+  return model;
 }
 
 // ---------------------------------------------------------------------------
