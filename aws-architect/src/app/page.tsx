@@ -72,8 +72,11 @@ interface AnalyzeResponse {
   input_kind: "github_url" | "description";
   grounding: Grounding;
   service_plan: ServicePlan;
+  service_plans?: ServicePlan[];
   diagram_xml: string | null;
+  diagram_xmls?: (string | null)[];
   cost_rows: CostResult | null;
+  cost_rows_list?: (CostResult | null)[];
   warnings: string[];
   project_profile?: ProjectProfile;
   architecture_model?: ArchitectureModel;
@@ -219,10 +222,24 @@ export default function Home() {
           body: JSON.stringify({ input }),
         });
 
-        const data = (await res.json()) as ApiResult;
+        let data: ApiResult | null = null;
+        try {
+          data = (await res.json()) as ApiResult;
+        } catch {
+          // Empty or non-JSON response body
+        }
 
         if (!res.ok) {
-          setError((data as { error?: string }).error ?? `HTTP ${res.status}`);
+          setError(
+            (data as { error?: string } | null)?.error ??
+              `Server error (HTTP ${res.status})`
+          );
+          setLoading(false);
+          return;
+        }
+
+        if (!data) {
+          setError("Server returned empty or invalid response");
           setLoading(false);
           return;
         }
@@ -427,7 +444,50 @@ export default function Home() {
             {/* Tab Views */}
             <div className="flex flex-1 flex-col min-h-[500px]">
               {resultTab === "diagram" &&
-                (result.diagram_xml ? (
+                (result.service_plans && result.service_plans.length > 1 && result.diagram_xmls ? (
+                  <div className="flex flex-col gap-6 animate-fadeIn">
+                    {result.service_plan.tradeOffDimension && (
+                      <div className="rounded-2xl border border-primary/30 bg-primary/5 p-4">
+                        <div className="flex items-center gap-2 text-primary font-semibold text-sm">
+                          <Sparkles className="h-4 w-4" />
+                          <span>Architectural Trade-Off Comparison: {result.service_plan.tradeOffDimension}</span>
+                        </div>
+                        {result.service_plan.tradeOffDescription && (
+                          <p className="mt-1 text-xs text-muted leading-relaxed">
+                            {result.service_plan.tradeOffDescription}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                    <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                      {result.service_plans.map((plan, idx) => {
+                        const xml = result.diagram_xmls?.[idx] ?? result.diagram_xml;
+                        const title = plan.proposalTitle || `Proposal ${idx === 0 ? "A" : "B"}: ${plan.detectedPattern ?? "Architecture"}`;
+                        return (
+                          <div key={idx} className="flex flex-col gap-2 rounded-2xl border border-border bg-surface p-4">
+                            <div className="flex items-center justify-between pb-2 border-b border-border">
+                              <span className="text-xs font-bold uppercase tracking-wider text-primary">
+                                {idx === 0 ? "Primary Architecture" : "Alternate Proposal"}
+                              </span>
+                              <span className="text-xs font-medium text-foreground">{title}</span>
+                            </div>
+                            {xml ? (
+                              <DiagramViewer
+                                diagramXml={xml}
+                                filename={`${(plan.detectedPattern ?? "arch").replace(/[^a-zA-Z0-9_-]/g, "-")}-proposal-${idx + 1}.drawio`}
+                                patternTitle={plan.detectedPattern ?? "generic"}
+                              />
+                            ) : (
+                              <div className="flex h-64 items-center justify-center rounded-xl border border-border bg-surface-2 text-xs text-muted">
+                                Diagram unavailable
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : result.diagram_xml ? (
                   <DiagramViewer
                     diagramXml={result.diagram_xml}
                     filename={diagramFilename}
@@ -440,7 +500,47 @@ export default function Home() {
                 ))}
 
               {resultTab === "cost" &&
-                (result.cost_rows ? (
+                (result.service_plans && result.service_plans.length > 1 && result.cost_rows_list ? (
+                  <div className="flex flex-col gap-6 animate-fadeIn">
+                    {result.service_plan.tradeOffDimension && (
+                      <div className="rounded-2xl border border-primary/30 bg-primary/5 p-4">
+                        <div className="flex items-center gap-2 text-primary font-semibold text-sm">
+                          <DollarSign className="h-4 w-4" />
+                          <span>Cost Comparison: {result.service_plan.tradeOffDimension}</span>
+                        </div>
+                        <p className="mt-1 text-xs text-muted leading-relaxed">
+                          Side-by-side AWS cost estimates for both architectural proposals under identical usage parameters.
+                        </p>
+                      </div>
+                    )}
+                    <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                      {result.service_plans.map((plan, idx) => {
+                        const costData = result.cost_rows_list?.[idx] ?? result.cost_rows;
+                        const title = plan.proposalTitle || `Proposal ${idx === 0 ? "A" : "B"}`;
+                        return (
+                          <div key={idx} className="flex flex-col gap-2 rounded-2xl border border-border bg-surface p-4">
+                            <div className="flex items-center justify-between pb-2 border-b border-border">
+                              <span className="text-xs font-bold uppercase tracking-wider text-primary">
+                                {idx === 0 ? "Primary Architecture" : "Alternate Proposal"}
+                              </span>
+                              <span className="text-xs font-medium text-foreground">{title}</span>
+                            </div>
+                            {costData ? (
+                              <CostCalculator
+                                initialCost={costData}
+                                servicePlan={plan}
+                              />
+                            ) : (
+                              <div className="flex h-64 items-center justify-center rounded-xl border border-border bg-surface-2 text-xs text-muted">
+                                Pricing unavailable
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : result.cost_rows ? (
                   <CostCalculator
                     initialCost={result.cost_rows}
                     servicePlan={result.service_plan}

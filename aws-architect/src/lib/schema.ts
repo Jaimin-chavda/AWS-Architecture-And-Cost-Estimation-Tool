@@ -138,11 +138,17 @@ export const ServicePlanSchema = z.object({
   awsMappings: z.array(AwsServiceMappingSchema),
   /** Pattern detection for UI label only — never constrains output */
   detectedPattern: z.string().optional(),
+  proposalTitle: z.string().optional(),
+  tradeOffDimension: z.string().optional(),
+  tradeOffDescription: z.string().optional(),
   metadata: z.object({
     grounding: z.enum(GROUNDING_VALUES),
     truncated: z.boolean(),
     parseErrors: z.array(z.string()),
   }),
+  proposals: z.array(z.any()).optional(),
 });
 
-export type ServicePlan = z.infer<typeof ServicePlanSchema>;
+export type ServicePlan = z.infer<typeof ServicePlanSchema> & {
+  proposals?: ServicePlan[];
+};

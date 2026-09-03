@@ -19,7 +19,8 @@
  */
 
 import type { ServicePlan, AwsServiceMapping } from "./schema.ts";
-import { getUnitPrice } from "./prices.ts";
+import { getUnitPrice, getPriceSourceMode } from "./prices.ts";
+import type { PriceSourceMode } from "./prices.ts";
 import { SERVICE_DEFAULTS, BASE_USER_COUNT } from "./SERVICE_DEFAULTS.ts";
 
 // ---------------------------------------------------------------------------
@@ -50,6 +51,7 @@ export interface CostResult {
   region: string;
   userCount: number;
   computedAt: string;
+  priceSourceMode?: PriceSourceMode;
 }
 
 // ---------------------------------------------------------------------------
@@ -59,14 +61,16 @@ export interface CostResult {
 /**
  * Computes monthly cost estimates for every service in the ServicePlan.
  *
- * @param plan       The inferred ServicePlan
- * @param region     AWS region string (e.g. "us-east-1")
- * @param userCount  User-provided user count for scaling (default: 10_000)
+ * @param plan         The inferred ServicePlan
+ * @param region       AWS region string (e.g. "us-east-1")
+ * @param userCount    User-provided user count for scaling (default: 10_000)
+ * @param priceSource  Price data source: "bulk" (default) or "sdk" (@aws-sdk/client-pricing)
  */
 export async function computeCostRows(
   plan: ServicePlan,
   region: string = "us-east-1",
-  userCount: number = BASE_USER_COUNT
+  userCount: number = BASE_USER_COUNT,
+  priceSource?: PriceSourceMode
 ): Promise<CostResult> {
   const rows: CostRow[] = [];
   const unpricedRows: UnpricedRow[] = [];
@@ -90,7 +94,8 @@ export async function computeCostRows(
       mapping.serviceId,
       defaults.serviceCode,
       defaults.usageTypePrefix,
-      region
+      region,
+      priceSource
     );
 
     const scaledQuantity = defaults.baseQuantity * userScaleFactor;
@@ -130,6 +135,7 @@ export async function computeCostRows(
     region,
     userCount,
     computedAt: new Date().toISOString(),
+    priceSourceMode: priceSource ?? getPriceSourceMode(),
   };
 }
 
@@ -161,5 +167,6 @@ export function scaleCostRows(original: CostResult, newCount: number): CostResul
     totalMonthlyUsd,
     userCount: newCount,
     computedAt: new Date().toISOString(),
+    priceSourceMode: original.priceSourceMode,
   };
 }

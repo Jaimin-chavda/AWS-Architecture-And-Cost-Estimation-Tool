@@ -54,6 +54,81 @@ export function applyGroundingCap(plan: ServicePlan, grounding: Grounding): Serv
   return { ...plan, components: cappedComponents, awsMappings: cappedMappings };
 }
 
+import { buildAlternateProposal } from "./patternAlternates.ts";
+
+/**
+ * Merges a single baseline ServicePlan with an optional LLM-derived plan and applies grounding caps.
+ */
+export function mergeSingleServicePlan(
+  baseline: ServicePlan,
+  llmResult?: ServicePlan | null,
+  grounding?: Grounding
+): ServicePlan {
+  const effectiveGrounding = grounding ?? baseline.metadata.grounding;
+  if (!llmResult) return applyGroundingCap(baseline, effectiveGrounding);
+
+  // Merge mappings: retain baseline services, enrich evidence/confidence with LLM if present
+  const llmMap = new Map(llmResult.awsMappings.map((m) => [m.serviceId, m]));
+  const mergedMappings = baseline.awsMappings.map((bm) => {
+    const lm = llmMap.get(bm.serviceId);
+    if (lm) {
+      return {
+        ...bm,
+        confidence: "high" as const,
+        evidence: lm.evidence || bm.evidence,
+      };
+    }
+    return bm;
+  });
+
+  const mergedPlan: ServicePlan = {
+    ...baseline,
+    awsMappings: mergedMappings,
+    detectedPattern: llmResult.detectedPattern || baseline.detectedPattern,
+    metadata: {
+      ...baseline.metadata,
+      grounding: effectiveGrounding,
+    },
+  };
+
+  return applyGroundingCap(mergedPlan, effectiveGrounding);
+}
+
+/**
+ * Merges 1..N ServicePlan proposals with optional LLM proposals.
+ * Accepts either a single ServicePlan or an array of ServicePlans.
+ * Single-element arrays produce byte-identical output to single-path calls.
+ */
+export function mergeServicePlans(
+  plans: ServicePlan[],
+  llmResult?: ServicePlan | ServicePlan[] | null,
+  grounding?: Grounding
+): ServicePlan[];
+export function mergeServicePlans(
+  plan: ServicePlan,
+  llmResult?: ServicePlan | null,
+  grounding?: Grounding
+): ServicePlan;
+export function mergeServicePlans(
+  planOrPlans: ServicePlan | ServicePlan[],
+  llmResult?: ServicePlan | ServicePlan[] | null,
+  grounding?: Grounding
+): ServicePlan | ServicePlan[];
+export function mergeServicePlans(
+  planOrPlans: ServicePlan | ServicePlan[],
+  llmResult?: ServicePlan | ServicePlan[] | null,
+  grounding?: Grounding
+): ServicePlan | ServicePlan[] {
+  if (Array.isArray(planOrPlans)) {
+    return planOrPlans.map((p, idx) => {
+      const matchingLlm = Array.isArray(llmResult) ? llmResult[idx] ?? null : llmResult ?? null;
+      return mergeSingleServicePlan(p, matchingLlm, grounding);
+    });
+  }
+  const matchingLlm = Array.isArray(llmResult) ? llmResult[0] ?? null : llmResult ?? null;
+  return mergeSingleServicePlan(planOrPlans, matchingLlm, grounding);
+}
+
 // ---------------------------------------------------------------------------
 // Main orchestrator
 // ---------------------------------------------------------------------------
@@ -67,6 +142,7 @@ export interface InferenceInput {
 
 export interface InferenceResult {
   plan: ServicePlan;
+  plans: ServicePlan[];
   architectureModel: ArchitectureModel | null;
 }
 
@@ -86,7 +162,9 @@ export async function runInference(input: InferenceInput): Promise<InferenceResu
 
   // Central reasoning path requires an LLM provider.
   if (!llmConfigured()) {
-    return { plan: baseline(), architectureModel: null };
+    const basePlan = baseline();
+    const plans = basePlan.proposals && basePlan.proposals.length > 0 ? basePlan.proposals : [basePlan];
+    return { plan: basePlan, plans, architectureModel: null };
   }
 
   // 1. LLM builds the architecture model of the whole repo/system.
@@ -101,19 +179,31 @@ export async function runInference(input: InferenceInput): Promise<InferenceResu
   // 2. analyzeArchitecture already validated + normalized the model; on
   //    failure (null) fall back to rules.
   if (!model) {
-    return { plan: baseline(), architectureModel: null };
+    const basePlan = baseline();
+    const plans = basePlan.proposals && basePlan.proposals.length > 0 ? basePlan.proposals : [basePlan];
+    return { plan: basePlan, plans, architectureModel: null };
   }
 
   // 3. Deterministic AWS service mapping from the model — the ONLY inference path.
-  const plan = mapArchitectureModelToServicePlan(model, {
+  const primaryPlan = mapArchitectureModelToServicePlan(model, {
     inputKind: ruleInput.inputKind,
     grounding: ruleInput.grounding,
     truncated: ruleInput.truncated,
     parseErrors: ruleInput.parseErrors,
   });
 
+  const cappedPlan = applyGroundingCap(primaryPlan, ruleInput.grounding);
+  const alternatePlan = buildAlternateProposal(cappedPlan, ruleInput);
+  const p1 = { ...cappedPlan };
+  delete p1.proposals;
+  const p2 = alternatePlan ? applyGroundingCap({ ...alternatePlan }, ruleInput.grounding) : null;
+  if (p2) delete p2.proposals;
+  const plans = p2 ? [p1, p2] : [p1];
+  cappedPlan.proposals = plans;
+
   return {
-    plan: applyGroundingCap(plan, ruleInput.grounding),
+    plan: cappedPlan,
+    plans,
     architectureModel: model,
   };
 }

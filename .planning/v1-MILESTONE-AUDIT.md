@@ -1,6 +1,6 @@
 ---
 milestone: v1
-audited: 2026-08-19
+audited: 2026-09-02
 status: gaps_found
 scores:
   requirements: 0/21
@@ -168,13 +168,13 @@ tech_debt: []
 
 # Milestone v1 — Audit
 
-**Status: gaps_found** · **Audited: 2026-08-19**
+**Status: gaps_found** · **Audited: 2026-09-02**
 
 ## Summary
 
 Milestone v1 (repo/idea → AWS service map → draw.io diagram + monthly cost estimate) has **zero GSD execution artifacts**. No phase directory exists (`.planning/phases/` absent), no phase was planned or executed through the GSD workflow, no `SUMMARY.md` / `VERIFICATION.md` / `VALIDATION.md` exists for any of the 6 phases, and all 21 v1 requirements remain unchecked (`[ ]`) with status `Pending` in `REQUIREMENTS.md`.
 
-A full application does exist in `aws-architect/` (analyze route, prices route, diagram/inference/rule-engine/repo-fetcher libraries, 7 unit-test suites, last code commit `b11a764` "v1"), but it was developed **outside the GSD workflow** and therefore carries **no phase verification** — nothing in it is certified against the milestone's definition of done.
+A full application does exist in `aws-architect/` (analyze route, prices route, diagram/inference/rule-engine/repo-fetcher libraries, 7 unit-test suites with 104 passing tests, last code commit `e4c3ec2` "nothing works"), but it was developed **outside the GSD workflow** and therefore carries **no phase verification** — nothing in it is certified against the milestone's definition of done.
 
 ## Scores
 
@@ -224,3 +224,10 @@ None aggregatable — no phase VERIFICATION.md exists from which to harvest defe
 ## Blocker
 
 The milestone cannot be certified as done: **no phase has been executed or verified** under GSD. The `/gsd-complete-milestone v1` path must not be taken from this state.
+
+## Next Steps
+
+1. **Plan Phase 1** — `/gsd-plan-phase 1` (after roadmap approval)
+2. **Execute Phase 1** — `/gsd-execute-phase 1`
+3. Repeat for phases 2–6
+4. Re-run `/gsd-audit-milestone v1` after all phases have VERIFICATION.md

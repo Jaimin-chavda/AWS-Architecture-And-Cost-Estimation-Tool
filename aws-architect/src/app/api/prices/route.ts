@@ -15,6 +15,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { ServicePlanSchema } from "@/lib/schema";
 import { computeCostRows } from "@/lib/cost";
 import { getPriceCacheSize } from "@/lib/prices";
+import type { PriceSourceMode } from "@/lib/prices";
 
 // Allowed regions (same set as in analyze route)
 const ALLOWED_REGIONS = new Set([
@@ -28,6 +29,7 @@ interface PricesRequestBody {
   service_plan: unknown;
   region: string;
   userCount?: number;
+  price_source?: string;
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -69,12 +71,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       ? Math.round(body.userCount)
       : 10_000;
 
+  const priceSource: PriceSourceMode | undefined =
+    body.price_source === "sdk" || body.price_source === "bulk"
+      ? (body.price_source as PriceSourceMode)
+      : undefined;
+
   try {
-    const costResult = await computeCostRows(planResult.data, region, userCount);
+    const costResult = await computeCostRows(
+      planResult.data,
+      region,
+      userCount,
+      priceSource
+    );
 
     return NextResponse.json({
       cost_rows: costResult,
       cache_size: getPriceCacheSize(),
+      price_source: costResult.priceSourceMode,
     });
   } catch (err) {
     console.error("[prices] Cost computation error:", err);

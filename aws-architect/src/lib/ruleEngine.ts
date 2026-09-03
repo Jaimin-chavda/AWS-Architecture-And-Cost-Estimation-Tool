@@ -19,6 +19,7 @@ import type {
 } from "./schema.ts";
 import type { ProjectProfile } from "./repoAnalyzer.ts";
 import type { PatternId } from "./architecture.ts";
+import { buildAlternateProposal } from "./patternAlternates.ts";
 
 // ---------------------------------------------------------------------------
 // RuleInput — signals available to the rule engine
@@ -390,6 +391,11 @@ export function classifyPattern(services: DetectedService[]): PatternId {
     return "event-driven";
   }
 
+  // 6. Full-Stack Web (Compute + Relational Database)
+  if ((has("EC2") || has("ALB")) && (has("RDS") || has("Aurora"))) {
+    return "full-stack-web";
+  }
+
   // 6. Static Site (S3 + CloudFront / CDN without compute or databases)
   const hasCompute = hasAnyId(["Lambda", "ECS", "EC2", "Fargate", "EKS", "Batch", "Lightsail", "SageMaker"]);
   const hasDatabase = hasAnyId(["RDS", "Aurora", "DynamoDB", "Redshift", "DocumentDB"]);
@@ -551,11 +557,56 @@ function buildBasicRelationships(components: DiscoveredComponent[]): ComponentRe
 }
 
 // ---------------------------------------------------------------------------
-// Main exported function
+// ---------------------------------------------------------------------------
+// Main exported functions
 // ---------------------------------------------------------------------------
 
-export function runRuleEngine(input: RuleInput): ServicePlan {
+export function runRuleEngine(
+  input: RuleInput,
+  options: { returnArray: true }
+): ServicePlan[];
+export function runRuleEngine(
+  input: RuleInput,
+  options?: { returnArray?: false }
+): ServicePlan;
+export function runRuleEngine(
+  input: RuleInput,
+  options?: { returnArray?: boolean }
+): ServicePlan | ServicePlan[];
+export function runRuleEngine(
+  input: RuleInput,
+  options?: { returnArray?: boolean }
+): ServicePlan | ServicePlan[] {
   const combined = [input.description, input.fileContent].join("\n");
   const services = detectServices(combined, input.fileNames, input.profile);
-  return buildPlan(input, services);
+  const primaryPlan = buildPlan(input, services);
+
+  // Check for curated alternate architecture pair
+  const alternatePlan = buildAlternateProposal(primaryPlan, input);
+  if (alternatePlan) {
+    const p1 = { ...primaryPlan };
+    delete p1.proposals;
+    const p2 = { ...alternatePlan };
+    delete p2.proposals;
+    primaryPlan.proposals = [p1, p2];
+    alternatePlan.proposals = [p1, p2];
+  } else {
+    const p1 = { ...primaryPlan };
+    delete p1.proposals;
+    primaryPlan.proposals = [p1];
+  }
+
+  if (options?.returnArray) {
+    return primaryPlan.proposals;
+  }
+
+  return primaryPlan;
+}
+
+/**
+ * Convenience helper returning all available proposals (1 or 2) as an array.
+ */
+export function runRuleEngineProposals(input: RuleInput): ServicePlan[] {
+  const res = runRuleEngine(input, { returnArray: true });
+  return Array.isArray(res) ? res : [res];
 }

@@ -1,26 +1,81 @@
 /**
  * prices.ts — Stage 5: PriceService
  *
- * Fetches and caches AWS unit prices from the AWS Bulk Pricing JSON endpoint.
- * The cache is in-memory, keyed by "region:serviceCode:usageType", with a
- * 24-hour TTL.
+ * Fetches and caches AWS unit prices from either:
+ *   1. AWS Bulk Pricing JSON endpoint (default, public, zero-credential)
+ *   2. Official AWS SDK Pricing Query API (@aws-sdk/client-pricing GetProducts)
  *
- * This module is SERVER-SIDE ONLY (uses Node.js fetch + env vars).
+ * The active source is gated behind `PRICE_SOURCE`:
+ *   - PRICE_SOURCE="sdk"  → @aws-sdk/client-pricing (GetProducts Query API)
+ *   - PRICE_SOURCE="bulk" (or unset) → AWS Bulk Pricing JSON (default)
  *
- * Decision:
- * - We use the AWS Bulk Pricing JSON files (publicly available, no auth
- *   needed) rather than the AWS Pricing API (which requires SigV4 signing).
- * - Bulk files are large; we only load the index first, then fetch per-
- *   service region-specific files on demand.
- * - Fallback static prices are provided for every service so the UI always
- *   shows something meaningful even if the fetch fails.
+ * The cache is in-memory, keyed by "mode:region:serviceId", with a 24-hour TTL.
+ * This module is SERVER-SIDE ONLY (uses Node.js fetch, AWS SDK, and env vars).
  *
- * Bulk Pricing file pattern:
- *   https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/{serviceCode}/current/{region}/index.json
+ * ---------------------------------------------------------------------------
+ * Credential Requirements for the SDK Path (`PRICE_SOURCE=sdk`):
+ * ---------------------------------------------------------------------------
+ * Unlike the public AWS Bulk Pricing JSON endpoint (which is unauthenticated
+ * and requires no credentials, ideal for demo/grading per Decisions 28 & 42),
+ * the official `@aws-sdk/client-pricing` Query API requires valid AWS IAM credentials
+ * resolved through the standard AWS SDK v3 credential provider chain:
+ *   - Environment variables: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+ *     and optional `AWS_SESSION_TOKEN`.
+ *   - Shared credentials file (`~/.aws/credentials`).
+ *   - IAM Role (ECS task role, EC2 instance profile, or Web Identity token).
+ *
+ * Required IAM Permission:
+ *   - "pricing:GetProducts"
+ *   - "pricing:DescribeServices" (optional for service discovery)
+ *
+ * Example IAM Policy:
+ * ```json
+ * {
+ *   "Version": "2012-10-17",
+ *   "Statement": [
+ *     {
+ *       "Sid": "AWSArchitectPriceListRead",
+ *       "Effect": "Allow",
+ *       "Action": [
+ *         "pricing:GetProducts",
+ *         "pricing:DescribeServices"
+ *       ],
+ *       "Resource": "*"
+ *     }
+ *   ]
+ * }
+ * ```
+ *
+ * Note: The AWS Price List Query API service endpoint is only available in
+ * `us-east-1` (US East, N. Virginia) and `ap-south-1` (Asia Pacific, Mumbai).
+ * The `PricingClient` defaults its endpoint region to `us-east-1` (configurable
+ * via `AWS_PRICING_REGION`).
+ *
+ * If credentials are not present or permission is denied (`AccessDeniedException`),
+ * the SDK path gracefully and transparently degrades to `FALLBACK_PRICES` with
+ * `source: "fallback"`, honoring Decision 32 ("cost baselines are sourced +
+ * disclosed, never silent").
+ * ---------------------------------------------------------------------------
  */
 
+import { PricingClient, GetProductsCommand } from "@aws-sdk/client-pricing";
+
 // ---------------------------------------------------------------------------
-// Region map — AWS Bulk Pricing region codes differ from API region names
+// Configuration & Modes
+// ---------------------------------------------------------------------------
+
+export type PriceSourceMode = "bulk" | "sdk";
+
+/**
+ * Returns the currently configured price source mode.
+ * Defaults to "bulk" (zero credentials required).
+ */
+export function getPriceSourceMode(): PriceSourceMode {
+  return process.env.PRICE_SOURCE?.toLowerCase() === "sdk" ? "sdk" : "bulk";
+}
+
+// ---------------------------------------------------------------------------
+// Region maps — AWS Bulk Pricing path codes and SDK Pricing location names
 // ---------------------------------------------------------------------------
 
 /** Maps API region names → AWS Bulk Pricing region path segment. */
@@ -38,6 +93,40 @@ const REGION_PATH: Record<string, string> = {
   "ap-south-1": "ap-south-1",
   "sa-east-1": "sa-east-1",
   "ca-central-1": "ca-central-1",
+};
+
+/** Maps API region names → AWS Pricing API location attribute values. */
+export const REGION_LOCATION: Record<string, string> = {
+  "us-east-1": "US East (N. Virginia)",
+  "us-east-2": "US East (Ohio)",
+  "us-west-1": "US West (N. California)",
+  "us-west-2": "US West (Oregon)",
+  "eu-west-1": "EU (Ireland)",
+  "eu-west-2": "EU (London)",
+  "eu-central-1": "EU (Frankfurt)",
+  "ap-southeast-1": "Asia Pacific (Singapore)",
+  "ap-southeast-2": "Asia Pacific (Sydney)",
+  "ap-northeast-1": "Asia Pacific (Tokyo)",
+  "ap-south-1": "Asia Pacific (Mumbai)",
+  "sa-east-1": "South America (Sao Paulo)",
+  "ca-central-1": "Canada (Central)",
+};
+
+/** Regional prefixes commonly found in AWS usage type codes. */
+export const REGION_USAGE_PREFIX: Record<string, string> = {
+  "us-east-1": "",
+  "us-east-2": "USE2-",
+  "us-west-1": "USW1-",
+  "us-west-2": "USW2-",
+  "eu-west-1": "EU-",
+  "eu-west-2": "EUW2-",
+  "eu-central-1": "EUC1-",
+  "ap-southeast-1": "APS1-",
+  "ap-southeast-2": "APS2-",
+  "ap-northeast-1": "APN1-",
+  "ap-south-1": "APS3-",
+  "sa-east-1": "SAE1-",
+  "ca-central-1": "CAN1-",
 };
 
 // ---------------------------------------------------------------------------
@@ -90,32 +179,33 @@ export const FALLBACK_PRICES: Record<string, number> = {
 
 interface CacheEntry {
   price: number;
+  source: "live" | "fallback";
   expiresAt: number; // epoch ms
 }
 
 const PRICE_CACHE = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
-function cacheKey(region: string, serviceId: string): string {
-  return `${region}:${serviceId}`;
+function cacheKey(region: string, serviceId: string, mode: PriceSourceMode): string {
+  return `${mode}:${region}:${serviceId}`;
 }
 
-function cacheGet(key: string): number | null {
+function cacheGet(key: string): PriceLookupResult | null {
   const entry = PRICE_CACHE.get(key);
   if (!entry) return null;
   if (Date.now() > entry.expiresAt) {
     PRICE_CACHE.delete(key);
     return null;
   }
-  return entry.price;
+  return { price: entry.price, source: entry.source };
 }
 
-function cacheSet(key: string, price: number): void {
-  PRICE_CACHE.set(key, { price, expiresAt: Date.now() + CACHE_TTL_MS });
+function cacheSet(key: string, price: number, source: "live" | "fallback"): void {
+  PRICE_CACHE.set(key, { price, source, expiresAt: Date.now() + CACHE_TTL_MS });
 }
 
 // ---------------------------------------------------------------------------
-// AWS Bulk Pricing fetch
+// 1. AWS Bulk Pricing fetch
 // ---------------------------------------------------------------------------
 
 const PRICING_BASE = "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws";
@@ -127,7 +217,7 @@ const PRICING_BASE = "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws";
  * The bulk files are large (MB+); we cap the response to 2 MB to avoid
  * excessive memory usage and use a 5-second timeout.
  */
-async function fetchBulkPrice(
+export async function fetchBulkPrice(
   serviceCode: string,
   usageTypePrefix: string,
   region: string
@@ -177,7 +267,7 @@ async function fetchBulkPrice(
       const usageType = product.attributes?.usagetype ?? "";
       if (usageType.includes(usageTypePrefix)) {
         // Get on-demand price
-        const onDemandTerms = data.terms.OnDemand[sku];
+        const onDemandTerms = data.terms?.OnDemand?.[sku];
         if (onDemandTerms) {
           for (const term of Object.values(onDemandTerms)) {
             for (const dim of Object.values(term.priceDimensions)) {
@@ -197,6 +287,171 @@ async function fetchBulkPrice(
 }
 
 // ---------------------------------------------------------------------------
+// 2. AWS SDK Client Pricing fetch (@aws-sdk/client-pricing GetProducts)
+// ---------------------------------------------------------------------------
+
+let activePricingClient: PricingClient | null = null;
+
+/**
+ * Lazily returns a PricingClient configured for the AWS Price List API.
+ * The Pricing endpoint is located in us-east-1 or ap-south-1 (default us-east-1).
+ */
+export function getPricingClient(): PricingClient {
+  if (!activePricingClient) {
+    activePricingClient = new PricingClient({
+      region: process.env.AWS_PRICING_REGION || "us-east-1",
+    });
+  }
+  return activePricingClient;
+}
+
+/**
+ * Injects or resets a custom PricingClient instance (useful for unit tests/mocking).
+ */
+export function setPricingClient(client: PricingClient | null): void {
+  activePricingClient = client;
+}
+
+/**
+ * Helper to extract the USD on-demand unit price from a GetProducts PriceList response.
+ */
+export function extractPriceFromPriceList(
+  priceList: (string | object)[] | undefined,
+  usageTypePrefix: string
+): number | null {
+  if (!priceList || priceList.length === 0) return null;
+
+  for (const rawItem of priceList) {
+    try {
+      const item = typeof rawItem === "string" ? JSON.parse(rawItem) : rawItem;
+      const usageType =
+        item?.product?.attributes?.usagetype ??
+        item?.attributes?.usagetype ??
+        "";
+
+      // Verify that the product matches the required usage type prefix
+      if (usageType && !usageType.includes(usageTypePrefix)) {
+        continue;
+      }
+
+      const onDemandTerms = item?.terms?.OnDemand;
+      if (onDemandTerms) {
+        for (const termOrSku of Object.values(onDemandTerms) as any[]) {
+          // Format 1: Direct offer term with priceDimensions
+          if (termOrSku?.priceDimensions) {
+            for (const dim of Object.values(termOrSku.priceDimensions) as any[]) {
+              const usd = parseFloat(dim?.pricePerUnit?.USD ?? "0");
+              if (usd > 0) return usd;
+            }
+          }
+          // Format 2: Keyed by SKU containing offer terms
+          if (typeof termOrSku === "object" && termOrSku !== null) {
+            for (const inner of Object.values(termOrSku) as any[]) {
+              if (inner?.priceDimensions) {
+                for (const dim of Object.values(inner.priceDimensions) as any[]) {
+                  const usd = parseFloat(dim?.pricePerUnit?.USD ?? "0");
+                  if (usd > 0) return usd;
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Attempts to fetch unit price using the official @aws-sdk/client-pricing GetProducts API.
+ * Returns null on any failure (IAM AccessDenied, missing credentials, timeout, missing product),
+ * gracefully falling back to FALLBACK_PRICES.
+ */
+export async function fetchSdkPrice(
+  serviceCode: string,
+  usageTypePrefix: string,
+  region: string,
+  customClient?: PricingClient
+): Promise<number | null> {
+  const client = customClient ?? getPricingClient();
+  const location = REGION_LOCATION[region];
+  const regionPrefix = REGION_USAGE_PREFIX[region] ?? "";
+  const candidateUsageType = `${regionPrefix}${usageTypePrefix}`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5_000);
+
+  try {
+    // Strategy 1: Targeted query with candidate usagetype TERM_MATCH
+    const targetedFilters: Array<{ Type: "TERM_MATCH"; Field: string; Value: string }> = [];
+    if (location) {
+      targetedFilters.push({ Type: "TERM_MATCH", Field: "location", Value: location });
+    }
+    targetedFilters.push({ Type: "TERM_MATCH", Field: "usagetype", Value: candidateUsageType });
+
+    const targetedCmd = new GetProductsCommand({
+      ServiceCode: serviceCode,
+      Filters: targetedFilters,
+      FormatVersion: "aws_v1",
+      MaxResults: 20,
+    });
+
+    const targetedRes = await client.send(targetedCmd, { abortSignal: controller.signal });
+    const targetedPrice = extractPriceFromPriceList(targetedRes.PriceList, usageTypePrefix);
+    if (targetedPrice !== null && targetedPrice > 0) {
+      return targetedPrice;
+    }
+
+    // Strategy 2: If regional candidate had prefix and differed from bare prefix, try bare prefix
+    if (candidateUsageType !== usageTypePrefix) {
+      const bareFilters: Array<{ Type: "TERM_MATCH"; Field: string; Value: string }> = [];
+      if (location) {
+        bareFilters.push({ Type: "TERM_MATCH", Field: "location", Value: location });
+      }
+      bareFilters.push({ Type: "TERM_MATCH", Field: "usagetype", Value: usageTypePrefix });
+
+      const bareCmd = new GetProductsCommand({
+        ServiceCode: serviceCode,
+        Filters: bareFilters,
+        FormatVersion: "aws_v1",
+        MaxResults: 20,
+      });
+
+      const bareRes = await client.send(bareCmd, { abortSignal: controller.signal });
+      const barePrice = extractPriceFromPriceList(bareRes.PriceList, usageTypePrefix);
+      if (barePrice !== null && barePrice > 0) {
+        return barePrice;
+      }
+    }
+
+    // Strategy 3: Location-only query if targeted usagetype filter yielded no result
+    if (location) {
+      const broadCmd = new GetProductsCommand({
+        ServiceCode: serviceCode,
+        Filters: [{ Type: "TERM_MATCH", Field: "location", Value: location }],
+        FormatVersion: "aws_v1",
+        MaxResults: 100,
+      });
+
+      const broadRes = await client.send(broadCmd, { abortSignal: controller.signal });
+      const broadPrice = extractPriceFromPriceList(broadRes.PriceList, usageTypePrefix);
+      if (broadPrice !== null && broadPrice > 0) {
+        return broadPrice;
+      }
+    }
+
+    return null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -207,37 +462,48 @@ export interface PriceLookupResult {
 
 /**
  * Gets the unit price for a service in a given region.
- * Returns a live price from the AWS Bulk Pricing API if available,
- * or the fallback static price otherwise.
  *
- * Results are cached in-memory for 24 hours.
+ * Source selection:
+ *   - If `sourceMode` is specified, it takes precedence.
+ *   - Otherwise, `getPriceSourceMode()` reads `process.env.PRICE_SOURCE` ("sdk" vs default "bulk").
+ *
+ * When live fetch succeeds, returns `{ price: livePrice, source: "live" }`.
+ * When live fetch fails or is unconfigured, returns `{ price: fallbackPrice, source: "fallback" }`.
+ *
+ * Results are cached in-memory for 24 hours keyed by mode, region, and serviceId.
  */
 export async function getUnitPrice(
   serviceId: string,
   serviceCode: string | null,
   usageTypePrefix: string | null,
-  region: string
+  region: string,
+  sourceMode?: PriceSourceMode
 ): Promise<PriceLookupResult> {
-  const key = cacheKey(region, serviceId);
+  const mode = sourceMode ?? getPriceSourceMode();
+  const key = cacheKey(region, serviceId, mode);
 
   // Check cache
   const cached = cacheGet(key);
   if (cached !== null) {
-    return { price: cached, source: "live" };
+    return cached;
   }
 
   // Try live fetch
   if (serviceCode && usageTypePrefix) {
-    const livePrice = await fetchBulkPrice(serviceCode, usageTypePrefix, region);
+    const livePrice =
+      mode === "sdk"
+        ? await fetchSdkPrice(serviceCode, usageTypePrefix, region)
+        : await fetchBulkPrice(serviceCode, usageTypePrefix, region);
+
     if (livePrice !== null && livePrice > 0) {
-      cacheSet(key, livePrice);
+      cacheSet(key, livePrice, "live");
       return { price: livePrice, source: "live" };
     }
   }
 
   // Fallback
   const fallback = FALLBACK_PRICES[serviceId] ?? 0;
-  cacheSet(key, fallback); // cache fallback too (shorter would be ideal, but 24h is fine)
+  cacheSet(key, fallback, "fallback");
   return { price: fallback, source: "fallback" };
 }
 

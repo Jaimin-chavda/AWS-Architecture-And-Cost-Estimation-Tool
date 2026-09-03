@@ -1,12 +1,15 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-import { Download, ExternalLink, RefreshCw, Maximize2, Minimize2, Sparkles } from "lucide-react";
+import { Download, ExternalLink, RefreshCw, Maximize2, Minimize2, Sparkles, FileCode, Info } from "lucide-react";
+import type { ServicePlan } from "@/lib/schema";
+import { generateCftYaml, generateCftFromDiagramXml } from "@/lib/cftExport";
 
 export interface DiagramViewerProps {
   diagramXml: string;
   filename: string;
   patternTitle?: string;
+  servicePlan?: ServicePlan;
 }
 
 const DRAWIO_EMBED_URL =
@@ -16,6 +19,7 @@ export function DiagramViewer({
   diagramXml,
   filename,
   patternTitle,
+  servicePlan,
 }: DiagramViewerProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [ready, setReady] = useState(false);
@@ -72,6 +76,22 @@ export function DiagramViewer({
     URL.revokeObjectURL(url);
   }
 
+  function handleDownloadCft() {
+    const yamlContent = servicePlan
+      ? generateCftYaml(servicePlan, { patternOverride: patternTitle })
+      : generateCftFromDiagramXml(diagramXml, patternTitle);
+
+    const baseName = filename.replace(/\.drawio$/, "");
+    const cftFilename = `${baseName}-template.yaml`;
+    const blob = new Blob([yamlContent], { type: "application/x-yaml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = cftFilename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   function handleOpenDrawio() {
     window.open("https://app.diagrams.net", "_blank");
   }
@@ -81,7 +101,7 @@ export function DiagramViewer({
       className={
         isFullscreen
           ? "fixed inset-0 z-50 flex flex-col bg-background/95 p-4 sm:p-6 backdrop-blur-xl animate-fadeIn"
-          : "flex flex-1 flex-col gap-3.5 w-full min-h-0"
+          : "flex flex-1 flex-col gap-3 w-full min-h-0"
       }
     >
       {/* Top Workspace Toolbar */}
@@ -128,6 +148,16 @@ export function DiagramViewer({
             <span>Download .drawio</span>
           </button>
 
+          {/* Sibling Option: Download CloudFormation (.yaml) */}
+          <button
+            onClick={handleDownloadCft}
+            className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-4 py-1.5 text-xs font-medium text-amber-300 shadow-sm transition-all hover:border-amber-500/70 hover:bg-amber-500/20 active:scale-95"
+            title="Download deployable CloudFormation YAML template (Starting template, not production-ready IaC)"
+          >
+            <FileCode className="h-3.5 w-3.5 text-amber-400" />
+            <span>Download .yaml (CFT)</span>
+          </button>
+
           <button
             onClick={handleOpenDrawio}
             className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface-2/60 px-3.5 py-1.5 text-xs font-medium text-muted transition-all hover:border-accent/40 hover:text-foreground active:scale-95"
@@ -137,6 +167,14 @@ export function DiagramViewer({
             <span className="hidden sm:inline">draw.io</span>
           </button>
         </div>
+      </div>
+
+      {/* IaC Disclaimer Advisory (Decision 33) */}
+      <div className="flex items-center gap-2 rounded-xl border border-amber-500/20 bg-amber-500/5 px-3.5 py-1.5 text-[11px] text-amber-300/80">
+        <Info className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+        <span>
+          <strong>CloudFormation Advisory:</strong> Generated CFT is a starting architectural template, not production-ready IaC. Review security policies, roles, and sizing before deployment.
+        </span>
       </div>
 
       {/* Frame Container — Responsive Full-Sized Workspace */}

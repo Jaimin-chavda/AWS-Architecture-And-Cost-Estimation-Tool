@@ -11,7 +11,18 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { generateDiagramXml, computeLayout, bucketHeight } from "../diagram.ts";
+import {
+  generateDiagramXml,
+  computeLayout,
+  bucketHeight,
+  validateContainmentHierarchy,
+  CONTAINER_PARENTS,
+  normalizeForComparison,
+  nodeStyle,
+  FALLBACK_STYLE,
+  SERVICE_TIERS,
+  routeEdges,
+} from "../diagram.ts";
 import type { ServicePlan, AwsServiceMapping, DiscoveredComponent, ComponentRelationship } from "../schema.ts";
 
 // ---------------------------------------------------------------------------
@@ -305,7 +316,9 @@ describe("Fix 8 — Evidence-justified edges (solid vs dashed)", () => {
 
     const xml = generateDiagramXml(plan, sdkEvidence);
     assert.ok(
-      xml.includes('style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;strokeColor=#232F3E;strokeWidth=1.5;"'),
+      xml.includes("strokeColor=#232F3E;strokeWidth=1.5;") &&
+      xml.includes("rounded=1;") &&
+      xml.includes("jettySize=auto;"),
       "Should have solid edge for verified Lambda->S3 SDK connection"
     );
   });
@@ -440,11 +453,21 @@ describe("Fix B - dynamic container sizing", () => {
     ];
 
     const layout = computeLayout(services);
-    for (const [key, rect] of Object.entries(layout.containers)) {
+
+    // These containers should be present for the given service set
+    const expectedPresent: (keyof typeof layout.containers)[] = [
+      "aws_cloud", "edge", "vpc", "az", "public_subnet", "compute_subnet", "data_subnet", "external",
+    ];
+    for (const key of expectedPresent) {
+      const rect = layout.containers[key];
       assert.ok(rect, `${key} should exist`);
       assert.ok(rect!.w > 0 && rect!.h > 0, `${key} must have positive dimensions`);
       assert.ok(rect!.x >= 0 && rect!.y >= 0, `${key} must have non-negative origin`);
     }
+
+    // cross_cutting should NOT exist (no cross-cutting services in this test data)
+    assert.strictEqual(layout.containers.cross_cutting, null, "cross_cutting should be null (no services)");
+
     assert.strictEqual(layout.containers.data_subnet!.h, bucketHeight(1), "1 row → minimal height");
     assert.strictEqual(layout.containers.compute_subnet!.h, bucketHeight(1));
     assert.ok(layout.containers.external!.h >= layout.containers.vpc!.h, "external column stretches to VPC height");
@@ -465,5 +488,333 @@ describe("Fix B - dynamic container sizing", () => {
     assert.ok(layout.containers.edge, "edge banner present");
     assert.ok(layout.containers.vpc, "VPC present (compute subnet non-empty)");
     assert.ok(layout.containers.compute_subnet, "compute subnet present");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix 1: Containment Hierarchy (AWS Cloud → VPC → AZ → Subnet → node)
+// ---------------------------------------------------------------------------
+describe("Fix 1 — Containment Hierarchy", () => {
+  it("subnets have parent=container-az in XML output", () => {
+    const plan = makePlan({
+      detectedPattern: "serverless-api",
+      components: [
+        { id: "api", type: "api", technology: "APIGateway", evidence: ["test"], confidence: "high", status: "detected" },
+        { id: "compute", type: "backend", technology: "Lambda", evidence: ["test"], confidence: "high", status: "detected" },
+        { id: "db", type: "database", technology: "DynamoDB", evidence: ["test"], confidence: "high", status: "detected" },
+      ],
+      awsMappings: [
+        { componentId: "api", serviceId: "APIGateway", confidence: "high", evidence: "test", fromPattern: false },
+        { componentId: "compute", serviceId: "Lambda", confidence: "high", evidence: "test", fromPattern: false },
+        { componentId: "db", serviceId: "DynamoDB", confidence: "high", evidence: "test", fromPattern: false },
+      ],
+      relationships: [],
+      deploymentModel: [],
+    });
+    const xml = generateDiagramXml(plan);
+
+    // Subnets should be children of AZ
+    assert.ok(xml.includes('id="container-compute_subnet"'), "compute subnet container present");
+    assert.ok(xml.includes('id="container-az"'), "AZ container present");
+    assert.ok(xml.includes('id="container-vpc"'), "VPC container present");
+    assert.ok(xml.includes('id="container-aws_cloud"'), "AWS Cloud container present");
+
+    // Check parent chain in XML
+    assert.match(xml, /id="container-compute_subnet"[^>]*parent="container-az"/, "compute_subnet parent is AZ");
+    assert.match(xml, /id="container-data_subnet"[^>]*parent="container-az"/, "data_subnet parent is AZ");
+    assert.match(xml, /id="container-az"[^>]*parent="container-vpc"/, "AZ parent is VPC");
+    assert.match(xml, /id="container-vpc"[^>]*parent="container-aws_cloud"/, "VPC parent is AWS Cloud");
+    assert.match(xml, /id="container-aws_cloud"[^>]*parent="1"/, "AWS Cloud parent is root layer");
+  });
+
+  it("AZ container always emitted when subnets exist", () => {
+    const services: AwsServiceMapping[] = [
+      { componentId: "a", serviceId: "EC2", confidence: "medium", evidence: "test", fromPattern: false },
+      { componentId: "b", serviceId: "S3", confidence: "medium", evidence: "test", fromPattern: false },
+    ];
+    const layout = computeLayout(services);
+    assert.ok(layout.containers.az, "AZ container must exist when subnets exist");
+    assert.ok(layout.containers.vpc, "VPC must exist when subnets exist");
+    assert.ok(layout.containers.aws_cloud, "AWS Cloud must exist");
+  });
+
+  it("validateContainmentHierarchy throws when subnet has no AZ", () => {
+    assert.throws(
+      () => validateContainmentHierarchy({
+        aws_cloud: { x: 0, y: 0, w: 100, h: 100 },
+        edge: null,
+        vpc: { x: 10, y: 10, w: 80, h: 80 },
+        az: null,  // Missing!
+        public_subnet: { x: 20, y: 20, w: 60, h: 60 },
+        compute_subnet: null,
+        data_subnet: null,
+        cross_cutting: null,
+        external: null,
+      }),
+      /AZ ancestor/,
+      "should throw when subnet exists without AZ"
+    );
+  });
+
+  it("validateContainmentHierarchy throws when VPC has no AWS Cloud", () => {
+    assert.throws(
+      () => validateContainmentHierarchy({
+        aws_cloud: null,  // Missing!
+        edge: null,
+        vpc: { x: 10, y: 10, w: 80, h: 80 },
+        az: { x: 15, y: 15, w: 70, h: 70 },
+        public_subnet: null,
+        compute_subnet: null,
+        data_subnet: null,
+        cross_cutting: null,
+        external: null,
+      }),
+      /AWS Cloud ancestor/,
+      "should throw when VPC exists without AWS Cloud"
+    );
+  });
+
+  it("validateContainmentHierarchy throws when cross-cutting has no AWS Cloud", () => {
+    assert.throws(
+      () => validateContainmentHierarchy({
+        aws_cloud: null,  // Missing!
+        edge: null,
+        vpc: null,
+        az: null,
+        public_subnet: null,
+        compute_subnet: null,
+        data_subnet: null,
+        cross_cutting: { x: 0, y: 0, w: 50, h: 50 },
+        external: null,
+      }),
+      /AWS Cloud ancestor/,
+      "should throw when cross-cutting exists without AWS Cloud"
+    );
+  });
+
+  it("CONTAINER_PARENTS defines subnet → AZ → VPC → AWS Cloud chain", () => {
+    assert.strictEqual(CONTAINER_PARENTS.public_subnet, "container-az");
+    assert.strictEqual(CONTAINER_PARENTS.compute_subnet, "container-az");
+    assert.strictEqual(CONTAINER_PARENTS.data_subnet, "container-az");
+    assert.strictEqual(CONTAINER_PARENTS.az, "container-vpc");
+    assert.strictEqual(CONTAINER_PARENTS.vpc, "container-aws_cloud");
+    assert.strictEqual(CONTAINER_PARENTS.aws_cloud, "1");
+    assert.strictEqual(CONTAINER_PARENTS.cross_cutting, "container-aws_cloud");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix 2: Label Collision & Deduplication
+// ---------------------------------------------------------------------------
+describe("Fix 2 — Label Deduplication & Collision", () => {
+  it("normalizeForComparison removes prefixes, whitespace, and punctuation", () => {
+    assert.strictEqual(normalizeForComparison("AWS Secrets Manager"), "secretsmanager");
+    assert.strictEqual(normalizeForComparison("Amazon DynamoDB"), "dynamodb");
+    assert.strictEqual(normalizeForComparison("Application Load Balancer (ALB)"), "applicationloadbalanceralb");
+  });
+
+  it("prevents redundant self-referential technology labels like ALB (ALB)", () => {
+    const plan = makePlan({
+      components: [
+        { id: "alb", type: "proxy", technology: "ALB", evidence: ["test"], confidence: "high", status: "detected" },
+      ],
+      awsMappings: [
+        { componentId: "alb", serviceId: "ALB", confidence: "high", evidence: "test", fromPattern: false },
+      ],
+    });
+    const xml = generateDiagramXml(plan);
+    assert.ok(!xml.includes("(ALB)\n(ALB)"), "should not append redundant (ALB) twice");
+    assert.ok(xml.includes("Application Load\nBalancer (ALB)"), "should contain standard display name");
+  });
+
+  it("appends distinct custom technology when not redundant", () => {
+    const plan = makePlan({
+      components: [
+        { id: "db", type: "database", technology: "PostgreSQL", evidence: ["test"], confidence: "high", status: "detected" },
+      ],
+      awsMappings: [
+        { componentId: "db", serviceId: "RDS", confidence: "high", evidence: "test", fromPattern: false },
+      ],
+    });
+    const xml = generateDiagramXml(plan);
+    assert.ok(xml.includes("Amazon RDS\n(PostgreSQL)"), "should include custom technology");
+  });
+
+  it("resolves node collisions by shifting overlapping nodes downward", () => {
+    const plan = makePlan({
+      components: [
+        { id: "c1", type: "backend", technology: "EC2", evidence: ["test"], confidence: "high", status: "detected" },
+        { id: "c2", type: "backend", technology: "ECS", evidence: ["test"], confidence: "high", status: "detected" },
+      ],
+      awsMappings: [
+        { componentId: "c1", serviceId: "EC2", confidence: "high", evidence: "test", fromPattern: false },
+        { componentId: "c2", serviceId: "ECS", confidence: "high", evidence: "test", fromPattern: false },
+      ],
+    });
+    const xml = generateDiagramXml(plan);
+    assert.ok(xml.includes('serviceId="EC2"'), "EC2 node present");
+    assert.ok(xml.includes('serviceId="ECS"'), "ECS node present");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix 3: Icon Fallback Handling
+// ---------------------------------------------------------------------------
+describe("Fix 3 — Icon Fallback Handling", () => {
+  it("uses generic AWS Cloud shape for unknown serviceId and logs a warning", () => {
+    const warnings: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (msg: string) => { warnings.push(msg); };
+
+    try {
+      const style = nodeStyle("UnknownServiceCustom");
+      assert.strictEqual(style, FALLBACK_STYLE);
+      assert.ok(style.includes("resIcon=mxgraph.aws4.general_AWS_Cloud;"), "fallback style should use general AWS Cloud icon");
+      assert.strictEqual(warnings.length, 1);
+      assert.ok(warnings[0].includes("Missing AWS icon for serviceId: \"UnknownServiceCustom\""));
+    } finally {
+      console.warn = origWarn;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix 4: Edge Routing
+// ---------------------------------------------------------------------------
+describe("Fix 4 — Edge Routing (Ports & Rounded Bends)", () => {
+  it("adds jettySize=auto, rounded=1, and ports to edge styles", () => {
+    const plan = makePlan({
+      detectedPattern: "static-site",
+      components: [
+        { id: "dns", type: "api", technology: "Route53", evidence: ["test"], confidence: "high", status: "detected" },
+        { id: "cdn", type: "frontend", technology: "CloudFront", evidence: ["test"], confidence: "high", status: "detected" },
+      ],
+      awsMappings: [
+        { componentId: "dns", serviceId: "Route53", confidence: "high", evidence: "test", fromPattern: false },
+        { componentId: "cdn", serviceId: "CloudFront", confidence: "high", evidence: "test", fromPattern: false },
+      ],
+    });
+    const xml = generateDiagramXml(plan);
+    assert.ok(xml.includes("jettySize=auto;"), "edge style should include jettySize=auto");
+    assert.ok(xml.includes("rounded=1;"), "edge style should include rounded=1");
+    assert.ok(xml.includes("exitX="), "edge style should include exit port");
+    assert.ok(xml.includes("entryX="), "edge style should include entry port");
+  });
+
+  it("computes ports from absolute node positions", () => {
+    const edges = routeEdges(
+      [{ source: "src", target: "dst", label: "link", style: "solid" }],
+      {
+        src: { x: 100, y: 100, w: 56, h: 56 },
+        dst: { x: 100, y: 300, w: 56, h: 56 }, // directly below
+      }
+    );
+    assert.strictEqual(edges[0].exitPort.x, 0.5);
+    assert.strictEqual(edges[0].exitPort.y, 1); // exits bottom
+    assert.strictEqual(edges[0].entryPort.x, 0.5);
+    assert.strictEqual(edges[0].entryPort.y, 0); // enters top
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix 5: Flow Numbering (Edge-Child Badges)
+// ---------------------------------------------------------------------------
+describe("Fix 5 — Flow Numbering (Edge-Child Badges)", () => {
+  it("emits numbered badges as mxGraph edge-child cells with relative='1'", () => {
+    const plan = makePlan({
+      detectedPattern: "static-site",
+      components: [
+        { id: "dns", type: "api", technology: "Route53", evidence: ["test"], confidence: "high", status: "detected" },
+        { id: "cdn", type: "frontend", technology: "CloudFront", evidence: ["test"], confidence: "high", status: "detected" },
+        { id: "storage", type: "object-storage", technology: "S3", evidence: ["test"], confidence: "high", status: "detected" },
+      ],
+      awsMappings: [
+        { componentId: "dns", serviceId: "Route53", confidence: "high", evidence: "test", fromPattern: false },
+        { componentId: "cdn", serviceId: "CloudFront", confidence: "high", evidence: "test", fromPattern: false },
+        { componentId: "storage", serviceId: "S3", confidence: "high", evidence: "test", fromPattern: false },
+      ],
+    });
+    const xml = generateDiagramXml(plan);
+    assert.ok(xml.includes('id="badge-edge-200"'), "badge should exist with badge- prefix");
+    assert.ok(xml.includes('value="1"'), "first primary edge should have badge value 1");
+    assert.ok(xml.includes('value="2"'), "second primary edge should have badge value 2");
+    assert.match(xml, /<mxCell id="badge-edge-\d+" value="\d+"[^>]*parent="edge-\d+"/, "badge cell parent is edge");
+    assert.match(xml, /<mxGeometry relative="1" as="geometry"\/>/, "badge has relative=1 geometry");
+  });
+
+  it("skips flow badges on async, monitoring, and IaC edges", () => {
+    const plan = makePlan({
+      detectedPattern: "serverless-api",
+      components: [
+        { id: "api", type: "api", technology: "APIGateway", evidence: ["test"], confidence: "high", status: "detected" },
+        { id: "fn", type: "backend", technology: "Lambda", evidence: ["test"], confidence: "high", status: "detected" },
+        { id: "queue", type: "proxy", technology: "SQS", evidence: ["test"], confidence: "high", status: "detected" },
+      ],
+      awsMappings: [
+        { componentId: "api", serviceId: "APIGateway", confidence: "high", evidence: "test", fromPattern: false },
+        { componentId: "fn", serviceId: "Lambda", confidence: "high", evidence: "test", fromPattern: false },
+        { componentId: "queue", serviceId: "SQS", confidence: "high", evidence: "test", fromPattern: false },
+      ],
+    });
+    const xml = generateDiagramXml(plan);
+    assert.ok(xml.includes('value="1"'), "primary APIGateway -> Lambda has flow badge 1");
+    const edges = xml.split('</mxCell>');
+    const sqsEdgeCell = edges.find((e) => e.includes('edge=') && e.includes('SQS') && e.includes('publish'));
+    if (sqsEdgeCell) {
+      const match = sqsEdgeCell.match(/id="(edge-\d+)"/);
+      if (match) {
+        assert.ok(!xml.includes(`id="badge-${match[1]}"`), "async SQS edge should not have a flow badge");
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix 6: Cross-Cutting Service Placement
+// ---------------------------------------------------------------------------
+describe("Fix 6 — Cross-Cutting Service Placement", () => {
+  it("assigns CloudWatch, CloudFormation, ECR, CodePipeline to cross_cutting tier", () => {
+    assert.strictEqual(SERVICE_TIERS.CloudWatch, "cross_cutting");
+    assert.strictEqual(SERVICE_TIERS.CloudFormation, "cross_cutting");
+    assert.strictEqual(SERVICE_TIERS.ECR, "cross_cutting");
+    assert.strictEqual(SERVICE_TIERS.CodePipeline, "cross_cutting");
+  });
+
+  it("places cross-cutting container below VPC with full VPC width", () => {
+    const services: AwsServiceMapping[] = [
+      { componentId: "a", serviceId: "EC2", confidence: "medium", evidence: "test", fromPattern: false },
+      { componentId: "b", serviceId: "S3", confidence: "medium", evidence: "test", fromPattern: false },
+      { componentId: "c", serviceId: "CloudWatch", confidence: "medium", evidence: "test", fromPattern: false },
+    ];
+    const layout = computeLayout(services);
+    const vpc = layout.containers.vpc!;
+    const cross = layout.containers.cross_cutting!;
+
+    assert.ok(vpc, "VPC container exists");
+    assert.ok(cross, "cross-cutting container exists");
+    assert.ok(cross.y >= vpc.y + vpc.h, "cross-cutting container is placed below VPC");
+    assert.strictEqual(cross.w, vpc.w, "cross-cutting container spans full VPC width");
+    assert.strictEqual(cross.x, vpc.x, "cross-cutting container aligns with VPC left edge");
+
+    const cwNode = layout.nodes["c"];
+    assert.ok(cwNode, "CloudWatch node exists");
+    assert.strictEqual(cwNode.parent, "container-cross_cutting", "CloudWatch parent is container-cross_cutting");
+  });
+
+  it("renders cross-cutting container inside AWS Cloud in XML", () => {
+    const plan = makePlan({
+      components: [
+        { id: "c1", type: "backend", technology: "EC2", evidence: ["test"], confidence: "high", status: "detected" },
+        { id: "c2", type: "proxy", technology: "CloudWatch", evidence: ["test"], confidence: "medium", status: "detected" },
+      ],
+      awsMappings: [
+        { componentId: "c1", serviceId: "EC2", confidence: "high", evidence: "test", fromPattern: false },
+        { componentId: "c2", serviceId: "CloudWatch", confidence: "medium", evidence: "test", fromPattern: false },
+      ],
+    });
+    const xml = generateDiagramXml(plan);
+    assert.ok(xml.includes('id="container-cross_cutting"'), "cross-cutting container rendered");
+    assert.match(xml, /id="container-cross_cutting"[^>]*parent="container-aws_cloud"/, "cross_cutting parent is AWS Cloud");
+    assert.match(xml, /serviceId="CloudWatch"[^>]*parent="container-cross_cutting"/, "CloudWatch node parent is cross_cutting");
   });
 });

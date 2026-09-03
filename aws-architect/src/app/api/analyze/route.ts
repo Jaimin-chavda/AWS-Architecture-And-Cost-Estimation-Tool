@@ -26,7 +26,7 @@ import { generateDiagramXml } from "@/lib/diagram";
 import { computeCostRows } from "@/lib/cost";
 import type { RuleInput } from "@/lib/ruleEngine";
 import type { ProjectProfile } from "@/lib/repoAnalyzer";
-import type { Grounding } from "@/lib/schema";
+import type { Grounding, ServicePlan } from "@/lib/schema";
 
 // ---------------------------------------------------------------------------
 // Request / Response types
@@ -69,6 +69,20 @@ function isGitHubUrl(value: string): boolean {
   }
 }
 
+function cleanPlanForSerialization(plan: ServicePlan): ServicePlan {
+  if (!plan) return plan;
+  const { proposals, ...rest } = plan;
+  if (!proposals || proposals.length === 0) {
+    return rest as ServicePlan;
+  }
+  const cleanProposals = proposals.map((p: any) => {
+    if (!p) return p;
+    const { proposals: _sub, ...subRest } = p;
+    return subRest as ServicePlan;
+  });
+  return { ...rest, proposals: cleanProposals } as ServicePlan;
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/analyze
 // ---------------------------------------------------------------------------
@@ -80,6 +94,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
+
+  try {
 
   // ── Validate shape ───────────────────────────────────────────────────────
   if (
@@ -216,12 +232,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // ── Stage 3: Inference ────────────────────────────────────────────────────
   // Central reasoning path: LLM → ArchitectureModel → validation → deterministic
   // AWS service mapping. Rules baseline is only the no-LLM / LLM-failure fallback.
-  const { plan: servicePlan, architectureModel } = await runInference({
+  const { plan: servicePlan, plans: servicePlans, architectureModel } = await runInference({
     ruleInput,
     signals,
     description,
     profile, // structured analysis from Stage 2b
   });
+
+  const allPlans = servicePlans && servicePlans.length > 0 ? servicePlans : [servicePlan];
 
   // Grounding warning (Decision 19 / Fix 2)
   if (grounding === "description") {
@@ -239,20 +257,33 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   // ── Stage 4: Diagram XML ──────────────────────────────────────────────────
-  let diagramXml: string | null = null;
-  try {
-    diagramXml = generateDiagramXml(servicePlan, signals?.sdkEvidence);
-  } catch (err) {
-    console.warn("[analyze] Diagram generation failed:", err);
+  const diagramXmls: (string | null)[] = [];
+  for (const p of allPlans) {
+    try {
+      diagramXmls.push(generateDiagramXml(p, signals?.sdkEvidence));
+    } catch (err) {
+      console.warn("[analyze] Diagram generation failed:", err);
+      diagramXmls.push(null);
+    }
+  }
+  const diagramXml = diagramXmls[0] ?? null;
+  if (!diagramXml) {
     warnings.push("Diagram generation failed — diagram unavailable.");
   }
 
   // ── Stage 5: Cost rows ────────────────────────────────────────────────────
-  let costRows = null;
-  try {
-    costRows = await computeCostRows(servicePlan, region, userCount);
-  } catch (err) {
-    console.warn("[analyze] Cost computation failed:", err);
+  const costRowsList = [];
+  for (const p of allPlans) {
+    try {
+      const rows = await computeCostRows(p, region, userCount);
+      costRowsList.push(rows);
+    } catch (err) {
+      console.warn("[analyze] Cost computation failed:", err);
+      costRowsList.push(null);
+    }
+  }
+  const costRows = costRowsList[0] ?? null;
+  if (!costRows) {
     warnings.push("Cost estimation failed — estimates unavailable.");
   }
 
@@ -260,9 +291,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   return NextResponse.json({
     input_kind: kind,
     grounding,
-    service_plan: servicePlan,
+    service_plan: cleanPlanForSerialization(servicePlan),
+    service_plans: allPlans.map(cleanPlanForSerialization),
     diagram_xml: diagramXml,
+    diagram_xmls: diagramXmls,
     cost_rows: costRows,
+    cost_rows_list: costRowsList,
     warnings,
     // architecture_model is the LLM's structured understanding of the whole repo
     // (single source of truth for the derived service plan) — exposed for transparency.
@@ -270,4 +304,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // project_profile is included for transparency/debugging when repo analysis ran
     ...(profile ? { project_profile: profile } : {}),
   });
+  } catch (err: any) {
+    console.error("[analyze] Uncaught analysis error:", err);
+    return NextResponse.json(
+      { error: err?.message || "Internal server error during analysis" },
+      { status: 500 }
+    );
+  }
 }
