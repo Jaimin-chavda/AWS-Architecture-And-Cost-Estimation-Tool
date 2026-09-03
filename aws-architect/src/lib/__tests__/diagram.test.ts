@@ -492,6 +492,155 @@ describe("Fix B - dynamic container sizing", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Container width overflow (regression)
+//
+// computeLayout() force-overrides rect.w on two already-populated containers:
+// the cross-cutting box (→ VPC width) and the edge banner (→ canvas width).
+// When the override was narrower than the grid the nodes were laid out on, the
+// right-hand nodes spilled out of their own container and, for the edge banner,
+// straight through the AWS Cloud boundary — which is what made the VPC / AWS
+// Cloud boxes look like they overlapped everything else.
+// ---------------------------------------------------------------------------
+describe("container width overflow", () => {
+  // Mirrors the private layout constants in diagram.ts. A node's visual
+  // footprint is a CELL_W × CELL_H cell (the 56px icon is centred in it and the
+  // wrapped label is drawn below at full cell width), so the cell — not the
+  // icon — is what has to stay inside the container.
+  const CELL_W = 116;
+  const CELL_H = 80;
+  const EDGE_COLS = 6;
+  const GAP = 32;
+  const PAD = 20;
+
+  /** Natural width layoutNodes() gives a bucket packed into `cols` columns. */
+  const gridWidth = (cols: number) => cols * CELL_W + (cols - 1) * GAP + 2 * PAD;
+
+  function mappings(ids: string[]): AwsServiceMapping[] {
+    return ids.map((serviceId, i) => ({
+      componentId: `n${i}`,
+      serviceId: serviceId as AwsServiceMapping["serviceId"],
+      confidence: "medium" as const,
+      evidence: "test",
+      fromPattern: false,
+    }));
+  }
+
+  /** Every node inside its container, every container inside the AWS Cloud. */
+  function assertContained(layout: ReturnType<typeof computeLayout>, label: string) {
+    const cloud = layout.containers.aws_cloud;
+    assert.ok(cloud, `${label}: AWS Cloud container must exist`);
+
+    for (const [componentId, node] of Object.entries(layout.nodes)) {
+      const key = node.parent.replace("container-", "") as keyof typeof layout.containers;
+      const container = layout.containers[key];
+      assert.ok(container, `${label}: ${componentId} claims parent ${node.parent}, which has no rect`);
+
+      const right = node.x + CELL_W;
+      const bottom = node.y + CELL_H;
+      assert.ok(
+        node.x >= container!.x && right <= container!.x + container!.w,
+        `${label}: node ${componentId} (${node.serviceId}) spans x ${node.x}..${right}, ` +
+          `outside ${node.parent} x ${container!.x}..${container!.x + container!.w}`
+      );
+      assert.ok(
+        node.y >= container!.y && bottom <= container!.y + container!.h,
+        `${label}: node ${componentId} (${node.serviceId}) spans y ${node.y}..${bottom}, ` +
+          `outside ${node.parent} y ${container!.y}..${container!.y + container!.h}`
+      );
+    }
+
+    for (const [key, rect] of Object.entries(layout.containers)) {
+      if (key === "aws_cloud" || !rect) continue;
+      assert.ok(
+        rect.x >= cloud!.x &&
+          rect.y >= cloud!.y &&
+          rect.x + rect.w <= cloud!.x + cloud!.w &&
+          rect.y + rect.h <= cloud!.y + cloud!.h,
+        `${label}: container ${key} (${rect.x},${rect.y} ${rect.w}×${rect.h}) escapes AWS Cloud ` +
+          `(${cloud!.x},${cloud!.y} ${cloud!.w}×${cloud!.h})`
+      );
+    }
+  }
+
+  it("keeps a full edge banner inside itself and the AWS Cloud when the VPC is narrow", () => {
+    // The reported case: all 6 edge services over a single-node compute subnet.
+    // The narrow VPC drives the canvas-derived edge width (660px) below the
+    // 6-column grid the banner's nodes sit on (896px).
+    const services = mappings([
+      "Route53", "CloudFront", "APIGateway", "ALB", "Cognito", "WAF", // edge, 6 cols
+      "EC2",                                                          // lone compute node
+    ]);
+
+    const layout = computeLayout(services);
+    const edge = layout.containers.edge!;
+    const vpc = layout.containers.vpc!;
+
+    assert.ok(edge, "edge banner exists");
+    assert.ok(
+      edge.w >= gridWidth(EDGE_COLS),
+      `edge banner must not shrink below its own 6-column grid: ${edge.w} < ${gridWidth(EDGE_COLS)}`
+    );
+    assert.ok(edge.w > vpc.w, "this case only bites when the banner is wider than the VPC");
+    assertContained(layout, "narrow VPC + full edge banner");
+  });
+
+  it("never shrinks the edge banner below its nodes for any edge-count / VPC-width mix", () => {
+    const edgeIds = ["Route53", "CloudFront", "APIGateway", "ALB", "Cognito", "WAF"];
+    // Widening the VPC one subnet at a time changes the canvas-derived override.
+    const vpcSets: [string, string[]][] = [
+      ["compute only", ["EC2"]],
+      ["public + compute", ["NATGateway", "EC2"]],
+      ["all three subnets", ["NATGateway", "EC2", "S3"]],
+      ["wide data subnet", ["NATGateway", "EC2", "S3", "RDS", "DynamoDB", "SQS", "SNS"]],
+    ];
+
+    for (let edgeCount = 1; edgeCount <= edgeIds.length; edgeCount++) {
+      for (const [vpcLabel, vpcIds] of vpcSets) {
+        const label = `${edgeCount} edge service(s) + ${vpcLabel}`;
+        const layout = computeLayout(mappings([...edgeIds.slice(0, edgeCount), ...vpcIds]));
+        assert.ok(
+          layout.containers.edge!.w >= gridWidth(EDGE_COLS),
+          `${label}: edge banner ${layout.containers.edge!.w} < grid ${gridWidth(EDGE_COLS)}`
+        );
+        assertContained(layout, label);
+      }
+    }
+  });
+
+  it("keeps cross-cutting nodes inside the container when it is aligned to the VPC", () => {
+    // Cross-cutting is stretched to the VPC width; it must never end up narrower
+    // than the 4-column grid its own nodes are placed on.
+    const layout = computeLayout(
+      mappings(["Route53", "EC2", "CloudWatch", "CloudFormation", "ECR", "CodePipeline"])
+    );
+    const cross = layout.containers.cross_cutting!;
+    const vpc = layout.containers.vpc!;
+
+    assert.ok(cross, "cross-cutting container exists");
+    assert.ok(
+      cross.w >= gridWidth(4),
+      `cross-cutting must not shrink below its 4-column grid: ${cross.w} < ${gridWidth(4)}`
+    );
+    assert.ok(cross.w >= vpc.w, "cross-cutting still spans at least the VPC width");
+    assertContained(layout, "cross-cutting aligned to VPC");
+  });
+
+  it("holds containment across every tier populated at once", () => {
+    const layout = computeLayout(
+      mappings([
+        "Route53", "CloudFront", "APIGateway", "ALB", "Cognito", "WAF", // edge
+        "VPC", "NATGateway",                                            // public subnet
+        "EC2", "Lambda", "ECS",                                         // compute subnet
+        "S3", "RDS", "DynamoDB", "ElastiCache", "SQS", "SNS",           // data subnet
+        "CloudWatch", "CloudFormation",                                 // cross-cutting
+        "SES", "Amplify",                                               // external
+      ])
+    );
+    assertContained(layout, "all tiers populated");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Fix 1: Containment Hierarchy (AWS Cloud → VPC → AZ → Subnet → node)
 // ---------------------------------------------------------------------------
 describe("Fix 1 — Containment Hierarchy", () => {

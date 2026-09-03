@@ -621,7 +621,9 @@ export function computeLayout(services: AwsServiceMapping[]): DiagramLayout {
       : (topBottom > 0 ? topBottom + VGAP : vpcY);
     const crossPlaced = layoutNodes(buckets.cross_cutting, CROSS_CUTTING_COLS, crossX, crossY)!;
     if (vpcRect) {
-      crossPlaced.rect.w = vpcRect.w;
+      // Widen to the VPC for alignment, but never below the width this
+      // container's own already-positioned nodes need.
+      crossPlaced.rect.w = Math.max(crossPlaced.rect.w, vpcRect.w);
     }
     crossCuttingRect = crossPlaced.rect;
     for (const n of crossPlaced.nodes) {
@@ -661,7 +663,11 @@ export function computeLayout(services: AwsServiceMapping[]): DiagramLayout {
   if (buckets.edge.length > 0) {
     const edgeW = baseCanvasW - 2 * MARGIN;
     const edgePlaced = layoutNodes(buckets.edge, EDGE_COLS, MARGIN, MARGIN)!;
-    edgePlaced.rect.w = edgeW;
+    // Stretch across the canvas, but never below the width this banner's own
+    // already-positioned nodes need — a narrow VPC makes the canvas-derived
+    // width smaller than the EDGE_COLS grid, and shrinking to it pushed the
+    // right-hand nodes outside both the banner and the AWS Cloud boundary.
+    edgePlaced.rect.w = Math.max(edgePlaced.rect.w, edgeW);
     containers.edge = edgePlaced.rect;
     for (const n of edgePlaced.nodes) {
       nodes[n.componentId] = { x: n.x, y: n.y, parent: "container-edge", serviceId: n.serviceId };
