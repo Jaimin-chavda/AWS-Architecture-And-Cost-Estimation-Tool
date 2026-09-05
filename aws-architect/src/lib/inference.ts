@@ -12,7 +12,7 @@
 
 import { runRuleEngine } from "./ruleEngine.ts";
 import { analyzeArchitecture, llmConfigured } from "./llmClient.ts";
-import { mapArchitectureModelToServicePlan } from "./architecture.ts";
+import { mapArchitectureModelToServicePlan, deduplicateAwsMappings } from "./architecture.ts";
 import type { ArchitectureModel } from "./architecture.ts";
 import type {
   ServicePlan,
@@ -72,18 +72,25 @@ export function mergeSingleServicePlan(
   const mergedMappings = baseline.awsMappings.map((bm) => {
     const lm = llmMap.get(bm.serviceId);
     if (lm) {
+      const isRecommendation = lm.category === "recommendation" || bm.category === "recommendation";
+      const confidence = isRecommendation
+        ? (lm.confidence === "high" ? "medium" : lm.confidence)
+        : ("high" as const);
       return {
         ...bm,
-        confidence: "high" as const,
+        confidence,
         evidence: lm.evidence || bm.evidence,
+        category: lm.category ?? bm.category,
       };
     }
     return bm;
   });
 
+  const finalMappings = deduplicateAwsMappings(mergedMappings);
+
   const mergedPlan: ServicePlan = {
     ...baseline,
-    awsMappings: mergedMappings,
+    awsMappings: finalMappings,
     detectedPattern: llmResult.detectedPattern || baseline.detectedPattern,
     metadata: {
       ...baseline.metadata,
@@ -190,6 +197,8 @@ export async function runInference(input: InferenceInput): Promise<InferenceResu
     grounding: ruleInput.grounding,
     truncated: ruleInput.truncated,
     parseErrors: ruleInput.parseErrors,
+    workloadClassification: profile?.workloadClassification,
+    evidenceRegister: profile?.evidenceRegister,
   });
 
   const cappedPlan = applyGroundingCap(primaryPlan, ruleInput.grounding);

@@ -82,15 +82,13 @@ function buildSystemPrompt(): string {
   return `You are a Senior Principal AWS Cloud Architect. You are given structured evidence extracted from a software repository or project description. Build a model of the system that ACTUALLY EXISTS in that evidence — nothing more.
 
 THE EVIDENCE RULE (non-negotiable):
-Every component you output MUST cite at least one concrete piece of the evidence
-below in its "evidence" array. A citation is a specific file path, dependency
-entry, config key, README sentence, or phrase from the user's description — for
-example "package.json → express", "docker-compose.yml → service: redis",
-"serverless.yml → functions.processOrder", "README: 'stores uploads in S3'".
+Every component you output MUST cite at least one concrete piece of genuine evidence
+from the EVIDENCE INVENTORY or discovered components below in its "evidence" array.
+Prefer citing evidence IDs (e.g. "ev-1", "ev-2") or exact manifest file paths (e.g. "order-service/pom.xml").
 "Typical for this kind of app", "best practice", "production systems need this",
-and "implied by the stack" are NOT evidence. If you cannot cite something
-specific, DO NOT emit the component. A component with an empty evidence array
-will be discarded, so emitting one only loses you information.
+and "implied by the stack" are NOT evidence. NEVER invent evidence, non-existent files,
+or hallucinated handler definitions. Any component citing non-existent or unsupported
+evidence will be automatically rejected. A component with no valid evidence will be discarded.
 
 MINIMAL ARCHITECTURES ARE CORRECT ARCHITECTURES:
 There is no required number of components and no required set of layers. Most of
@@ -198,7 +196,16 @@ export function buildArchitecturePrompt(
       }
     }
 
-    // 6. User description (if present)
+    // 6. Evidence inventory (ground truth register)
+    if (profile.evidenceRegister && profile.evidenceRegister.length > 0) {
+      parts.push(
+        "\nEVIDENCE INVENTORY (Ground Truth Evidence Records):\n" +
+        "You may ONLY cite evidence IDs (e.g. 'ev-1', 'ev-2') or direct file paths from this list:\n" +
+        profile.evidenceRegister.map(r => `  - [${r.id}] (${r.kind}) ${r.sourcePath}: ${r.detail} [${r.confidence}]`).join("\n")
+      );
+    }
+
+    // 7. User description (if present)
     if (description) {
       parts.push(`\nADDITIONAL USER CONTEXT:\n${description}`);
     }
@@ -259,7 +266,7 @@ export async function analyzeArchitecture(opts: {
       maxRetries: 3,
     });
 
-    return validateArchitectureModel(raw);
+    return validateArchitectureModel(raw, opts.profile?.evidenceRegister);
   } catch (err) {
     console.warn("[llmClient] Architecture model call failed:", (err as Error).message ?? String(err));
     return null;

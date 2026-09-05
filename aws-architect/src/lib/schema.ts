@@ -16,10 +16,11 @@ export const SERVICE_IDS = [
   "S3", "EBS", "EFS", "Glacier",
   "RDS", "DynamoDB", "ElastiCache", "Aurora", "Redshift", "DocumentDB",
   "CloudFront", "APIGateway", "ALB", "Route53", "VPC", "NATGateway", "WAF",
-  "SQS", "SNS", "EventBridge", "Kinesis",
+  "SQS", "SNS", "EventBridge", "Kinesis", "MSK",
   "Cognito", "SecretsManager",
   "CloudWatch", "CodePipeline", "ECR", "CloudFormation",
   "SageMaker", "Rekognition", "Comprehend",
+  "OpenSearch",
   "SES", "Amplify",
 ] as const;
 
@@ -37,10 +38,11 @@ export const SERVICE_CATEGORIES: Record<ServiceId, string> = {
   ElastiCache: "cache", Redshift: "warehouse",
   CloudFront: "networking", APIGateway: "networking", ALB: "networking",
   Route53: "networking", VPC: "networking", NATGateway: "networking", WAF: "security",
-  SQS: "messaging", SNS: "messaging", EventBridge: "messaging", Kinesis: "messaging",
+  SQS: "messaging", SNS: "messaging", EventBridge: "messaging", Kinesis: "messaging", MSK: "messaging",
   Cognito: "auth", SecretsManager: "security",
   CloudWatch: "observability", CodePipeline: "observability", ECR: "observability", CloudFormation: "observability",
   SageMaker: "ml", Rekognition: "ml", Comprehend: "ml",
+  OpenSearch: "search",
   SES: "misc", Amplify: "misc",
 };
 
@@ -113,6 +115,27 @@ export const DeploymentModelSchema = z.object({
 });
 export type DeploymentModel = z.infer<typeof DeploymentModelSchema>;
 
+export const MAPPING_CATEGORIES = [
+  "repository-evidence",
+  "deployment-requirement",
+  "inference",
+  "recommendation",
+] as const;
+export type MappingCategory = (typeof MAPPING_CATEGORIES)[number];
+
+// ---------------------------------------------------------------------------
+// Evidence Record (grounded evidence inventory item)
+// ---------------------------------------------------------------------------
+export const EvidenceRecordSchema = z.object({
+  id: z.string().min(1).max(100),
+  kind: z.enum(["manifest", "iac", "code", "sdk", "readme", "path", "description"]),
+  sourcePath: z.string().min(1).max(250),
+  technology: z.string().min(1).max(100).optional(),
+  detail: z.string().min(1).max(500),
+  confidence: z.enum(CONFIDENCE_TIERS),
+});
+export type EvidenceRecord = z.infer<typeof EvidenceRecordSchema>;
+
 // ---------------------------------------------------------------------------
 // AWS Service Mapping (one per component, patterns as lookup only)
 // ---------------------------------------------------------------------------
@@ -123,6 +146,7 @@ export const AwsServiceMappingSchema = z.object({
   evidence: z.string().max(200),
   /** If true, this mapping came from a pattern lookup table (sanity-check only) */
   fromPattern: z.boolean().default(false),
+  category: z.enum(MAPPING_CATEGORIES).optional(),
 });
 export type AwsServiceMapping = z.infer<typeof AwsServiceMappingSchema>;
 

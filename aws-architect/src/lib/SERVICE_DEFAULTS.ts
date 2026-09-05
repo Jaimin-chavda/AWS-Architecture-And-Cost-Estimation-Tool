@@ -234,6 +234,13 @@ export const SERVICE_DEFAULTS: Record<string, ServiceDefault> = {
     usageTypePrefix: "ShardHour",
     annotation: "1 Kinesis shard × 720 h; source: Kinesis pricing page",
   },
+  MSK: {
+    unitLabel: "broker-hours/mo (kafka.m5.large)",
+    baseQuantity: 720,
+    serviceCode: "AmazonMSK",
+    usageTypePrefix: "Kafka.m5.large",
+    annotation: "2 kafka.m5.large brokers × 720 h; source: MSK pricing page",
+  },
 
   // ── Auth / Identity ──────────────────────────────────────────────────────
   Cognito: {
@@ -288,6 +295,13 @@ export const SERVICE_DEFAULTS: Record<string, ServiceDefault> = {
     serviceCode: "AmazonComprehend",
     usageTypePrefix: "LanguageDetection",
     annotation: "100k 100-char units; source: Comprehend pricing page",
+  },
+  OpenSearch: {
+    unitLabel: "instance-hours/mo (t3.small.search)",
+    baseQuantity: 720,
+    serviceCode: "AmazonES",
+    usageTypePrefix: "ESInstance:t3.small.search",
+    annotation: "1 t3.small.search node × 720 h; source: OpenSearch Service pricing page",
   },
 
   // ── Security & Secrets ───────────────────────────────────────────────────

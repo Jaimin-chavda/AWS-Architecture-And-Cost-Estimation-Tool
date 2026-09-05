@@ -18,6 +18,7 @@
 
 import { parse as parseYaml } from "yaml";
 import type { RepoSignals, KeyFile } from "./repoFetcher.ts";
+import type { EvidenceRecord } from "./schema.ts";
 
 // ---------------------------------------------------------------------------
 // Structural component discovery types
@@ -31,6 +32,8 @@ export type DiscoveredComponentType =
   | "database"
   | "cache"
   | "queue"
+  | "messaging"
+  | "search"
   | "api"
   | "auth"
   | "storage"
@@ -58,6 +61,29 @@ export interface DiscoveredComponent {
   confidence: "high" | "medium" | "low";
   /** Which extraction pass found this component */
   source: "docker-compose" | "serverless-yml" | "iac" | "source-code" | "file-naming";
+}
+
+// ---------------------------------------------------------------------------
+// Workload Classification types (Priority 4)
+// ---------------------------------------------------------------------------
+
+export type WorkloadType =
+  | "web-application"
+  | "api"
+  | "microservices"
+  | "worker"
+  | "batch"
+  | "ml-training"
+  | "ml-inference"
+  | "static-frontend"
+  | "admin-monitoring-tool"
+  | "generic";
+
+export interface WorkloadClassification {
+  primaryWorkload: WorkloadType;
+  type?: WorkloadType;
+  confidence: "high" | "medium" | "low";
+  reasons: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -93,13 +119,12 @@ export interface ProjectProfile {
    * Structurally distinct running processes/data-tiers discovered from
    * docker-compose services, serverless functions, IaC resources, or
    * source-code client instantiations / worker file naming.
-   *
-   * Each entry represents ONE deployable unit (an API server, a background
-   * worker, a Redis cache, a Postgres DB) — not a library or a tech signal.
-   * These feed into both the LLM prompt and the rule-engine fallback as
-   * "non-droppable" services (they come first before the 12-service cap).
    */
   discoveredComponents: DiscoveredComponent[];
+  /** Registered real evidence records from repository files with stable IDs */
+  evidenceRegister?: EvidenceRecord[];
+  /** Workload classification performed before compute selection */
+  workloadClassification?: WorkloadClassification;
   /**
    * A concise, structured summary of detected technologies.
    * This is what gets passed to the LLM instead of raw file content.
@@ -170,6 +195,23 @@ export const NPM_FRAMEWORK_MAP: Record<string, { label: string; category: "frame
   "@aws-sdk/client-ses": { label: "SES", category: "framework" },
   "@aws-sdk/client-eventbridge": { label: "EventBridge", category: "framework" },
   "@aws-sdk/client-kinesis": { label: "Kinesis", category: "framework" },
+  // Messaging & Queues (npm)
+  kafkajs: { label: "Kafka", category: "framework" },
+  "@confluentinc/kafka-javascript": { label: "Kafka", category: "framework" },
+  bull: { label: "Bull (queue)", category: "framework" },
+  bullmq: { label: "BullMQ (queue)", category: "framework" },
+  // Search & Storage (npm)
+  "@opensearch-project/opensearch": { label: "OpenSearch", category: "database" },
+  "@elastic/elasticsearch": { label: "OpenSearch", category: "database" },
+  "express-fileupload": { label: "File Upload (S3)", category: "framework" },
+  multer: { label: "File Upload (S3)", category: "framework" },
+  formidable: { label: "File Upload (S3)", category: "framework" },
+  // Email (npm)
+  nodemailer: { label: "SES / Email", category: "framework" },
+  "@sendgrid/mail": { label: "SES / Email", category: "framework" },
+  // Auth (npm)
+  "keycloak-js": { label: "Keycloak", category: "framework" },
+  "keycloak-connect": { label: "Keycloak", category: "framework" },
   // ML
   "@tensorflow/tfjs": { label: "TensorFlow.js", category: "framework" },
   "@tensorflow/tfjs-node": { label: "TensorFlow.js", category: "framework" },
@@ -188,6 +230,11 @@ export const PYTHON_PACKAGE_MAP: Record<string, { label: string; category: "fram
   celery: { label: "Celery (task queue)", category: "framework" },
   gunicorn: { label: "Gunicorn", category: "framework" },
   uvicorn: { label: "Uvicorn", category: "framework" },
+  // Messaging & Search (pip)
+  "confluent-kafka": { label: "Kafka", category: "framework" },
+  "kafka-python": { label: "Kafka", category: "framework" },
+  "opensearch-py": { label: "OpenSearch", category: "database" },
+  elasticsearch: { label: "OpenSearch", category: "database" },
   // Databases
   psycopg2: { label: "PostgreSQL", category: "database" },
   "psycopg2-binary": { label: "PostgreSQL", category: "database" },
@@ -249,7 +296,43 @@ export const CARGO_PACKAGE_MAP: Record<string, { label: string; category: "frame
 export const MAVEN_ARTIFACT_MAP: Record<string, { label: string; category: "framework" | "database" | "aws" }> = {
   "spring-boot": { label: "Spring Boot", category: "framework" },
   "spring-boot-starter-web": { label: "Spring Boot", category: "framework" },
+  "spring-boot-starter-webflux": { label: "Spring WebFlux", category: "framework" },
   "spring-boot-starter-data-jpa": { label: "Spring Data JPA", category: "framework" },
+  "spring-boot-starter-data-mongodb": { label: "MongoDB", category: "database" },
+  "mongodb-driver-sync": { label: "MongoDB", category: "database" },
+  "mongo-java-driver": { label: "MongoDB", category: "database" },
+  "spring-boot-starter-data-redis": { label: "Redis", category: "database" },
+  "spring-kafka": { label: "Kafka", category: "framework" },
+  "kafka-clients": { label: "Kafka", category: "framework" },
+  "spring-cloud-starter-stream-kafka": { label: "Kafka", category: "framework" },
+  "kafka-avro-serializer": { label: "Avro / Schema Registry", category: "framework" },
+  avro: { label: "Apache Avro", category: "framework" },
+  "spring-cloud-starter-gateway": { label: "Spring Cloud Gateway", category: "framework" },
+  "spring-cloud-starter-gateway-mvc": { label: "Spring Cloud Gateway", category: "framework" },
+  "spring-cloud-starter-netflix-eureka-client": { label: "Eureka", category: "framework" },
+  "spring-cloud-starter-netflix-eureka-server": { label: "Eureka Server", category: "framework" },
+  "eureka-client": { label: "Eureka", category: "framework" },
+  "spring-cloud-config-server": { label: "Spring Cloud Config", category: "framework" },
+  "spring-cloud-starter-config": { label: "Spring Cloud Config", category: "framework" },
+  "keycloak-spring-boot-starter": { label: "Keycloak", category: "framework" },
+  "keycloak-adapter-core": { label: "Keycloak", category: "framework" },
+  "keycloak-spring-security-adapter": { label: "Keycloak", category: "framework" },
+  "spring-boot-starter-oauth2-resource-server": { label: "Keycloak / OAuth2", category: "framework" },
+  "spring-boot-starter-mail": { label: "Spring Mail", category: "framework" },
+  "opensearch-rest-high-level-client": { label: "OpenSearch", category: "database" },
+  "opensearch-rest-client": { label: "OpenSearch", category: "database" },
+  opensearch: { label: "OpenSearch", category: "database" },
+  "opensearch-java": { label: "OpenSearch", category: "database" },
+  "spring-data-opensearch": { label: "OpenSearch", category: "database" },
+  "spring-data-elasticsearch": { label: "OpenSearch", category: "database" },
+  elasticsearch: { label: "OpenSearch", category: "database" },
+  "jib-maven-plugin": { label: "Docker (Jib)", category: "framework" },
+  "flyway-core": { label: "Flyway (Migrations)", category: "database" },
+  "liquibase-core": { label: "Liquibase (Migrations)", category: "database" },
+  resilience4j: { label: "Resilience4j", category: "framework" },
+  "resilience4j-spring-boot3": { label: "Resilience4j", category: "framework" },
+  "micrometer-registry-prometheus": { label: "Prometheus", category: "framework" },
+  "zipkin-reporter": { label: "Zipkin", category: "framework" },
   quarkus: { label: "Quarkus", category: "framework" },
   "quarkus-core": { label: "Quarkus", category: "framework" },
   micronaut: { label: "Micronaut", category: "framework" },
@@ -477,7 +560,7 @@ export function parseCargoToml(content: string): ParsedPackage[] {
 
 export function parsePomXml(content: string): ParsedPackage[] {
   const packages: ParsedPackage[] = [];
-  const depBlocks = content.match(/<dependency>[\s\S]*?<\/dependency>/gi) || [];
+  const depBlocks = content.match(/<(?:dependency|plugin)>[\s\S]*?<\/(?:dependency|plugin)>/gi) || [];
   for (const block of depBlocks) {
     const groupMatch = block.match(/<groupId>([\s\S]*?)<\/groupId>/i);
     const artifactMatch = block.match(/<artifactId>([\s\S]*?)<\/artifactId>/i);
@@ -832,18 +915,46 @@ function extractDockerComposeComponents(
     } else if (/rabbitmq/.test(image)) {
       type = "queue"; technology = "RabbitMQ";
     } else if (/kafka/.test(image)) {
-      type = "queue"; technology = "Kafka";
+      type = "messaging"; technology = "Kafka";
+    } else if (/zookeeper/.test(image)) {
+      type = "other"; technology = "ZooKeeper";
+    } else if (/keycloak/.test(image)) {
+      type = "auth"; technology = "Keycloak";
+    } else if (/opensearch-dashboards|kibana/.test(image)) {
+      type = "other"; technology = "OpenSearch Dashboards";
+    } else if (/opensearch|elasticsearch/.test(image)) {
+      type = "search"; technology = "OpenSearch";
+    } else if (/pgadmin/.test(image)) {
+      type = "other"; technology = "pgAdmin";
+    } else if (/adminer/.test(image)) {
+      type = "other"; technology = "Adminer";
+    } else if (/phpmyadmin/.test(image)) {
+      type = "other"; technology = "phpMyAdmin";
+    } else if (/flower/.test(image)) {
+      type = "other"; technology = "Flower";
+    } else if (/portainer/.test(image)) {
+      type = "other"; technology = "Portainer";
+    } else if (/maildev|mailhog/.test(image)) {
+      type = "other"; technology = "MailDev";
+    } else if (/prometheus/.test(image)) {
+      type = "other"; technology = "Prometheus";
+    } else if (/grafana/.test(image)) {
+      type = "other"; technology = "Grafana";
+    } else if (/zipkin|jaeger/.test(image)) {
+      type = "other"; technology = "Zipkin";
     } else if (/nginx/.test(image)) {
       type = "api"; technology = "Nginx";
     } else if (/traefik|caddy/.test(image)) {
       type = "api"; technology = image.includes("traefik") ? "Traefik" : "Caddy";
+    } else if (/adminer|phpmyadmin|pgadmin|grafana|prometheus|kibana|flower|jaeger|zipkin|portainer|monitoring/.test(serviceName)) {
+      type = "other"; technology = serviceName;
     } else if (hasBuild || image === "") {
       // Application code service — classify by service name
       if (/worker|consumer|processor/.test(serviceName)) {
         type = "worker"; technology = "custom";
       } else if (/cron|scheduler|schedule/.test(serviceName)) {
         type = "scheduler"; technology = "custom";
-      } else if (/frontend|web|client|ui/.test(serviceName)) {
+      } else if (/(?:^|[-_])(frontend|web|client|ui)(?:$|[-_])/.test(serviceName) || /frontend|client/.test(serviceName)) {
         type = "frontend"; technology = "custom";
       } else {
         type = "backend"; technology = "custom";
@@ -1130,9 +1241,29 @@ export function analyzeProject(signals: RepoSignals): ProjectProfile {
     }
   };
 
+  // Consolidate keyFiles, manifests, and containerCi so multi-module manifests are never missed
+  const allFiles: Array<{ path: string; content: string | null; kind?: string }> = [
+    ...(signals.keyFiles || []),
+  ];
+  const seenPaths = new Set(allFiles.map((f) => f.path));
+
+  for (const m of signals.manifests || []) {
+    if (!seenPaths.has(m.path)) {
+      seenPaths.add(m.path);
+      allFiles.push({ path: m.path, content: m.content, kind: "manifest" });
+    }
+  }
+
+  for (const c of signals.containerCi || []) {
+    if (!seenPaths.has(c.path)) {
+      seenPaths.add(c.path);
+      allFiles.push({ path: c.path, content: c.content, kind: "containerCi" });
+    }
+  }
+
   // ── Pass 1: file-path signals (no content needed) ─────────────────────────
 
-  for (const file of signals.keyFiles) {
+  for (const file of allFiles) {
     const fileName = file.path.split("/").pop() ?? file.path;
 
     // Language detection from manifest presence
@@ -1172,7 +1303,7 @@ export function analyzeProject(signals: RepoSignals): ProjectProfile {
 
   const parseFailures: string[] = [];
 
-  for (const file of signals.keyFiles) {
+  for (const file of allFiles) {
     if (!file.content) continue;
     const fileName = file.path.split("/").pop() ?? file.path;
 
@@ -1305,7 +1436,7 @@ export function analyzeProject(signals: RepoSignals): ProjectProfile {
 
   const discoveredRaw: DiscoveredComponent[] = [];
 
-  for (const file of signals.keyFiles) {
+  for (const file of allFiles) {
     if (!file.content) continue;
     const fileName = file.path.split("/").pop() ?? file.path;
 
@@ -1319,7 +1450,7 @@ export function analyzeProject(signals: RepoSignals): ProjectProfile {
 
   // ── Passes B+C: source-code instantiation + file-naming ─────────────────
 
-  discoveredRaw.push(...extractSourceCodeComponents(signals.keyFiles));
+  discoveredRaw.push(...extractSourceCodeComponents(allFiles as any));
 
   // Deduplicate discoveredComponents by id (first wins — IaC evidence is
   // stronger than source-code inference for the same logical component).
@@ -1329,6 +1460,98 @@ export function analyzeProject(signals: RepoSignals): ProjectProfile {
     if (!seenDiscoveredIds.has(dc.id)) {
       seenDiscoveredIds.add(dc.id);
       discoveredComponents.push(dc);
+    }
+  }
+
+  // ── Kubernetes Manifest Discovery ─────────────────────────────
+  for (const file of allFiles) {
+    const p = file.path.toLowerCase();
+    const isK8sName = /(?:k8s|kubernetes|helm|deploy)\//.test(p) ||
+                      /(?:ingress|deployment|service|k8s|kubernetes|statefulset|daemonset)\.ya?ml$/.test(p) ||
+                      p.endsWith("chart.yaml");
+    const hasK8sContent = Boolean(file.content &&
+      file.content.includes("apiVersion:") &&
+      (file.content.includes("kind: Deployment") || file.content.includes("kind: Ingress") || file.content.includes("kind: Service")));
+    if (isK8sName || hasK8sContent) {
+      if (!seenInfra.has("Kubernetes manifests")) {
+        seenInfra.add("Kubernetes manifests");
+        infrastructure.push({
+          name: "Kubernetes manifests",
+          evidence: `${file.path} → Kubernetes configuration`,
+          confidence: "high",
+        });
+      }
+    }
+  }
+
+  // ── Workload Classification (Priority 4) ────────────────────
+  const workloadClassification = classifyWorkload({
+    languages,
+    frameworks,
+    databases,
+    infrastructure,
+    discoveredComponents,
+    signals,
+  });
+
+  // ── Build Evidence Register (Priority 1) ────────────────────
+  const evidenceRegister: EvidenceRecord[] = [];
+  let evId = 1;
+  const seenEvidence = new Set<string>();
+
+  const registerEv = (
+    kind: EvidenceRecord["kind"],
+    sourcePath: string,
+    technology: string | undefined,
+    detail: string,
+    confidence: "high" | "medium" | "low"
+  ) => {
+    const key = `${sourcePath}:${technology}:${detail}`;
+    if (seenEvidence.has(key)) return;
+    seenEvidence.add(key);
+    evidenceRegister.push({
+      id: `ev-${evId++}`,
+      kind,
+      sourcePath,
+      technology,
+      detail: detail.slice(0, 300),
+      confidence,
+    });
+  };
+
+  for (const l of languages) {
+    registerEv("manifest", l.evidence, l.name, `Language/runtime detected: ${l.name}`, l.confidence);
+  }
+  for (const f of frameworks) {
+    registerEv("manifest", f.evidence.split(" → ")[0] || "manifest", f.name, f.evidence, f.confidence);
+  }
+  for (const d of databases) {
+    registerEv("manifest", d.evidence.split(" → ")[0] || "manifest", d.name, d.evidence, d.confidence);
+  }
+  for (const i of infrastructure) {
+    registerEv("iac", i.evidence.split(" → ")[0] || "infra", i.name, i.evidence, i.confidence);
+  }
+  for (const h of deploymentHints) {
+    registerEv("iac", h.evidence.split(" → ")[0] || "config", h.name, h.evidence, h.confidence);
+  }
+  for (const a of awsUsage) {
+    registerEv("sdk", a.evidence.split(" → ")[0] || "code", a.name, a.evidence, a.confidence);
+  }
+  for (const s of signals.sdkEvidence) {
+    registerEv("sdk", s.filePath || s.file, s.service, `SDK match: ${s.match}`, "high");
+  }
+  for (const c of discoveredComponents) {
+    registerEv("iac", c.evidence[0] || "component", c.technology, `Component: ${c.name} (${c.technology}) [${c.type}]`, c.confidence);
+  }
+  const readmeFile = signals.keyFiles.find((f) => f.kind === "readme");
+  if (readmeFile?.content) {
+    const lines = readmeFile.content.split(/\r?\n/);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.length < 10 || trimmed.length > 250) continue;
+      if (/kafka|postgres|mysql|mongo|redis|s3|sqs|opensearch|keycloak|sagemaker|cnn|tensorflow|pytorch|docker/i.test(trimmed)) {
+        registerEv("readme", readmeFile.path, "readme-evidence", trimmed, "medium");
+      }
     }
   }
 
@@ -1342,6 +1565,8 @@ export function analyzeProject(signals: RepoSignals): ProjectProfile {
     awsUsage,
     deploymentHints,
     discoveredComponents,
+    evidenceRegister,
+    workloadClassification,
     repoName: signals.repoName,
   });
 
@@ -1355,8 +1580,143 @@ export function analyzeProject(signals: RepoSignals): ProjectProfile {
     deploymentHints,
     parseFailures,
     discoveredComponents,
+    evidenceRegister,
+    workloadClassification,
     summary,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Workload classifier implementation (Priority 4)
+// ---------------------------------------------------------------------------
+
+export function classifyWorkload(
+  dataOrSignals:
+    | {
+        languages?: DetectedTech[];
+        frameworks?: DetectedTech[];
+        databases?: DetectedTech[];
+        infrastructure?: DetectedTech[];
+        discoveredComponents?: DiscoveredComponent[];
+        signals: RepoSignals;
+        description?: string;
+      }
+    | RepoSignals,
+  description?: string
+): WorkloadClassification {
+  const isSignals = "manifests" in dataOrSignals || "fileTree" in dataOrSignals || "keyFiles" in dataOrSignals;
+  const signals: RepoSignals = isSignals ? (dataOrSignals as RepoSignals) : (dataOrSignals as any).signals;
+  const languages: DetectedTech[] = isSignals ? [] : ((dataOrSignals as any).languages ?? []);
+  const frameworks: DetectedTech[] = isSignals ? [] : ((dataOrSignals as any).frameworks ?? []);
+  const databases: DetectedTech[] = isSignals ? [] : ((dataOrSignals as any).databases ?? []);
+  const infrastructure: DetectedTech[] = isSignals ? [] : ((dataOrSignals as any).infrastructure ?? []);
+  const discoveredComponents: DiscoveredComponent[] = isSignals ? [] : ((dataOrSignals as any).discoveredComponents ?? []);
+  const desc = (description ?? (isSignals ? "" : (dataOrSignals as any).description) ?? "").toLowerCase();
+
+  const reasons: string[] = [];
+  const allTech = [
+    ...languages.map((l) => l.name),
+    ...frameworks.map((f) => f.name),
+    ...databases.map((d) => d.name),
+    ...infrastructure.map((i) => i.name),
+    ...discoveredComponents.map((c) => `${c.name} ${c.technology} ${c.type}`),
+    ...(signals.keyFiles || []).map((f) => f.path + " " + (f.content || "")),
+    ...(signals.manifests || []).map((m) => m.path + " " + m.content),
+    ...(signals.containerCi || []).map((c) => c.path + " " + c.content),
+    ...(signals.fileTree || []),
+    desc,
+  ].join(" ").toLowerCase();
+
+  const readme = (
+    signals.keyFiles?.find((f) => f.kind === "readme")?.content ??
+    signals.githubReadme ??
+    desc
+  ).toLowerCase();
+
+  const makeResult = (primaryWorkload: WorkloadType, confidence: "high" | "medium" | "low", r: string[]): WorkloadClassification => ({
+    primaryWorkload,
+    type: primaryWorkload,
+    confidence,
+    reasons: r,
+  });
+
+  // 1. ML Training vs ML Inference
+  const hasMlLib = /tensorflow|keras|pytorch|torch|scikit-learn|cnn|plantvillage|onnx|transformers|huggingface/.test(allTech) ||
+                   /cnn|convolutional|plantvillage|dataset from kaggle|model\.fit|train\.py/.test(readme);
+  const hasWebServer = /express|fastapi|flask|django|spring boot|rails|next\.js|nuxt|nestjs|gin|echo|fiber|bentoml|triton|asp\.net|aspnet|webapi|dotnet|laravel|symfony|actix|axum|rocket/.test(allTech);
+  const hasTrainingScript = /train\.py|single training script|training job|epochs|batch_size|model\.fit\(/.test(readme) ||
+                            (signals.keyFiles || []).some((f) => /(?:train|model_training)\.py/i.test(f.path)) ||
+                            (signals.fileTree || []).some((f) => /(?:train|model_training)\.py/i.test(f));
+  const hasInferenceServing = /inference|prediction|predict|serve|endpoint|bentoml|triton|torchserve/.test(allTech) ||
+                              /inference|prediction|predict|serve model|model serving|endpoint/.test(readme) ||
+                              (signals.keyFiles || []).some((f) => /(?:predict|infer|serve)\.py/i.test(f.path)) ||
+                              (signals.fileTree || []).some((f) => /(?:predict|infer|serve)\.py/i.test(f));
+
+  if (hasMlLib) {
+    if (hasWebServer && (hasInferenceServing || !hasTrainingScript)) {
+      reasons.push("Machine learning model serving / inference API detected");
+      return makeResult("ml-inference", "high", reasons);
+    }
+    reasons.push("Machine learning framework / training code detected without full-stack web service");
+    return makeResult("ml-training", "high", reasons);
+  }
+
+  // 2. Microservices
+  const hasK8s = /kubernetes|k8s|helm/.test(allTech);
+  const multiModulePom =
+    (signals.keyFiles || []).filter((f) => f.path.endsWith("pom.xml")).length > 1 ||
+    (signals.manifests || []).filter((m) => m.path.endsWith("pom.xml")).length > 1 ||
+    (signals.fileTree || []).filter((f) => f.endsWith("pom.xml")).length > 1;
+  const multiBackendComponents = discoveredComponents.filter((c) => c.type === "backend" || c.type === "api").length >= 2;
+  const hasDiscoveryOrGateway =
+    /eureka|spring cloud config|consul|service mesh|istio|linkerd/.test(allTech) ||
+    /eureka|spring cloud config|consul|service mesh|istio/.test(readme) ||
+    (/(?:spring cloud|kong|zuul|ambassador)\s+gateway/i.test(allTech) || /(?:spring cloud|kong|zuul|ambassador)\s+gateway/i.test(readme));
+  const hasMultiServicesInCompose = /services:\s*\n\s+([a-zA-Z0-9_-]+):[\s\S]+?\n\s+([a-zA-Z0-9_-]+):/.test(allTech);
+
+  if (hasK8s || (multiModulePom && (multiBackendComponents || hasDiscoveryOrGateway)) || (multiModulePom && hasMultiServicesInCompose) || hasDiscoveryOrGateway || /micro-?services?/.test(allTech) || /micro-?services?/.test(readme)) {
+    reasons.push(hasK8s ? "Kubernetes orchestration manifests present" : "Multi-module microservice architecture with service discovery/gateway");
+    return makeResult("microservices", "high", reasons);
+  }
+
+  // 3. Static Frontend
+  const hasStaticSiteGen = /gatsby|hugo|jekyll|astro/.test(allTech);
+  const hasFrontendLib = frameworks.some((f) => /react|vue|svelte|vite/.test(f.name.toLowerCase())) || /react|vue|svelte|vite/.test(allTech);
+  if ((hasStaticSiteGen || hasFrontendLib) && !hasWebServer && databases.length === 0) {
+    reasons.push("Static frontend / client SPA without server backend");
+    return makeResult("static-frontend", "high", reasons);
+  }
+
+  // 4. Web Application
+  const isNext = /next\.js/.test(allTech);
+  const isMvxFramework = /rails|laravel|django/.test(allTech) && !/api only|headless|backend api|pure api/.test(readme);
+  const isWebPortal = /web application|web portal|full-stack/.test(readme);
+  if (isNext || (hasFrontendLib && hasWebServer) || isMvxFramework || (hasWebServer && isWebPortal)) {
+    reasons.push(isNext ? "Full-stack Next.js web application" : "Web application with frontend or server-rendered UI");
+    return makeResult("web-application", "high", reasons);
+  }
+
+  // 5. API
+  const hasServerlessApi = discoveredComponents.some((c) => c.type === "api") || (/serverless|sam|lambda/.test(allTech) && /http:|apigateway|api gateway/.test(allTech));
+  if ((hasWebServer || hasServerlessApi) && !hasFrontendLib) {
+    reasons.push(hasServerlessApi ? "Serverless event-driven API" : "Backend API service without frontend UI");
+    return makeResult("api", "high", reasons);
+  }
+
+  // 6. Worker / Batch
+  if (/celery|bull|batch|cron|worker/.test(allTech) && !hasWebServer) {
+    reasons.push("Background worker or batch processing");
+    return makeResult("worker", "medium", reasons);
+  }
+
+  // 7. Admin / Monitoring Tooling
+  const hasMonitoringTool = /prometheus|grafana|alertmanager|node-exporter|jaeger|zipkin|kibana/.test(allTech);
+  if (hasMonitoringTool && !hasWebServer && (discoveredComponents.length === 0 || discoveredComponents.every((c) => c.type === "other"))) {
+    reasons.push("Infrastructure monitoring and observability tooling stack");
+    return makeResult("admin-monitoring-tool", "high", reasons);
+  }
+
+  return makeResult("generic", "low", ["Standard generic application profile"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1369,6 +1729,14 @@ function buildSummary(
   const lines: string[] = [`Repository: ${data.repoName}`, ""];
   lines.push("DETECTED TECHNOLOGIES (extracted from repository files before inference):");
   lines.push("");
+
+  if (data.workloadClassification) {
+    lines.push(`WORKLOAD CLASSIFICATION: ${data.workloadClassification.primaryWorkload} (${data.workloadClassification.confidence} confidence)`);
+    for (const r of data.workloadClassification.reasons) {
+      lines.push(`  - ${r}`);
+    }
+    lines.push("");
+  }
 
   if (data.languages.length > 0) {
     lines.push(
@@ -1426,6 +1794,16 @@ function buildSummary(
       "Each component above represents a SEPARATE deployable unit. " +
         "Map each one to its own AWS service — do NOT collapse them."
     );
+  }
+
+  if (data.evidenceRegister && data.evidenceRegister.length > 0) {
+    lines.push("");
+    lines.push("EVIDENCE INVENTORY (registered evidence from repository files):");
+    for (const ev of data.evidenceRegister) {
+      lines.push(`  [${ev.id}] (${ev.kind}: ${ev.sourcePath}) ${ev.technology ? `[${ev.technology}] ` : ""}${ev.detail}`);
+    }
+    lines.push("");
+    lines.push("CRITICAL EVIDENCE RULE: Every component in the architecture model MUST cite one or more valid Evidence IDs (e.g. ['ev-1']) from the EVIDENCE INVENTORY above. Do not invent evidence.");
   }
 
   lines.push("");

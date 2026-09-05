@@ -809,6 +809,26 @@ export const CFT_SERVICE_RESOURCE_MAP: Record<string, CftServiceSpec> = {
     }),
   },
 
+  MSK: {
+    serviceId: "MSK",
+    primaryType: "AWS::MSK::Cluster",
+    description: "Amazon Managed Streaming for Apache Kafka (MSK) cluster",
+    generateResources: () => ({
+      MskCluster: {
+        Type: "AWS::MSK::Cluster",
+        Properties: {
+          ClusterName: { "Fn::Sub": "${AppName}-${Environment}-kafka" },
+          KafkaVersion: "3.5.1",
+          NumberOfBrokerNodes: 2,
+          BrokerNodeGroupInfo: {
+            InstanceType: "kafka.m5.large",
+            ClientSubnets: [{ "Fn::Sub": "${AppName}-${Environment}-subnet-1" }, { "Fn::Sub": "${AppName}-${Environment}-subnet-2" }],
+          },
+        },
+      },
+    }),
+  },
+
   ECR: {
     serviceId: "ECR",
     primaryType: "AWS::ECR::Repository",
@@ -865,6 +885,32 @@ export const CFT_SERVICE_RESOURCE_MAP: Record<string, CftServiceSpec> = {
           ExecutionRoleArn: "arn:aws:iam::aws:policy/AmazonSageMakerFullAccess",
           PrimaryContainer: {
             Image: "763104351884.dkr.ecr.us-east-1.amazonaws.com/pytorch-inference:2.0.0-cpu-py310",
+          },
+        },
+      },
+    }),
+  },
+
+  OpenSearch: {
+    serviceId: "OpenSearch",
+    primaryType: "AWS::OpenSearchService::Domain",
+    description: "Amazon OpenSearch Service search domain",
+    generateResources: () => ({
+      OpenSearchDomain: {
+        Type: "AWS::OpenSearchService::Domain",
+        Properties: {
+          DomainName: { "Fn::Sub": "${AppName}-${Environment}-search" },
+          EngineVersion: "OpenSearch_2.11",
+          ClusterConfig: {
+            InstanceType: "t3.small.search",
+            InstanceCount: 1,
+            DedicatedMasterEnabled: false,
+            ZoneAwarenessEnabled: false,
+          },
+          EBSOptions: {
+            EBSEnabled: true,
+            VolumeType: "gp3",
+            VolumeSize: 20,
           },
         },
       },

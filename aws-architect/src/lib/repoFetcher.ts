@@ -53,6 +53,10 @@ export interface RepoSignals {
   readmeLength: number;
   /** Extracted AWS SDK and service evidence from code */
   sdkEvidence: SdkEvidence[];
+  manifests?: Array<{ path: string; content: string }>;
+  containerCi?: Array<{ path: string; content: string }>;
+  fileTree?: string[];
+  githubReadme?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -66,6 +70,7 @@ const MANIFEST_PATTERNS = [
   /^package\.json$/,
   /^requirements\.txt$/,
   /^pyproject\.toml$/,
+  /^Pipfile$/,
   /^go\.mod$/,
   /^cargo\.toml$/i,
   /^gemfile$/i,
@@ -73,20 +78,23 @@ const MANIFEST_PATTERNS = [
   /^pom\.xml$/,
   /^build\.gradle(\.kts)?$/,
   /^[\w.-]+\.csproj$/,
+  /^[\w.-]+\.fsproj$/,
+  /^mix\.exs$/,
+  /^Package\.swift$/,
 ];
 
-// Monorepo nested manifests (e.g. packages/core/package.json, apps/web/package.json)
+// Monorepo nested manifests pattern for backwards compatibility
 const NESTED_MANIFEST_PATTERNS = [
   /^(?:packages|apps|modules|services|libs)\/[^/]+\/(?:package\.json|pom\.xml|build\.gradle(\.kts)?|Cargo\.toml|pyproject\.toml|requirements\.txt|go\.mod)$/i,
 ];
 
 const CONTAINER_CI_PATTERNS = [
-  /^Dockerfile(\.[\w.-]+)?$/i,
-  /^(?:docker|build|infra)\/Dockerfile(\.[\w.-]+)?$/i,
-  /^docker-compose(\.[\w.-]+)?\.(yml|yaml)$/i,
-  /^serverless(\.[\w.-]+)?\.(yml|yaml)$/i,
-  /^(?:src|infra|services|functions)\/.*serverless(\.[\w.-]+)?\.(yml|yaml)$/i,
-  /^\.github\/workflows\/[^/]+\.(yml|yaml)$/i,
+  /(?:^|\/)Dockerfile(\.[\w.-]+)?$/i,
+  /(?:^|\/)docker-compose(\.[\w.-]+)?\.(ya?ml)$/i,
+  /(?:^|\/)compose(\.[\w.-]+)?\.(ya?ml)$/i,
+  /(?:^|\/)serverless(\.[\w.-]+)?\.(ya?ml)$/i,
+  /(?:^|\/).*serverless(\.[\w.-]+)?\.(ya?ml)$/i,
+  /^\.github\/workflows\/[^/]+\.(ya?ml)$/i,
   /^vercel\.json$/i,
   /^netlify\.toml$/i,
   /^amplify\.ya?ml$/i,
@@ -101,7 +109,9 @@ const CONTAINER_CI_PATTERNS = [
   /^template\.ya?ml$/i,
   /^sam\.ya?ml$/i,
   /^.*\.template\.ya?ml$/i,
-  /^(?:k8s|kubernetes|helm)\/.*\.(ya?ml|json)$/i,
+  /(?:^|\/)(?:k8s|kubernetes|helm|deploy)\/.*\.(ya?ml|json)$/i,
+  /(?:^|\/)(?:ingress|deployment|service|k8s|kubernetes|statefulset|daemonset|configmap)\.ya?ml$/i,
+  /(?:^|\/)Chart\.ya?ml$/i,
 ];
 
 const SOURCE_HIGH_PRIORITY_PATTERNS = [
@@ -131,6 +141,12 @@ const FETCH_TIMEOUT_MS = 10_000;
 export function classifyFile(
   path: string
 ): { kind: KeyFileKind; priority: number; score: number } | null {
+  // Ignore vendor, target, dependency, or transient cache directories
+  const EXCLUDE_DIRS_RE = /(?:^|\/)(?:node_modules|vendor|\.git|\.venv|venv|target|dist|\.next|\.cache|site-packages)\//i;
+  if (EXCLUDE_DIRS_RE.test(path)) {
+    return null;
+  }
+
   const name = path.split("/").pop() ?? path;
   const depth = path.split("/").length - 1; // 0 = root, 1 = one level deep
 
@@ -140,33 +156,34 @@ export function classifyFile(
     }
   }
 
+  // Any recognized manifest filename at any depth
   for (const re of MANIFEST_PATTERNS) {
-    if (re.test(name) && depth <= 1) {
-      return { kind: "manifest", priority: 1, score: 95 - depth * 5 };
+    if (re.test(name)) {
+      return { kind: "manifest", priority: 1, score: Math.max(95 - depth * 5, 50) };
     }
   }
 
   for (const re of NESTED_MANIFEST_PATTERNS) {
     if (re.test(path)) {
-      return { kind: "manifest", priority: 1, score: 90 - depth * 5 };
+      return { kind: "manifest", priority: 1, score: Math.max(90 - depth * 5, 50) };
     }
   }
 
   for (const re of CONTAINER_CI_PATTERNS) {
     if (re.test(path)) {
-      return { kind: "container_ci", priority: 2, score: 85 - depth * 5 };
+      return { kind: "container_ci", priority: 2, score: Math.max(85 - depth * 5, 45) };
     }
   }
 
   for (const re of SOURCE_HIGH_PRIORITY_PATTERNS) {
     if (re.test(path)) {
-      return { kind: "source", priority: 3, score: 80 - depth * 5 };
+      return { kind: "source", priority: 3, score: Math.max(80 - depth * 5, 40) };
     }
   }
 
   for (const re of SOURCE_GLOB_PATTERNS) {
     if (re.test(path)) {
-      return { kind: "source", priority: 3, score: 65 - depth * 5 };
+      return { kind: "source", priority: 3, score: Math.max(65 - depth * 5, 30) };
     }
   }
 
@@ -373,6 +390,36 @@ export function extractSdkEvidence(keyFiles: KeyFile[]): SdkEvidence[] {
     for (const m of cronMatches) {
       add(file.path, m[0], "EventBridge");
     }
+
+    // Kafka / streaming messaging
+    const kafkaMatches = content.matchAll(/(?:spring-kafka|kafka-clients|kafkajs|kafka-python|KafkaConsumer|KafkaProducer|confluent)/gi);
+    for (const m of kafkaMatches) {
+      add(file.path, m[0], "MSK");
+    }
+
+    // Search / OpenSearch
+    const searchMatches = content.matchAll(/(?:@opensearch-project\/opensearch|opensearch-py|elasticsearch|spring-data-opensearch|spring-data-elasticsearch)/gi);
+    for (const m of searchMatches) {
+      add(file.path, m[0], "OpenSearch");
+    }
+
+    // Email / SMTP
+    const emailMatches = content.matchAll(/(?:nodemailer|spring-boot-starter-mail|sendgrid|mailgun|smtplib|maildev)/gi);
+    for (const m of emailMatches) {
+      add(file.path, m[0], "SES");
+    }
+
+    // Object storage / File upload
+    const uploadMatches = content.matchAll(/(?:express-fileupload|multer|formidable|boto3\.client\(['"]s3['"]\)|@aws-sdk\/client-s3)/gi);
+    for (const m of uploadMatches) {
+      add(file.path, m[0], "S3");
+    }
+
+    // Machine Learning / Training
+    const mlMatches = content.matchAll(/(?:tensorflow|keras|torch\.nn|PlantVillage|model\.fit\(|ImageDataGenerator)/gi);
+    for (const m of mlMatches) {
+      add(file.path, m[0], "SageMaker");
+    }
   }
 
   return evidence;
@@ -472,7 +519,7 @@ export async function fetchRepoSignals(
       : a.path.length - b.path.length
   );
 
-  const selected = candidates;
+  const selected = candidates.slice(0, 35);
 
   // 4. Fetch each selected file without payload limits
   const keyFiles: KeyFile[] = [];

@@ -16,12 +16,19 @@ import {
   computeLayout,
   bucketHeight,
   validateContainmentHierarchy,
+  validateDiagramLayout,
   CONTAINER_PARENTS,
   normalizeForComparison,
   nodeStyle,
   FALLBACK_STYLE,
   SERVICE_TIERS,
   routeEdges,
+  GAP,
+  CELL_W,
+  CELL_H,
+  validateDiagramSemantics,
+  validatePlanSemantics,
+  buildDiagramElements,
 } from "../diagram.ts";
 import type { ServicePlan, AwsServiceMapping, DiscoveredComponent, ComponentRelationship } from "../schema.ts";
 
@@ -965,5 +972,760 @@ describe("Fix 6 — Cross-Cutting Service Placement", () => {
     assert.ok(xml.includes('id="container-cross_cutting"'), "cross-cutting container rendered");
     assert.match(xml, /id="container-cross_cutting"[^>]*parent="container-aws_cloud"/, "cross_cutting parent is AWS Cloud");
     assert.match(xml, /serviceId="CloudWatch"[^>]*parent="container-cross_cutting"/, "CloudWatch node parent is cross_cutting");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix 7: Layout Validation & Non-Collision Pass
+// ---------------------------------------------------------------------------
+describe("Fix 7 — validateDiagramLayout Invariant Checks", () => {
+  it("validates that all standard patterns produce collision-free, strictly contained layouts", () => {
+    const patterns = [
+      "static-site",
+      "serverless-api",
+      "containerised-app",
+      "event-driven",
+      "ml-pipeline",
+      "full-stack-web",
+      "data-pipeline",
+      "generic",
+    ] as const;
+
+    for (const pattern of patterns) {
+      const plan = makePlan({ detectedPattern: pattern });
+      const layout = computeLayout(plan.awsMappings);
+      const res = validateDiagramLayout(layout);
+      assert.strictEqual(res.valid, true, `Layout for ${pattern} must be valid without errors`);
+      assert.deepStrictEqual(res.errors, [], `Layout for ${pattern} should have 0 errors`);
+    }
+  });
+
+  it("detects when two nodes collide (AABB intersection)", () => {
+    const layout = {
+      containers: {
+        aws_cloud: { x: 0, y: 0, w: 600, h: 600 },
+        edge: null,
+        vpc: { x: 20, y: 20, w: 560, h: 560 },
+        az: { x: 40, y: 40, w: 520, h: 520 },
+        public_subnet: null,
+        compute_subnet: { x: 60, y: 60, w: 480, h: 480 },
+        data_subnet: null,
+        cross_cutting: null,
+        external: null,
+      },
+      nodes: {
+        c1: { x: 100, y: 120, parent: "container-compute_subnet", serviceId: "ECS" },
+        c2: { x: 120, y: 130, parent: "container-compute_subnet", serviceId: "Lambda" }, // Overlaps c1!
+      },
+      canvasW: 800,
+      canvasH: 800,
+    };
+    const res = validateDiagramLayout(layout);
+    assert.strictEqual(res.valid, false, "should detect colliding nodes");
+    assert.ok(res.errors.some((e) => e.includes("collide") || e.includes("overlap")));
+  });
+
+  it("detects when VPC overlaps Edge container vertically", () => {
+    const layout = {
+      containers: {
+        aws_cloud: { x: 0, y: 0, w: 600, h: 600 },
+        edge: { x: 20, y: 20, w: 560, h: 100 }, // bottom = 120
+        vpc: { x: 20, y: 100, w: 560, h: 400 }, // top = 100, overlaps Edge by 20px!
+        az: null,
+        public_subnet: null,
+        compute_subnet: null,
+        data_subnet: null,
+        cross_cutting: null,
+        external: null,
+      },
+      nodes: {},
+      canvasW: 800,
+      canvasH: 800,
+    };
+    const res = validateDiagramLayout(layout);
+    assert.strictEqual(res.valid, false, "should detect VPC/Edge vertical overlap");
+    assert.ok(res.errors.some((e) => e.includes("overlaps Edge vertically")));
+  });
+
+  it("detects when a node hangs outside its parent container bounds", () => {
+    const layout = {
+      containers: {
+        aws_cloud: { x: 0, y: 0, w: 600, h: 600 },
+        edge: null,
+        vpc: { x: 20, y: 20, w: 560, h: 560 },
+        az: { x: 40, y: 40, w: 520, h: 520 },
+        public_subnet: null,
+        compute_subnet: { x: 60, y: 60, w: 200, h: 160 },
+        data_subnet: null,
+        cross_cutting: null,
+        external: null,
+      },
+      nodes: {
+        c1: { x: 300, y: 100, parent: "container-compute_subnet", serviceId: "ECS" }, // x=300 hangs far outside w=200!
+      },
+      canvasW: 800,
+      canvasH: 800,
+    };
+    const res = validateDiagramLayout(layout);
+    assert.strictEqual(res.valid, false, "should detect node exceeding container bounds");
+    assert.ok(res.errors.some((e) => e.includes("exceeds parent container")));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix 8: mxGraph Z-Order / Rendering Order
+// ---------------------------------------------------------------------------
+describe("Fix 8 — Rendering Order (Containers -> Edges -> Badges -> Nodes)", () => {
+  it("emits cells in strict background-to-foreground Z-order", () => {
+    const plan = makePlan({
+      detectedPattern: "static-site",
+      components: [
+        { id: "dns", type: "api", technology: "Route53", evidence: ["test"], confidence: "high", status: "detected" },
+        { id: "cdn", type: "frontend", technology: "CloudFront", evidence: ["test"], confidence: "high", status: "detected" },
+        { id: "storage", type: "object-storage", technology: "S3", evidence: ["test"], confidence: "high", status: "detected" },
+      ],
+      awsMappings: [
+        { componentId: "dns", serviceId: "Route53", confidence: "high", evidence: "test", fromPattern: false },
+        { componentId: "cdn", serviceId: "CloudFront", confidence: "high", evidence: "test", fromPattern: false },
+        { componentId: "storage", serviceId: "S3", confidence: "high", evidence: "test", fromPattern: false },
+      ],
+    });
+    const xml = generateDiagramXml(plan);
+
+    const firstContainerIdx = xml.indexOf('id="container-');
+    const firstEdgeIdx = xml.indexOf('id="edge-');
+    const firstBadgeIdx = xml.indexOf('id="badge-');
+    const firstNodeIdx = xml.indexOf('serviceId="');
+
+    assert.ok(firstContainerIdx !== -1, "Containers must be present in XML");
+    assert.ok(firstEdgeIdx !== -1, "Edges must be present in XML");
+    assert.ok(firstBadgeIdx !== -1, "Badges must be present in XML");
+    assert.ok(firstNodeIdx !== -1, "Nodes must be present in XML");
+
+    // Containers in back, edges in middle, badges next, service nodes in foreground
+    assert.ok(
+      firstContainerIdx < firstEdgeIdx,
+      `Containers (${firstContainerIdx}) must be emitted before Edges (${firstEdgeIdx})`
+    );
+    assert.ok(
+      firstEdgeIdx < firstBadgeIdx,
+      `Edges (${firstEdgeIdx}) must be emitted before Badges (${firstBadgeIdx})`
+    );
+    assert.ok(
+      firstBadgeIdx < firstNodeIdx,
+      `Badges (${firstBadgeIdx}) must be emitted before Nodes (${firstNodeIdx})`
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix 9: Edge Labels with Shielded Backgrounds
+// ---------------------------------------------------------------------------
+describe("Fix 9 — Edge Labels with Shielded Backgrounds & Offsets", () => {
+  it("includes labelBackgroundColor=#FFFFFF and spacing=4 on edge styles", () => {
+    const plan = makePlan({
+      detectedPattern: "static-site",
+      components: [
+        { id: "dns", type: "api", technology: "Route53", evidence: ["test"], confidence: "high", status: "detected" },
+        { id: "cdn", type: "frontend", technology: "CloudFront", evidence: ["test"], confidence: "high", status: "detected" },
+      ],
+      awsMappings: [
+        { componentId: "dns", serviceId: "Route53", confidence: "high", evidence: "test", fromPattern: false },
+        { componentId: "cdn", serviceId: "CloudFront", confidence: "high", evidence: "test", fromPattern: false },
+      ],
+    });
+    const xml = generateDiagramXml(plan);
+    assert.ok(
+      xml.includes("labelBackgroundColor=#FFFFFF;spacing=4;"),
+      "edge styles must include white opaque label shield and 4px text spacing"
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix 10: Topological Layering & Generous Clearance
+// ---------------------------------------------------------------------------
+describe("Fix 10 — Topological Layering & Generous Clearance", () => {
+  it("maintains horizontal node gap GAP >= 40px", () => {
+    assert.ok(GAP >= 40, `GAP must be >= 40px (currently ${GAP}px)`);
+  });
+
+  it("provides generous vertical gutter between Edge banner and VPC container", () => {
+    const plan = makePlan({
+      detectedPattern: "containerised-app",
+      components: [
+        { id: "alb", type: "proxy", technology: "ALB", evidence: ["test"], confidence: "high", status: "detected" },
+        { id: "ecs", type: "backend", technology: "ECS", evidence: ["test"], confidence: "high", status: "detected" },
+        { id: "rds", type: "database", technology: "RDS", evidence: ["test"], confidence: "high", status: "detected" },
+      ],
+      awsMappings: [
+        { componentId: "alb", serviceId: "ALB", confidence: "high", evidence: "test", fromPattern: false },
+        { componentId: "ecs", serviceId: "ECS", confidence: "high", evidence: "test", fromPattern: false },
+        { componentId: "rds", serviceId: "RDS", confidence: "high", evidence: "test", fromPattern: false },
+      ],
+    });
+    const layout = computeLayout(plan.awsMappings);
+    const edge = layout.containers.edge;
+    const vpc = layout.containers.vpc;
+    if (edge && vpc) {
+      const verticalGap = vpc.y - (edge.y + edge.h);
+      assert.ok(verticalGap >= 48, `Vertical gutter between Edge and VPC must be >= 48px (got ${verticalGap}px)`);
+    }
+  });
+
+  it("handles complex 12+ service plan without container or node collision", () => {
+    const services: AwsServiceMapping[] = [
+      { componentId: "r53", serviceId: "Route53", confidence: "high", evidence: "test", fromPattern: false },
+      { componentId: "cf", serviceId: "CloudFront", confidence: "high", evidence: "test", fromPattern: false },
+      { componentId: "alb", serviceId: "ALB", confidence: "high", evidence: "test", fromPattern: false },
+      { componentId: "ecs1", serviceId: "ECS", confidence: "high", evidence: "test", fromPattern: false },
+      { componentId: "fn1", serviceId: "Lambda", confidence: "high", evidence: "test", fromPattern: false },
+      { componentId: "rds1", serviceId: "RDS", confidence: "high", evidence: "test", fromPattern: false },
+      { componentId: "cache1", serviceId: "ElastiCache", confidence: "high", evidence: "test", fromPattern: false },
+      { componentId: "s3_1", serviceId: "S3", confidence: "high", evidence: "test", fromPattern: false },
+      { componentId: "sqs1", serviceId: "SQS", confidence: "high", evidence: "test", fromPattern: false },
+      { componentId: "cw1", serviceId: "CloudWatch", confidence: "high", evidence: "test", fromPattern: false },
+      { componentId: "ecr1", serviceId: "ECR", confidence: "high", evidence: "test", fromPattern: false },
+      { componentId: "iam1", serviceId: "SecretsManager", confidence: "high", evidence: "test", fromPattern: false },
+    ];
+    const layout = computeLayout(services);
+    const res = validateDiagramLayout(layout);
+    assert.strictEqual(res.valid, true, "12-service layout must be valid");
+    assert.deepStrictEqual(res.errors, [], "12-service layout must have 0 errors");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stage 2 — Semantic Integrity Tests
+// ---------------------------------------------------------------------------
+describe("Stage 2 — Semantic Integrity", () => {
+  // 1. Component Mapping & Service Identity Preservation
+  describe("Component Mapping & Completeness", () => {
+    it("maps every Stage 1 service 1:1 and preserves service identity without invention", () => {
+      const plan = makePlan({
+        detectedPattern: "full-stack-web",
+        components: [
+          { id: "c-r53", type: "api", technology: "Route53", evidence: ["dns"], confidence: "high", status: "detected" },
+          { id: "c-cf", type: "frontend", technology: "CloudFront", evidence: ["cdn"], confidence: "high", status: "detected" },
+          { id: "c-alb", type: "proxy", technology: "ALB", evidence: ["alb"], confidence: "high", status: "detected" },
+          { id: "c-ecs", type: "backend", technology: "ECS", evidence: ["docker"], confidence: "high", status: "detected" },
+          { id: "c-rds", type: "database", technology: "RDS", evidence: ["postgres"], confidence: "high", status: "detected" },
+          { id: "c-s3", type: "object-storage", technology: "S3", evidence: ["s3"], confidence: "high", status: "detected" },
+          { id: "c-cw", type: "proxy", technology: "CloudWatch", evidence: ["logs"], confidence: "high", status: "inferred" },
+        ],
+        awsMappings: [
+          { componentId: "c-r53", serviceId: "Route53", confidence: "high", evidence: "dns", fromPattern: false },
+          { componentId: "c-cf", serviceId: "CloudFront", confidence: "high", evidence: "cdn", fromPattern: false },
+          { componentId: "c-alb", serviceId: "ALB", confidence: "high", evidence: "alb", fromPattern: false },
+          { componentId: "c-ecs", serviceId: "ECS", confidence: "high", evidence: "docker", fromPattern: false },
+          { componentId: "c-rds", serviceId: "RDS", confidence: "high", evidence: "postgres", fromPattern: false },
+          { componentId: "c-s3", serviceId: "S3", confidence: "high", evidence: "s3", fromPattern: false },
+          { componentId: "c-cw", serviceId: "CloudWatch", confidence: "high", evidence: "logs", fromPattern: false },
+        ],
+      });
+
+      const { nodes, routedEdges } = buildDiagramElements(plan);
+      const res = validateDiagramSemantics(plan, nodes, routedEdges);
+
+      assert.strictEqual(res.valid, true, "Validation should succeed for 1:1 mapped services");
+      assert.strictEqual(res.errors.length, 0);
+      assert.strictEqual(res.metrics.expectedServiceCount, 7);
+      assert.strictEqual(res.metrics.renderedServiceCount, 7);
+      assert.strictEqual(res.metrics.verifiedContainments, 7);
+
+      const renderedServices = new Set(nodes.map((n) => n.serviceId));
+      for (const m of plan.awsMappings) {
+        assert.ok(renderedServices.has(m.serviceId), `Service ${m.serviceId} must be rendered`);
+      }
+    });
+
+    it("detects missing Stage 1 services in diagram nodes", () => {
+      const plan = makePlan({
+        awsMappings: [
+          { componentId: "c1", serviceId: "ECS", confidence: "high", evidence: "e", fromPattern: false },
+          { componentId: "c2", serviceId: "RDS", confidence: "high", evidence: "e", fromPattern: false },
+        ],
+      });
+
+      // Intentionally omit RDS from rendered nodes
+      const incompleteNodes = [
+        { id: "node-2", componentId: "c1", serviceId: "ECS" as const, parent: "container-compute_subnet" },
+      ];
+
+      const res = validateDiagramSemantics(plan, incompleteNodes, []);
+      assert.strictEqual(res.valid, false);
+      assert.ok(res.errors.some((e) => e.includes('Missing Stage 1 service: "RDS"')));
+    });
+
+    it("detects unexpected / invented services not in Stage 1 plan", () => {
+      const plan = makePlan({
+        awsMappings: [
+          { componentId: "c1", serviceId: "ECS", confidence: "high", evidence: "e", fromPattern: false },
+        ],
+      });
+
+      // Rendered nodes contain an invented DynamoDB service
+      const rogueNodes = [
+        { id: "node-2", componentId: "c1", serviceId: "ECS" as const, parent: "container-compute_subnet" },
+        { id: "node-3", componentId: "rogue-db", serviceId: "DynamoDB" as const, parent: "container-data_subnet" },
+      ];
+
+      const res = validateDiagramSemantics(plan, rogueNodes, []);
+      assert.strictEqual(res.valid, false);
+      assert.ok(res.errors.some((e) => e.includes('Unexpected service rendered: "DynamoDB"')));
+    });
+
+    it("detects duplicate service components rendered with same component ID", () => {
+      const plan = makePlan({
+        awsMappings: [
+          { componentId: "c1", serviceId: "ECS", confidence: "high", evidence: "e", fromPattern: false },
+        ],
+      });
+
+      const duplicateNodes = [
+        { id: "node-2", componentId: "c1", serviceId: "ECS" as const, parent: "container-compute_subnet" },
+        { id: "node-3", componentId: "c1", serviceId: "ECS" as const, parent: "container-compute_subnet" },
+      ];
+
+      const res = validateDiagramSemantics(plan, duplicateNodes, []);
+      assert.strictEqual(res.valid, false);
+      assert.ok(res.errors.some((e) => e.includes('Duplicate service component: componentId "c1"')));
+    });
+  });
+
+  // 2. Containment & Topology Semantics
+  describe("Containment & Subnet Topology Semantics", () => {
+    it("places each service in its semantic tier container", () => {
+      const plan = makePlan({
+        components: [
+          { id: "dns", type: "api", technology: "Route53", evidence: ["dns"], confidence: "high", status: "detected" },
+          { id: "nat", type: "proxy", technology: "NATGateway", evidence: ["nat"], confidence: "high", status: "detected" },
+          { id: "ecs", type: "backend", technology: "ECS", evidence: ["ecs"], confidence: "high", status: "detected" },
+          { id: "rds", type: "database", technology: "RDS", evidence: ["rds"], confidence: "high", status: "detected" },
+          { id: "cw", type: "proxy", technology: "CloudWatch", evidence: ["cw"], confidence: "high", status: "inferred" },
+        ],
+        awsMappings: [
+          { componentId: "dns", serviceId: "Route53", confidence: "high", evidence: "dns", fromPattern: false },
+          { componentId: "nat", serviceId: "NATGateway", confidence: "high", evidence: "nat", fromPattern: false },
+          { componentId: "ecs", serviceId: "ECS", confidence: "high", evidence: "ecs", fromPattern: false },
+          { componentId: "rds", serviceId: "RDS", confidence: "high", evidence: "rds", fromPattern: false },
+          { componentId: "cw", serviceId: "CloudWatch", confidence: "high", evidence: "cw", fromPattern: false },
+        ],
+      });
+
+      const { nodes } = buildDiagramElements(plan);
+      const nodeByService = new Map(nodes.map((n) => [n.serviceId, n]));
+
+      assert.strictEqual(nodeByService.get("Route53")?.parent, "container-edge");
+      assert.strictEqual(nodeByService.get("NATGateway")?.parent, "container-public_subnet");
+      assert.strictEqual(nodeByService.get("ECS")?.parent, "container-compute_subnet");
+      assert.strictEqual(nodeByService.get("RDS")?.parent, "container-data_subnet");
+      assert.strictEqual(nodeByService.get("CloudWatch")?.parent, "container-cross_cutting");
+    });
+
+    it("detects containment semantic mismatch when a node is in the wrong container", () => {
+      const plan = makePlan({
+        awsMappings: [
+          { componentId: "rds-1", serviceId: "RDS", confidence: "high", evidence: "db", fromPattern: false },
+        ],
+      });
+
+      // RDS incorrectly placed in public subnet
+      const misplacedNodes = [
+        { id: "node-2", componentId: "rds-1", serviceId: "RDS" as const, parent: "container-public_subnet" },
+      ];
+
+      const res = validateDiagramSemantics(plan, misplacedNodes, []);
+      assert.strictEqual(res.valid, false);
+      assert.ok(
+        res.errors.some((e) =>
+          e.includes('Containment semantic mismatch: service "RDS" is in "container-public_subnet", expected "container-data_subnet"')
+        )
+      );
+    });
+  });
+
+  // 3. Relationship Preservation & Precedence
+  describe("Relationship Preservation & Direction", () => {
+    it("preserves explicit relationships with exact direction and label, giving them priority over template edges", () => {
+      const plan = makePlan({
+        detectedPattern: "containerised-app",
+        components: [
+          { id: "app-ecs", type: "backend", technology: "ECS", evidence: ["docker"], confidence: "high", status: "detected" },
+          { id: "db-rds", type: "database", technology: "RDS", evidence: ["db"], confidence: "high", status: "detected" },
+        ],
+        awsMappings: [
+          { componentId: "app-ecs", serviceId: "ECS", confidence: "high", evidence: "docker", fromPattern: false },
+          { componentId: "db-rds", serviceId: "RDS", confidence: "high", evidence: "db", fromPattern: false },
+        ],
+        relationships: [
+          { from: "app-ecs", to: "db-rds", type: "SQL Query Pool" },
+        ],
+      });
+
+      const { nodes, routedEdges } = buildDiagramElements(plan);
+      const ecsNode = nodes.find((n) => n.serviceId === "ECS")!;
+      const rdsNode = nodes.find((n) => n.serviceId === "RDS")!;
+
+      // Find edges between ECS and RDS
+      const edgesBetween = routedEdges.filter(
+        (e) => (e.sourceId === ecsNode.id && e.targetId === rdsNode.id) ||
+               (e.sourceId === rdsNode.id && e.targetId === ecsNode.id)
+      );
+
+      // Must have exactly 1 edge, in forward direction, with the explicit label and solid style
+      assert.strictEqual(edgesBetween.length, 1, "Must have exactly 1 edge between the pair");
+      assert.strictEqual(edgesBetween[0].sourceId, ecsNode.id, "Source must be ECS");
+      assert.strictEqual(edgesBetween[0].targetId, rdsNode.id, "Target must be RDS");
+      assert.strictEqual(edgesBetween[0].label, "SQL Query Pool");
+      assert.strictEqual(edgesBetween[0].style, "solid");
+    });
+
+    it("resolves explicit relationships whether from/to reference componentId or serviceId", () => {
+      const plan = makePlan({
+        detectedPattern: "generic",
+        components: [
+          { id: "backend-comp", type: "backend", technology: "ECS", evidence: ["api"], confidence: "high", status: "detected" },
+          { id: "queue-comp", type: "queue", technology: "SQS", evidence: ["msg"], confidence: "high", status: "detected" },
+        ],
+        awsMappings: [
+          { componentId: "backend-comp", serviceId: "ECS", confidence: "high", evidence: "api", fromPattern: false },
+          { componentId: "queue-comp", serviceId: "SQS", confidence: "high", evidence: "msg", fromPattern: false },
+        ],
+        relationships: [
+          // Using serviceId instead of componentId
+          { from: "ECS", to: "SQS", type: "Enqueue Message" },
+        ],
+      });
+
+      const { nodes, routedEdges } = buildDiagramElements(plan);
+      const ecsNode = nodes.find((n) => n.serviceId === "ECS")!;
+      const sqsNode = nodes.find((n) => n.serviceId === "SQS")!;
+
+      const matchingEdge = routedEdges.find(
+        (e) => e.sourceId === ecsNode.id && e.targetId === sqsNode.id
+      );
+
+      assert.ok(matchingEdge, "Edge must be established even when using serviceId in relationships");
+      assert.strictEqual(matchingEdge.label, "Enqueue Message");
+      assert.strictEqual(matchingEdge.style, "solid");
+    });
+
+    it("detects reversed relationship directions", () => {
+      const plan = makePlan({
+        components: [
+          { id: "c-app", type: "backend", technology: "ECS", evidence: ["app"], confidence: "high", status: "detected" },
+          { id: "c-db", type: "database", technology: "RDS", evidence: ["db"], confidence: "high", status: "detected" },
+        ],
+        awsMappings: [
+          { componentId: "c-app", serviceId: "ECS", confidence: "high", evidence: "app", fromPattern: false },
+          { componentId: "c-db", serviceId: "RDS", confidence: "high", evidence: "db", fromPattern: false },
+        ],
+        relationships: [
+          { from: "c-app", to: "c-db", type: "Reads/Writes" },
+        ],
+      });
+
+      const nodes = [
+        { id: "node-2", componentId: "c-app", serviceId: "ECS" as const, parent: "container-compute_subnet" },
+        { id: "node-3", componentId: "c-db", serviceId: "RDS" as const, parent: "container-data_subnet" },
+      ];
+
+      // Inverted edge: node-3 (RDS) -> node-2 (ECS)
+      const reversedEdges = [
+        { id: "edge-1", sourceId: "node-3", targetId: "node-2", label: "Reads/Writes" },
+      ];
+
+      const res = validateDiagramSemantics(plan, nodes, reversedEdges);
+      assert.strictEqual(res.valid, false);
+      assert.ok(
+        res.errors.some((e) => e.includes('Reversed relationship direction: expected "c-app -> c-db"'))
+      );
+    });
+
+    it("detects missing explicit relationships", () => {
+      const plan = makePlan({
+        components: [
+          { id: "c-app", type: "backend", technology: "ECS", evidence: ["app"], confidence: "high", status: "detected" },
+          { id: "c-db", type: "database", technology: "RDS", evidence: ["db"], confidence: "high", status: "detected" },
+        ],
+        awsMappings: [
+          { componentId: "c-app", serviceId: "ECS", confidence: "high", evidence: "app", fromPattern: false },
+          { componentId: "c-db", serviceId: "RDS", confidence: "high", evidence: "db", fromPattern: false },
+        ],
+        relationships: [
+          { from: "c-app", to: "c-db", type: "Reads/Writes" },
+        ],
+      });
+
+      const nodes = [
+        { id: "node-2", componentId: "c-app", serviceId: "ECS" as const, parent: "container-compute_subnet" },
+        { id: "node-3", componentId: "c-db", serviceId: "RDS" as const, parent: "container-data_subnet" },
+      ];
+
+      // No edges provided
+      const res = validateDiagramSemantics(plan, nodes, []);
+      assert.strictEqual(res.valid, false);
+      assert.ok(
+        res.errors.some((e) => e.includes('Missing relationship: expected "c-app -> c-db"'))
+      );
+    });
+
+    it("detects relationship type / label mismatch", () => {
+      const plan = makePlan({
+        components: [
+          { id: "c-app", type: "backend", technology: "ECS", evidence: ["app"], confidence: "high", status: "detected" },
+          { id: "c-db", type: "database", technology: "RDS", evidence: ["db"], confidence: "high", status: "detected" },
+        ],
+        awsMappings: [
+          { componentId: "c-app", serviceId: "ECS", confidence: "high", evidence: "app", fromPattern: false },
+          { componentId: "c-db", serviceId: "RDS", confidence: "high", evidence: "db", fromPattern: false },
+        ],
+        relationships: [
+          { from: "c-app", to: "c-db", type: "Synchronous gRPC" },
+        ],
+      });
+
+      const nodes = [
+        { id: "node-2", componentId: "c-app", serviceId: "ECS" as const, parent: "container-compute_subnet" },
+        { id: "node-3", componentId: "c-db", serviceId: "RDS" as const, parent: "container-data_subnet" },
+      ];
+
+      // Edge has wrong label
+      const wrongEdges = [
+        { id: "edge-1", sourceId: "node-2", targetId: "node-3", label: "Async Message" },
+      ];
+
+      const res = validateDiagramSemantics(plan, nodes, wrongEdges);
+      assert.strictEqual(res.valid, false);
+      assert.ok(
+        res.errors.some((e) => e.includes('Relationship type mismatch: expected type "Synchronous gRPC"'))
+      );
+    });
+
+    it("detects invalid edge endpoints and self-loops", () => {
+      const plan = makePlan({
+        awsMappings: [
+          { componentId: "c1", serviceId: "ECS", confidence: "high", evidence: "app", fromPattern: false },
+        ],
+      });
+
+      const nodes = [
+        { id: "node-2", componentId: "c1", serviceId: "ECS" as const, parent: "container-compute_subnet" },
+      ];
+
+      const invalidEdges = [
+        { id: "edge-ghost", sourceId: "node-ghost", targetId: "node-2", label: "bad" },
+        { id: "edge-loop", sourceId: "node-2", targetId: "node-2", label: "loop" },
+      ];
+
+      const res = validateDiagramSemantics(plan, nodes, invalidEdges);
+      assert.strictEqual(res.valid, false);
+      assert.ok(res.errors.some((e) => e.includes('Invalid edge source: edge "edge-ghost"')));
+      assert.ok(res.errors.some((e) => e.includes('Invalid self-loop edge: edge "edge-loop"')));
+    });
+
+    it("validates input sanity gracefully when given null or invalid plan", () => {
+      // @ts-expect-error testing invalid input
+      const res = validateDiagramSemantics(null, [], []);
+      assert.strictEqual(res.valid, false);
+      assert.ok(res.errors.some((e) => e.includes("Missing or invalid Stage 1 input")));
+    });
+  });
+
+  // 4. End-to-End Plan Validation
+  describe("validatePlanSemantics across Architectural Patterns", () => {
+    const patterns = [
+      "static-site",
+      "serverless-api",
+      "containerised-app",
+      "event-driven",
+      "ml-pipeline",
+      "full-stack-web",
+      "data-pipeline",
+      "generic",
+    ];
+
+    for (const pattern of patterns) {
+      it(`validates semantic integrity successfully for pattern "${pattern}"`, () => {
+        const plan = makePlan({ detectedPattern: pattern });
+        const res = validatePlanSemantics(plan);
+
+        assert.strictEqual(res.valid, true, `Pattern ${pattern} should pass semantic validation`);
+        assert.deepStrictEqual(res.errors, []);
+        assert.strictEqual(res.metrics.renderedServiceCount, res.metrics.expectedServiceCount);
+        assert.ok(res.metrics.verifiedContainments > 0);
+      });
+    }
+  });
+
+  // 5. Stage 2 Semantic Integrity — Targeted Hardening & Bug Fixes
+  describe("Targeted Semantic Hardening — Stage 1 Service Set Strict Equality", () => {
+    // Case 1 — Missing service
+    it("Case 1: Stage 1 [Lambda, EKS, S3] renders exact service set and fails validation if EKS disappears", () => {
+      const plan = makePlan({
+        components: [
+          { id: "c-lambda", type: "backend", technology: "Lambda", evidence: ["test"], confidence: "high", status: "detected" },
+          { id: "c-eks", type: "backend", technology: "EKS", evidence: ["test"], confidence: "high", status: "detected" },
+          { id: "c-s3", type: "object-storage", technology: "S3", evidence: ["test"], confidence: "high", status: "detected" },
+        ],
+        awsMappings: [
+          { componentId: "c-lambda", serviceId: "Lambda", confidence: "high", evidence: "test", fromPattern: false },
+          { componentId: "c-eks", serviceId: "EKS", confidence: "high", evidence: "test", fromPattern: false },
+          { componentId: "c-s3", serviceId: "S3", confidence: "high", evidence: "test", fromPattern: false },
+        ],
+      });
+
+      // Stage 2 must render exactly Lambda, EKS, S3
+      const { nodes, routedEdges } = buildDiagramElements(plan);
+      const renderedServiceIds = nodes.map((n) => n.serviceId).sort();
+      assert.deepStrictEqual(renderedServiceIds, ["EKS", "Lambda", "S3"]);
+
+      const xml = generateDiagramXml(plan);
+      assert.ok(xml.includes('serviceId="Lambda"'));
+      assert.ok(xml.includes('serviceId="EKS"'));
+      assert.ok(xml.includes('serviceId="S3"'));
+
+      const validRes = validateDiagramSemantics(plan, nodes, routedEdges);
+      assert.strictEqual(validRes.valid, true);
+
+      // Fails validation if EKS disappears
+      const incompleteNodes = nodes.filter((n) => n.serviceId !== "EKS");
+      const failRes = validateDiagramSemantics(plan, incompleteNodes, []);
+      assert.strictEqual(failRes.valid, false);
+      assert.ok(failRes.errors.some((e) => e.includes('Missing Stage 1 service: "EKS"')));
+      assert.ok(failRes.errors.some((e) => e.includes("Service set mismatch")));
+    });
+
+    // Case 2 — Phantom service
+    it("Case 2: Stage 1 [Lambda, EKS, S3] with serverless template attempting to introduce DynamoDB never renders DynamoDB", () => {
+      const plan = makePlan({
+        detectedPattern: "serverless-api", // serverless-api pattern defines APIGateway, DynamoDB, SQS in PATTERN_EDGES
+        components: [
+          { id: "c-lambda", type: "backend", technology: "Lambda", evidence: ["test"], confidence: "high", status: "detected" },
+          { id: "c-eks", type: "backend", technology: "EKS", evidence: ["test"], confidence: "high", status: "detected" },
+          { id: "c-s3", type: "object-storage", technology: "S3", evidence: ["test"], confidence: "high", status: "detected" },
+        ],
+        awsMappings: [
+          { componentId: "c-lambda", serviceId: "Lambda", confidence: "high", evidence: "test", fromPattern: false },
+          { componentId: "c-eks", serviceId: "EKS", confidence: "high", evidence: "test", fromPattern: false },
+          { componentId: "c-s3", serviceId: "S3", confidence: "high", evidence: "test", fromPattern: false },
+        ],
+        relationships: [
+          // Explicit relationship attempting to reference DynamoDB (which is not in Stage 1 awsMappings)
+          { from: "c-lambda", to: "DynamoDB", type: "read/write" },
+        ],
+      });
+
+      const { nodes } = buildDiagramElements(plan);
+      const xml = generateDiagramXml(plan);
+
+      // DynamoDB and APIGateway must NOT be rendered
+      assert.strictEqual(nodes.some((n) => n.serviceId === "DynamoDB"), false, "DynamoDB must NOT be rendered");
+      assert.strictEqual(nodes.some((n) => n.serviceId === "APIGateway"), false, "APIGateway must NOT be rendered");
+      assert.strictEqual(xml.includes("DynamoDB"), false, "XML must not contain DynamoDB");
+      assert.strictEqual(xml.includes("API Gateway"), false, "XML must not contain API Gateway");
+      assert.strictEqual(xml.includes("APIGateway"), false, "XML must not contain APIGateway");
+
+      // Exactly Lambda, EKS, S3 rendered
+      const renderedServiceIds = nodes.map((n) => n.serviceId).sort();
+      assert.deepStrictEqual(renderedServiceIds, ["EKS", "Lambda", "S3"]);
+
+      const res = validatePlanSemantics(plan);
+      assert.strictEqual(res.valid, true);
+    });
+
+    // Case 3 — Same count, wrong services
+    it("Case 3: Same count but wrong services (Expected: [Lambda, EKS, S3], Actual: [Lambda, DynamoDB, S3]) MUST fail validation", () => {
+      const plan = makePlan({
+        components: [
+          { id: "c1", type: "backend", technology: "Lambda", evidence: ["test"], confidence: "high", status: "detected" },
+          { id: "c2", type: "backend", technology: "EKS", evidence: ["test"], confidence: "high", status: "detected" },
+          { id: "c3", type: "object-storage", technology: "S3", evidence: ["test"], confidence: "high", status: "detected" },
+        ],
+        awsMappings: [
+          { componentId: "c1", serviceId: "Lambda", confidence: "high", evidence: "test", fromPattern: false },
+          { componentId: "c2", serviceId: "EKS", confidence: "high", evidence: "test", fromPattern: false },
+          { componentId: "c3", serviceId: "S3", confidence: "high", evidence: "test", fromPattern: false },
+        ],
+      });
+
+      // Actual rendered nodes have same count (3) but substituted DynamoDB for EKS
+      const substitutedNodes = [
+        { id: "node-2", componentId: "c1", serviceId: "Lambda" as const, parent: "container-compute_subnet" },
+        { id: "node-3", componentId: "c2", serviceId: "DynamoDB" as const, parent: "container-data_subnet" },
+        { id: "node-4", componentId: "c3", serviceId: "S3" as const, parent: "container-data_subnet" },
+      ];
+
+      assert.strictEqual(substitutedNodes.length, plan.awsMappings.length, "Count is identical (3 == 3)");
+
+      const res = validateDiagramSemantics(plan, substitutedNodes, []);
+      assert.strictEqual(res.valid, false, "Validation MUST fail even when node counts match");
+      assert.ok(res.errors.some((e) => e.includes('Missing Stage 1 service: "EKS"')));
+      assert.ok(res.errors.some((e) => e.includes('Unexpected service rendered: "DynamoDB"')));
+      assert.ok(res.errors.some((e) => e.includes("Service set mismatch")));
+    });
+
+    // Case 4 — Current reported architecture
+    it("Case 4: Current reported architecture [Lambda, EKS, ECR, S3, RDS, CloudWatch] renders exactly those six services", () => {
+      const plan = makePlan({
+        detectedPattern: "containerised-app",
+        components: [
+          { id: "fn", type: "backend", technology: "Lambda", evidence: ["test"], confidence: "high", status: "detected" },
+          { id: "k8s", type: "backend", technology: "EKS", evidence: ["test"], confidence: "high", status: "detected" },
+          { id: "reg", type: "proxy", technology: "ECR", evidence: ["test"], confidence: "high", status: "detected" },
+          { id: "store", type: "object-storage", technology: "S3", evidence: ["test"], confidence: "high", status: "detected" },
+          { id: "db", type: "database", technology: "RDS", evidence: ["test"], confidence: "high", status: "detected" },
+          { id: "mon", type: "proxy", technology: "CloudWatch", evidence: ["test"], confidence: "high", status: "inferred" },
+        ],
+        awsMappings: [
+          { componentId: "fn", serviceId: "Lambda", confidence: "high", evidence: "test", fromPattern: false },
+          { componentId: "k8s", serviceId: "EKS", confidence: "high", evidence: "test", fromPattern: false },
+          { componentId: "reg", serviceId: "ECR", confidence: "high", evidence: "test", fromPattern: false },
+          { componentId: "store", serviceId: "S3", confidence: "high", evidence: "test", fromPattern: false },
+          { componentId: "db", serviceId: "RDS", confidence: "high", evidence: "test", fromPattern: false },
+          { componentId: "mon", serviceId: "CloudWatch", confidence: "high", evidence: "test", fromPattern: false },
+        ],
+      });
+
+      const { nodes, routedEdges } = buildDiagramElements(plan);
+      const xml = generateDiagramXml(plan);
+
+      // Verify node count and exact service IDs
+      assert.strictEqual(nodes.length, 6, "Expected exactly 6 nodes");
+      const serviceIds = nodes.map((n) => n.serviceId).sort();
+      assert.deepStrictEqual(serviceIds, ["CloudWatch", "ECR", "EKS", "Lambda", "RDS", "S3"]);
+
+      // Verify all expected services are in XML
+      assert.ok(xml.includes('serviceId="Lambda"'), "Must include Lambda");
+      assert.ok(xml.includes('serviceId="EKS"'), "Must include EKS");
+      assert.ok(xml.includes('serviceId="ECR"'), "Must include ECR");
+      assert.ok(xml.includes('serviceId="S3"'), "Must include S3");
+      assert.ok(xml.includes('serviceId="RDS"'), "Must include RDS");
+      assert.ok(xml.includes('serviceId="CloudWatch"'), "Must include CloudWatch");
+
+      // Verify ungrounded services are NOT in XML
+      assert.strictEqual(xml.includes("DynamoDB"), false, "Must not contain DynamoDB");
+      assert.strictEqual(xml.includes("API Gateway"), false, "Must not contain API Gateway");
+      assert.strictEqual(xml.includes("APIGateway"), false, "Must not contain APIGateway");
+      assert.strictEqual(xml.includes("Application Load Balancer"), false, "Must not contain ALB");
+      assert.strictEqual(xml.includes("ElastiCache"), false, "Must not contain ElastiCache");
+      assert.strictEqual(xml.includes("Amazon SQS"), false, "Must not contain SQS");
+      assert.strictEqual(xml.includes("Amazon SNS"), false, "Must not contain SNS");
+
+      // Verify semantic integrity validation passes cleanly
+      const res = validateDiagramSemantics(plan, nodes, routedEdges);
+      assert.strictEqual(res.valid, true, "Plan semantics must be 100% valid");
+      assert.deepStrictEqual(res.errors, [], "Must have 0 semantic validation errors");
+
+      // Verify containment tiers
+      const parentByService = new Map(nodes.map((n) => [n.serviceId, n.parent]));
+      assert.strictEqual(parentByService.get("Lambda"), "container-compute_subnet");
+      assert.strictEqual(parentByService.get("EKS"), "container-compute_subnet");
+      assert.strictEqual(parentByService.get("ECR"), "container-cross_cutting");
+      assert.strictEqual(parentByService.get("S3"), "container-data_subnet");
+      assert.strictEqual(parentByService.get("RDS"), "container-data_subnet");
+      assert.strictEqual(parentByService.get("CloudWatch"), "container-cross_cutting");
+    });
   });
 });

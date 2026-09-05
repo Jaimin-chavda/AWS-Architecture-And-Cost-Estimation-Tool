@@ -88,6 +88,7 @@ export const AWS_DISPLAY_NAMES: Record<string, string> = {
   SNS: "Amazon SNS",
   EventBridge: "Amazon EventBridge",
   Kinesis: "Amazon Kinesis",
+  MSK: "Amazon MSK",
   // Auth & Security
   Cognito: "Amazon Cognito",
   SecretsManager: "AWS Secrets Manager",
@@ -100,6 +101,8 @@ export const AWS_DISPLAY_NAMES: Record<string, string> = {
   SageMaker: "Amazon SageMaker",
   Rekognition: "Amazon Rekognition",
   Comprehend: "Amazon Comprehend",
+  // Search
+  OpenSearch: "Amazon OpenSearch Service",
   // Misc
   SES: "Amazon SES",
   Amplify: "AWS Amplify",
@@ -147,6 +150,8 @@ export function wrapServiceName(name: string): string {
     "Amazon SageMaker": "Amazon\nSageMaker",
     "Amazon Rekognition": "Amazon\nRekognition",
     "Amazon S3 Glacier": "Amazon S3\nGlacier",
+    "Amazon OpenSearch Service": "Amazon OpenSearch\nService",
+    "Amazon MSK": "Amazon MSK",
   };
   if (cleanWraps[name]) return cleanWraps[name];
 
@@ -207,6 +212,9 @@ const AWS_ICON_STYLES: Partial<Record<string, string>> = {
   SNS: "shape=mxgraph.aws4.sns;",
   EventBridge: "shape=mxgraph.aws4.eventbridge;",
   Kinesis: "shape=mxgraph.aws4.kinesis;",
+  MSK: "shape=mxgraph.aws4.managed_streaming_for_kafka;",
+  // Search
+  OpenSearch: "shape=mxgraph.aws4.opensearch_service;",
   // Auth
   Cognito: "shape=mxgraph.aws4.cognito;",
   SecretsManager: "shape=mxgraph.aws4.secrets_manager;",
@@ -247,19 +255,21 @@ export function nodeStyle(serviceId: string): string {
 // ---------------------------------------------------------------------------
 
 // CELL_W accommodates full wrapped service name width (110px) with internal padding
-const CELL_W = 116; 
+export const CELL_W = 116; 
 // CELL_H satisfies test requirement: 4 * CELL_H >= 312
-const CELL_H = 80;
-const ICON_SIZE = 56;
-const GAP = 32;     // Generous horizontal and vertical node gap
-const VGAP = 36;    // Vertical channel between container tiers
-const PAD = 20;     // Container interior padding
-const LABEL_H = 26; // Container header title bar height
-const MARGIN = 32;  // Initial layout margin
+export const CELL_H = 80;
+export const ICON_SIZE = 56;
+export const GAP = 40;     // Generous horizontal node gap (40-80px per spec)
+export const VGAP = 48;    // Vertical channel between container tiers (was 36 - provides dedicated routing gutters)
+export const PAD = 24;     // Container interior padding (was 20)
+export const LABEL_H = 32; // Dedicated container header title bar height (was 26)
+export const PAD_TOP = 20; // Dedicated vertical padding below container header
+export const PAD_BOTTOM = 28; // Dedicated bottom padding inside container (protects service labels)
+export const MARGIN = 32;  // Initial layout margin
 
-const SUBNET_COLS = 4;   // Columns per VPC subnet
-const EDGE_COLS = 6;     // Columns in top edge banner
-const EXTERNAL_COLS = 2; // Columns in external column
+export const SUBNET_COLS = 4;   // Columns per VPC subnet
+export const EDGE_COLS = 6;     // Columns in top edge banner
+export const EXTERNAL_COLS = 2; // Columns in external column
 
 export interface Rect {
   x: number;
@@ -304,6 +314,8 @@ export const SERVICE_TIERS: Record<ServiceId, Tier> = {
   SNS: "vpc_data",
   EventBridge: "vpc_data",
   Kinesis: "vpc_data",
+  MSK: "vpc_data",
+  OpenSearch: "vpc_data",
   SecretsManager: "vpc_data",
   SageMaker: "vpc_data",
   Rekognition: "vpc_data",
@@ -344,7 +356,7 @@ export const CONTAINER_LABELS: Record<ContainerKey, string> = {
 /** Container height for a given row count (label bar + rows + padding). */
 export function bucketHeight(rows: number): number {
   if (rows <= 0) return 0;
-  return LABEL_H + rows * CELL_H + (rows - 1) * GAP + PAD;
+  return LABEL_H + PAD_TOP + rows * CELL_H + (rows - 1) * GAP + PAD_BOTTOM;
 }
 
 export interface BucketEntry {
@@ -379,7 +391,7 @@ export function layoutNodes(
     componentId: e.componentId,
     serviceId: e.serviceId,
     x: x + PAD + (i % cols) * (CELL_W + GAP),
-    y: y + LABEL_H + PAD + Math.floor(i / cols) * (CELL_H + GAP),
+    y: y + LABEL_H + PAD_TOP + Math.floor(i / cols) * (CELL_H + GAP),
   }));
   return { rect: { x, y, w, h }, nodes };
 }
@@ -518,6 +530,445 @@ export function validateContainmentHierarchy(
   }
 }
 
+export interface SemanticValidationResult {
+  valid: boolean;
+  errors: string[];
+  metrics: {
+    expectedServiceCount: number;
+    renderedServiceCount: number;
+    expectedRelationshipCount: number;
+    renderedRelationshipCount: number;
+    verifiedContainments: number;
+  };
+}
+
+/**
+ * Validates Stage 2 semantic integrity against the frozen Stage 1 plan:
+ * 1. Component Mapping: Every Stage 1 service is mapped to a diagram component with preserved identity.
+ * 2. Service Completeness: Rendered services match Stage 1 services without additions or omissions.
+ * 3. Relationship Preservation: Every explicit relationship has preserved source, destination, direction, and type.
+ * 4. Dependency & Flow Direction: Logical directions are preserved without inversion.
+ * 5. Containment & Topology Semantics: Service-to-subnet and subnet-to-AZ-to-VPC assignments match the semantic model.
+ */
+export function validateDiagramSemantics(
+  plan: ServicePlan,
+  nodes: Array<{ id: string; componentId: string; serviceId: ServiceId; parent: string }>,
+  edges: Array<{ id: string; sourceId: string; targetId: string; label: string }>
+): SemanticValidationResult {
+  const errors: string[] = [];
+  let verifiedContainments = 0;
+
+  // 1. Input sanity check
+  if (!plan || !Array.isArray(plan.awsMappings)) {
+    errors.push("Missing or invalid Stage 1 input: plan.awsMappings is required and must be an array");
+    return {
+      valid: false,
+      errors,
+      metrics: {
+        expectedServiceCount: 0,
+        renderedServiceCount: Array.isArray(nodes) ? nodes.length : 0,
+        expectedRelationshipCount: 0,
+        renderedRelationshipCount: Array.isArray(edges) ? edges.length : 0,
+        verifiedContainments: 0,
+      },
+    };
+  }
+
+  const safeNodes = Array.isArray(nodes) ? nodes : [];
+  const safeEdges = Array.isArray(edges) ? edges : [];
+
+  // 2. Component Mapping & Service Identity Set Equality
+  // STRICT GROUNDING RULE: Rendered AWS services MUST EXACTLY EQUAL Stage 1 awsMappings
+  // Set(renderedServiceIds) === Set(stage1ServiceIds)
+  const stage1ServiceIds = new Set<ServiceId>(plan.awsMappings.map((m) => m.serviceId));
+  const renderedServiceIds = new Set<ServiceId>(safeNodes.map((n) => n.serviceId));
+
+  // 2a. Missing Stage 1 services: every expected serviceId must be rendered
+  for (const expId of stage1ServiceIds) {
+    if (!renderedServiceIds.has(expId)) {
+      errors.push(`Missing Stage 1 service: "${expId}" is not rendered in diagram`);
+    }
+  }
+
+  // 2b. Unexpected / phantom services: every rendered serviceId must be in Stage 1
+  for (const rendId of renderedServiceIds) {
+    if (!stage1ServiceIds.has(rendId)) {
+      errors.push(`Unexpected service rendered: "${rendId}" has no corresponding Stage 1 mapping`);
+    }
+  }
+
+  // 2c. Strict Set equality enforcement (catches same-count wrong-services substitutions)
+  const isSetEqual =
+    stage1ServiceIds.size === renderedServiceIds.size &&
+    [...stage1ServiceIds].every((id) => renderedServiceIds.has(id));
+
+  if (!isSetEqual) {
+    const missing = [...stage1ServiceIds].filter((id) => !renderedServiceIds.has(id));
+    const unexpected = [...renderedServiceIds].filter((id) => !stage1ServiceIds.has(id));
+    errors.push(
+      `Service set mismatch: Set(renderedServiceIds) !== Set(stage1ServiceIds). Missing: [${missing.join(", ")}], Unexpected: [${unexpected.join(", ")}]`
+    );
+  }
+
+  // 2d. Node mapping & duplicate validation
+  const nodeMap = new Map<string, (typeof safeNodes)[number]>();
+  const seenComponentIds = new Set<string>();
+
+  for (const n of safeNodes) {
+    nodeMap.set(n.id, n);
+
+    const matchingMapping = plan.awsMappings.find(
+      (m) => m.serviceId === n.serviceId && (m.componentId === n.componentId || n.componentId.includes(m.componentId))
+    );
+    if (!matchingMapping && stage1ServiceIds.has(n.serviceId)) {
+      errors.push(
+        `Component mapping mismatch: node "${n.id}" (${n.serviceId}) has componentId "${n.componentId}" not matching any Stage 1 mapping`
+      );
+    }
+
+    if (seenComponentIds.has(n.componentId)) {
+      errors.push(
+        `Duplicate service component: componentId "${n.componentId}" (${n.serviceId}) is rendered multiple times`
+      );
+    }
+    seenComponentIds.add(n.componentId);
+  }
+
+  // 2e. Check for over-duplicated services
+  const stage1CountByService = new Map<ServiceId, number>();
+  for (const m of plan.awsMappings) {
+    stage1CountByService.set(m.serviceId, (stage1CountByService.get(m.serviceId) ?? 0) + 1);
+  }
+  const renderedCountByService = new Map<ServiceId, number>();
+  for (const n of safeNodes) {
+    renderedCountByService.set(n.serviceId, (renderedCountByService.get(n.serviceId) ?? 0) + 1);
+  }
+  for (const [sId, rCount] of renderedCountByService) {
+    const expCount = stage1CountByService.get(sId) ?? 0;
+    if (rCount > expCount && expCount > 0) {
+      errors.push(
+        `Duplicate service rendered: service "${sId}" is rendered ${rCount} times, but only expected ${expCount} time(s)`
+      );
+    }
+  }
+
+  // 3. Containment & Topology Semantics
+  for (const n of safeNodes) {
+    const expectedTier = SERVICE_TIERS[n.serviceId] ?? "vpc_data";
+    const expectedParentMap: Record<Tier, string> = {
+      edge: "container-edge",
+      vpc_public: "container-public_subnet",
+      vpc_compute: "container-compute_subnet",
+      vpc_data: "container-data_subnet",
+      cross_cutting: "container-cross_cutting",
+      external: "container-external",
+    };
+    const expectedParent = expectedParentMap[expectedTier];
+    if (expectedParent && n.parent !== expectedParent) {
+      errors.push(
+        `Containment semantic mismatch: service "${n.serviceId}" is in "${n.parent}", expected "${expectedParent}" (tier: ${expectedTier})`
+      );
+    } else {
+      verifiedContainments++;
+    }
+  }
+
+  // 4. Relationship Preservation & Direction
+  const compIdToNode = new Map<string, (typeof safeNodes)[number]>();
+  const serviceIdToNode = new Map<string, (typeof safeNodes)[number]>();
+  for (const n of safeNodes) {
+    compIdToNode.set(n.componentId, n);
+    if (!serviceIdToNode.has(n.serviceId)) {
+      serviceIdToNode.set(n.serviceId, n);
+    }
+  }
+
+  let expectedRelCount = 0;
+  for (const rel of plan.relationships ?? []) {
+    // Resolve endpoints by componentId first, then via mapping alias, then serviceId
+    const srcMapping = plan.awsMappings.find((m) => m.componentId === rel.from);
+    const dstMapping = plan.awsMappings.find((m) => m.componentId === rel.to);
+    const srcNode =
+      compIdToNode.get(rel.from) ??
+      (srcMapping ? serviceIdToNode.get(srcMapping.serviceId) : undefined) ??
+      serviceIdToNode.get(rel.from as ServiceId);
+    const dstNode =
+      compIdToNode.get(rel.to) ??
+      (dstMapping ? serviceIdToNode.get(dstMapping.serviceId) : undefined) ??
+      serviceIdToNode.get(rel.to as ServiceId);
+
+    // If both endpoints exist in the plan's rendered nodes, this relationship MUST be rendered
+    if (srcNode && dstNode) {
+      expectedRelCount++;
+
+      const forwardEdge = safeEdges.find((e) => e.sourceId === srcNode.id && e.targetId === dstNode.id);
+      const reverseEdge = safeEdges.find((e) => e.sourceId === dstNode.id && e.targetId === srcNode.id);
+
+      if (reverseEdge && !forwardEdge) {
+        errors.push(
+          `Reversed relationship direction: expected "${rel.from} -> ${rel.to}" (type: "${rel.type ?? ""}"), but edge is reversed from "${dstNode.serviceId}" to "${srcNode.serviceId}"`
+        );
+      } else if (!forwardEdge) {
+        errors.push(
+          `Missing relationship: expected "${rel.from} -> ${rel.to}" (type: "${rel.type ?? ""}") is not rendered as an edge`
+        );
+      } else {
+        if (rel.type && rel.type.trim() && !forwardEdge.label.toLowerCase().includes(rel.type.trim().toLowerCase())) {
+          errors.push(
+            `Relationship type mismatch: expected type "${rel.type}" on edge "${rel.from} -> ${rel.to}", but edge label is "${forwardEdge.label}"`
+          );
+        }
+      }
+    }
+  }
+
+  // 5. Edge Endpoint Integrity
+  for (const e of safeEdges) {
+    if (!nodeMap.has(e.sourceId)) {
+      errors.push(`Invalid edge source: edge "${e.id}" references non-existent node "${e.sourceId}"`);
+    }
+    if (!nodeMap.has(e.targetId)) {
+      errors.push(`Invalid edge target: edge "${e.id}" references non-existent node "${e.targetId}"`);
+    }
+    if (e.sourceId === e.targetId) {
+      errors.push(`Invalid self-loop edge: edge "${e.id}" connects node "${e.sourceId}" to itself`);
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    metrics: {
+      expectedServiceCount: plan.awsMappings.length,
+      renderedServiceCount: safeNodes.length,
+      expectedRelationshipCount: expectedRelCount,
+      renderedRelationshipCount: safeEdges.length,
+      verifiedContainments,
+    },
+  };
+}
+
+export interface DiagramValidationResult {
+  valid: boolean;
+  errors: string[];
+}
+
+/**
+ * Validates diagram layout invariants:
+ * 1. Containment hierarchy: Subnet -> AZ -> VPC -> AWS Cloud
+ * 2. Container boundaries: Containers must not illegally overlap or exceed parent bounds
+ * 3. Dedicated title clearance: Nodes must clear container headers by at least LABEL_H
+ * 4. Node containment: Every node must be strictly bounded inside its parent container
+ * 5. Collision-free: No two nodes overlap (AABB collision check)
+ */
+export function validateDiagramLayout(
+  layout: DiagramLayout,
+  placedNodes?: Array<{ id: string; serviceId: string; geo: Rect; parent: string }>
+): DiagramValidationResult {
+  const errors: string[] = [];
+
+  // 1. Containment hierarchy
+  try {
+    validateContainmentHierarchy(layout.containers);
+  } catch (err: unknown) {
+    if (err instanceof Error) {
+      errors.push(err.message);
+    } else {
+      errors.push(String(err));
+    }
+  }
+
+  const { aws_cloud, edge, vpc, az, public_subnet, compute_subnet, data_subnet, cross_cutting } =
+    layout.containers;
+
+  // 2. Container boundaries and non-overlap
+  if (aws_cloud) {
+    if (edge) {
+      if (
+        edge.x < aws_cloud.x ||
+        edge.y < aws_cloud.y ||
+        edge.x + edge.w > aws_cloud.x + aws_cloud.w ||
+        edge.y + edge.h > aws_cloud.y + aws_cloud.h
+      ) {
+        errors.push(`Edge container exceeds AWS Cloud bounds`);
+      }
+    }
+    if (vpc) {
+      if (
+        vpc.x < aws_cloud.x ||
+        vpc.y < aws_cloud.y ||
+        vpc.x + vpc.w > aws_cloud.x + aws_cloud.w ||
+        vpc.y + vpc.h > aws_cloud.y + aws_cloud.h
+      ) {
+        errors.push(`VPC container exceeds AWS Cloud bounds`);
+      }
+    }
+    if (cross_cutting) {
+      if (
+        cross_cutting.x < aws_cloud.x ||
+        cross_cutting.y < aws_cloud.y ||
+        cross_cutting.x + cross_cutting.w > aws_cloud.x + aws_cloud.w ||
+        cross_cutting.y + cross_cutting.h > aws_cloud.y + aws_cloud.h
+      ) {
+        errors.push(`Cross-cutting container exceeds AWS Cloud bounds`);
+      }
+    }
+  }
+
+  // VPC and Edge vertical separation
+  if (edge && vpc) {
+    if (vpc.y < edge.y + edge.h) {
+      errors.push(`VPC overlaps Edge vertically: vpc.y (${vpc.y}) < edge bottom (${edge.y + edge.h})`);
+    }
+  }
+
+  // Cross-cutting and VPC vertical separation
+  if (vpc && cross_cutting) {
+    if (cross_cutting.y < vpc.y + vpc.h) {
+      errors.push(
+        `Cross-cutting overlaps VPC vertically: cross.y (${cross_cutting.y}) < vpc bottom (${vpc.y + vpc.h})`
+      );
+    }
+  }
+
+  // AZ inside VPC
+  if (vpc && az) {
+    if (
+      az.x < vpc.x ||
+      az.y < vpc.y ||
+      az.x + az.w > vpc.x + vpc.w ||
+      az.y + az.h > vpc.y + vpc.h
+    ) {
+      errors.push(`AZ container exceeds VPC bounds`);
+    }
+  }
+
+  // Subnets inside AZ
+  const subnets: Array<{ key: ContainerKey; rect: Rect | null }> = [
+    { key: "public_subnet", rect: public_subnet },
+    { key: "compute_subnet", rect: compute_subnet },
+    { key: "data_subnet", rect: data_subnet },
+  ];
+
+  for (const { key, rect } of subnets) {
+    if (rect && az) {
+      if (
+        rect.x < az.x ||
+        rect.y < az.y ||
+        rect.x + rect.w > az.x + az.w ||
+        rect.y + rect.h > az.y + az.h
+      ) {
+        errors.push(`Subnet "${key}" exceeds AZ bounds`);
+      }
+    }
+  }
+
+  // Subnet vertical non-overlap
+  for (let i = 0; i < subnets.length; i++) {
+    for (let j = i + 1; j < subnets.length; j++) {
+      const s1 = subnets[i];
+      const s2 = subnets[j];
+      if (s1.rect && s2.rect) {
+        const top1 = s1.rect.y;
+        const bot1 = s1.rect.y + s1.rect.h;
+        const top2 = s2.rect.y;
+        const bot2 = s2.rect.y + s2.rect.h;
+        if (bot1 > top2 && bot2 > top1) {
+          errors.push(`Subnets "${s1.key}" and "${s2.key}" overlap vertically`);
+        }
+      }
+    }
+  }
+
+  // 3. Node layout validation
+  const nodesToCheck: Array<{
+    id: string;
+    serviceId: string;
+    absX: number;
+    absY: number;
+    w: number;
+    h: number;
+    parent: string;
+  }> = [];
+
+  if (placedNodes && placedNodes.length > 0) {
+    const contMap: Record<string, Rect> = {};
+    for (const [k, r] of Object.entries(layout.containers)) {
+      if (r) contMap[`container-${k}`] = r;
+    }
+    for (const pn of placedNodes) {
+      const parentRect = contMap[pn.parent];
+      const absX = (parentRect ? parentRect.x : 0) + pn.geo.x;
+      const absY = (parentRect ? parentRect.y : 0) + pn.geo.y;
+      nodesToCheck.push({
+        id: pn.id,
+        serviceId: pn.serviceId,
+        absX,
+        absY,
+        w: pn.geo.w,
+        h: pn.geo.h,
+        parent: pn.parent,
+      });
+    }
+  } else if (layout.nodes) {
+    for (const [compId, node] of Object.entries(layout.nodes)) {
+      nodesToCheck.push({
+        id: compId,
+        serviceId: node.serviceId,
+        absX: node.x,
+        absY: node.y,
+        w: CELL_W,
+        h: CELL_H,
+        parent: node.parent,
+      });
+    }
+  }
+
+  // Check node-node collisions (AABB)
+  for (let i = 0; i < nodesToCheck.length; i++) {
+    for (let j = i + 1; j < nodesToCheck.length; j++) {
+      const n1 = nodesToCheck[i];
+      const n2 = nodesToCheck[j];
+      const overlaps = !(
+        n1.absX + n1.w <= n2.absX ||
+        n2.absX + n2.w <= n1.absX ||
+        n1.absY + n1.h <= n2.absY ||
+        n2.absY + n2.h <= n1.absY
+      );
+      if (overlaps) {
+        errors.push(`Node overlap: "${n1.serviceId}" and "${n2.serviceId}" collide`);
+      }
+    }
+  }
+
+  // Check node clearance from container title and borders
+  for (const n of nodesToCheck) {
+    const containerKey = n.parent.replace("container-", "") as ContainerKey;
+    const parentRect = layout.containers[containerKey];
+    if (parentRect) {
+      if (n.absY < parentRect.y + LABEL_H) {
+        errors.push(
+          `Node "${n.serviceId}" header collision: y (${n.absY}) < container header bottom (${parentRect.y + LABEL_H})`
+        );
+      }
+      if (
+        n.absX < parentRect.x ||
+        n.absX + n.w > parentRect.x + parentRect.w + 1 ||
+        n.absY + n.h > parentRect.y + parentRect.h + 1
+      ) {
+        errors.push(
+          `Node "${n.serviceId}" exceeds parent container "${containerKey}" bounds`
+        );
+      }
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+  };
+}
+
 /**
  * Computes the full diagram geometry from plan.awsMappings.
  * Incorporates:
@@ -554,90 +1005,145 @@ export function computeLayout(services: AwsServiceMapping[]): DiagramLayout {
   };
   const nodes: DiagramLayout["nodes"] = {};
 
+  // 1. Initial dimensions for subnets
+  const publicPlaced = layoutNodes(buckets.vpc_public, SUBNET_COLS, 0, 0);
+  const computePlaced = layoutNodes(buckets.vpc_compute, SUBNET_COLS, 0, 0);
+  const dataPlaced = layoutNodes(buckets.vpc_data, SUBNET_COLS, 0, 0);
+
+  const activeSubnets = [
+    { key: "public_subnet" as const, placed: publicPlaced },
+    { key: "compute_subnet" as const, placed: computePlaced },
+    { key: "data_subnet" as const, placed: dataPlaced },
+  ].filter((s): s is { key: ContainerKey; placed: PlacedBucket } => s.placed !== null);
+
+  let azRect: Rect | null = null;
+  let vpcRect: Rect | null = null;
+
   const edgeRows = buckets.edge.length > 0 ? Math.ceil(buckets.edge.length / EDGE_COLS) : 0;
   const edgeH = bucketHeight(edgeRows);
+  const edgeY = MARGIN;
+
+  // The VPC starts below the Edge banner with a clean tier gap (VGAP)
   const vpcY = MARGIN + (edgeRows > 0 ? edgeH + VGAP : 0);
   const vpcX = MARGIN;
 
-  // 1. Public + compute subnets side by side
-  const publicPlaced = layoutNodes(buckets.vpc_public, SUBNET_COLS, vpcX, vpcY);
-  const computePlaced = layoutNodes(
-    buckets.vpc_compute,
-    SUBNET_COLS,
-    vpcX + (publicPlaced ? publicPlaced.rect.w + GAP : 0),
-    vpcY
-  );
+  if (activeSubnets.length > 0) {
+    // Coordinate width across all subnets inside the AZ to prevent ragged edges
+    const maxSubnetW = Math.max(...activeSubnets.map((s) => s.placed.rect.w));
 
-  // 2. Data subnet below the tallest of the two
-  let dataPlaced: PlacedBucket | null = null;
-  const topBottom = Math.max(
-    publicPlaced ? publicPlaced.rect.y + publicPlaced.rect.h : 0,
-    computePlaced ? computePlaced.rect.y + computePlaced.rect.h : 0
-  );
-  if (buckets.vpc_data.length > 0) {
-    const dataY = topBottom > 0 ? topBottom + VGAP : vpcY;
-    dataPlaced = layoutNodes(buckets.vpc_data, SUBNET_COLS, vpcX, dataY);
-  }
+    // Calculate AZ dimensions wrapping all subnets
+    const azPadX = PAD;
+    const azPadTop = LABEL_H + PAD_TOP;
+    const azPadBottom = PAD_BOTTOM;
+    const totalSubnetHeight = activeSubnets.reduce((sum, s) => sum + s.placed.rect.h, 0);
+    const totalSubnetGaps = (activeSubnets.length - 1) * VGAP;
+    const azH = azPadTop + totalSubnetHeight + totalSubnetGaps + azPadBottom;
+    const azW = maxSubnetW + 2 * azPadX;
 
-  // 3. AZ container wraps all subnets (always emitted unconditionally when subnets exist)
-  const subnetEntries = [publicPlaced, computePlaced, dataPlaced].filter(
-    (p): p is PlacedBucket => p !== null
-  );
-  let azRect: Rect | null = null;
-  if (subnetEntries.length > 0) {
-    const azMinX = Math.min(...subnetEntries.map((p) => p.rect.x)) - PAD;
-    const azMinY = Math.min(...subnetEntries.map((p) => p.rect.y)) - LABEL_H;
-    const azMaxX = Math.max(...subnetEntries.map((p) => p.rect.x + p.rect.w)) + PAD;
-    const azMaxY = Math.max(...subnetEntries.map((p) => p.rect.y + p.rect.h)) + PAD;
-    azRect = { x: azMinX, y: azMinY, w: azMaxX - azMinX, h: azMaxY - azMinY };
-  }
-  containers.az = azRect;
-
-  // 4. VPC box wraps the AZ container with clean margin
-  let vpcRect: Rect | null = null;
-  if (azRect) {
+    // Position AZ inside VPC
     const vpcPadX = PAD;
-    const vpcPadTop = LABEL_H + PAD;
-    const vpcPadBottom = PAD;
-    vpcRect = {
-      x: azRect.x - vpcPadX,
-      y: azRect.y - vpcPadTop,
-      w: azRect.w + 2 * vpcPadX,
-      h: azRect.h + vpcPadTop + vpcPadBottom,
-    };
-  }
-  containers.vpc = vpcRect;
-  if (publicPlaced) containers.public_subnet = publicPlaced.rect;
-  if (computePlaced) containers.compute_subnet = computePlaced.rect;
-  if (dataPlaced) containers.data_subnet = dataPlaced.rect;
+    const vpcPadTop = LABEL_H + PAD_TOP;
+    const vpcPadBottom = PAD_BOTTOM;
+    const vpcW = azW + 2 * vpcPadX;
+    const vpcH = vpcPadTop + azH + vpcPadBottom;
 
-  // 5. Cross-cutting container (Management & Governance) placed below VPC, full VPC width
+    vpcRect = { x: vpcX, y: vpcY, w: vpcW, h: vpcH };
+    const azX = vpcX + vpcPadX;
+    const azY = vpcY + vpcPadTop;
+    azRect = { x: azX, y: azY, w: azW, h: azH };
+
+    // Position each subnet inside AZ top-to-bottom
+    let currentSubnetY = azY + azPadTop;
+    for (const s of activeSubnets) {
+      const subnetX = azX + azPadX;
+      const subnetY = currentSubnetY;
+      const subnetW = maxSubnetW;
+      const subnetH = s.placed.rect.h;
+
+      s.placed.rect = { x: subnetX, y: subnetY, w: subnetW, h: subnetH };
+      containers[s.key] = s.placed.rect;
+
+      // Center nodes horizontally within the coordinated subnet width
+      const cols = SUBNET_COLS;
+      const actualCols = Math.min(s.placed.nodes.length, cols);
+      const contentW = actualCols * CELL_W + (actualCols - 1) * GAP;
+      const offsetStartX = Math.max(0, Math.round((subnetW - 2 * PAD - contentW) / 2));
+
+      const registerNode = (n: PlacedNode, nodeX: number, nodeY: number, parent: string) => {
+        const placement = {
+          x: nodeX,
+          y: nodeY,
+          parent,
+          serviceId: n.serviceId,
+        };
+        if (!nodes[n.componentId]) {
+          nodes[n.componentId] = placement;
+        } else {
+          nodes[`${n.componentId}_${n.serviceId}`] = placement;
+        }
+      };
+
+      for (let i = 0; i < s.placed.nodes.length; i++) {
+        const n = s.placed.nodes[i];
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        const nodeX = subnetX + PAD + offsetStartX + col * (CELL_W + GAP);
+        const nodeY = subnetY + LABEL_H + PAD_TOP + row * (CELL_H + GAP);
+        n.x = nodeX;
+        n.y = nodeY;
+        registerNode(n, nodeX, nodeY, `container-${s.key}`);
+      }
+
+      currentSubnetY += subnetH + VGAP;
+    }
+  }
+
+  containers.az = azRect;
+  containers.vpc = vpcRect;
+
+  // 2. Cross-cutting container (Management & Governance) placed below VPC
   let crossCuttingRect: Rect | null = null;
   if (buckets.cross_cutting.length > 0) {
     const CROSS_CUTTING_COLS = 4;
     const crossX = vpcRect ? vpcRect.x : MARGIN;
-    const crossY = vpcRect
-      ? vpcRect.y + vpcRect.h + VGAP
-      : (topBottom > 0 ? topBottom + VGAP : vpcY);
+    const crossY = vpcRect ? vpcRect.y + vpcRect.h + VGAP : vpcY;
     const crossPlaced = layoutNodes(buckets.cross_cutting, CROSS_CUTTING_COLS, crossX, crossY)!;
+
     if (vpcRect) {
-      // Widen to the VPC for alignment, but never below the width this
-      // container's own already-positioned nodes need.
       crossPlaced.rect.w = Math.max(crossPlaced.rect.w, vpcRect.w);
+      crossPlaced.rect.x = vpcRect.x;
     }
     crossCuttingRect = crossPlaced.rect;
-    for (const n of crossPlaced.nodes) {
-      nodes[n.componentId] = {
-        x: n.x,
-        y: n.y,
+
+    const cols = CROSS_CUTTING_COLS;
+    const actualCols = Math.min(crossPlaced.nodes.length, cols);
+    const contentW = actualCols * CELL_W + (actualCols - 1) * GAP;
+    const offsetStartX = Math.max(0, Math.round((crossPlaced.rect.w - 2 * PAD - contentW) / 2));
+
+    for (let i = 0; i < crossPlaced.nodes.length; i++) {
+      const n = crossPlaced.nodes[i];
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const nodeX = crossPlaced.rect.x + PAD + offsetStartX + col * (CELL_W + GAP);
+      const nodeY = crossPlaced.rect.y + LABEL_H + PAD_TOP + row * (CELL_H + GAP);
+      n.x = nodeX;
+      n.y = nodeY;
+      const placement = {
+        x: nodeX,
+        y: nodeY,
         parent: "container-cross_cutting",
         serviceId: n.serviceId,
       };
+      if (!nodes[n.componentId]) {
+        nodes[n.componentId] = placement;
+      } else {
+        nodes[`${n.componentId}_${n.serviceId}`] = placement;
+      }
     }
   }
   containers.cross_cutting = crossCuttingRect;
 
-  // 6. External column anchored to the right edge of the VPC box
+  // 3. External column anchored to the right of VPC
   let externalRect: Rect | null = null;
   if (buckets.external.length > 0) {
     const extX = vpcRect ? vpcRect.x + vpcRect.w + GAP : MARGIN;
@@ -646,59 +1152,62 @@ export function computeLayout(services: AwsServiceMapping[]): DiagramLayout {
     if (vpcRect) extPlaced.rect.h = Math.max(vpcRect.h, extPlaced.rect.h);
     externalRect = extPlaced.rect;
     for (const n of extPlaced.nodes) {
-      nodes[n.componentId] = { x: n.x, y: n.y, parent: "container-external", serviceId: n.serviceId };
+      const placement = { x: n.x, y: n.y, parent: "container-external", serviceId: n.serviceId };
+      if (!nodes[n.componentId]) {
+        nodes[n.componentId] = placement;
+      } else {
+        nodes[`${n.componentId}_${n.serviceId}`] = placement;
+      }
     }
   }
   containers.external = externalRect;
 
-  // 7. Compute base canvas size from components
-  const rightExtent = Math.max(
-    vpcRect ? vpcRect.x + vpcRect.w : 0,
-    externalRect ? externalRect.x + externalRect.w : 0,
-    crossCuttingRect ? crossCuttingRect.x + crossCuttingRect.w : 0
-  );
-  const baseCanvasW = Math.max(rightExtent + PAD + MARGIN, 700);
-
-  // 6. Edge banner spans full width of VPC and external
+  // 4. Edge banner spans full width of VPC and External
   if (buckets.edge.length > 0) {
-    const edgeW = baseCanvasW - 2 * MARGIN;
-    const edgePlaced = layoutNodes(buckets.edge, EDGE_COLS, MARGIN, MARGIN)!;
-    // Stretch across the canvas, but never below the width this banner's own
-    // already-positioned nodes need — a narrow VPC makes the canvas-derived
-    // width smaller than the EDGE_COLS grid, and shrinking to it pushed the
-    // right-hand nodes outside both the banner and the AWS Cloud boundary.
-    edgePlaced.rect.w = Math.max(edgePlaced.rect.w, edgeW);
+    const rightExtent = Math.max(
+      vpcRect ? vpcRect.x + vpcRect.w : 0,
+      externalRect ? externalRect.x + externalRect.w : 0,
+      crossCuttingRect ? crossCuttingRect.x + crossCuttingRect.w : 0
+    );
+    const minEdgeGridW = EDGE_COLS * CELL_W + (EDGE_COLS - 1) * GAP + 2 * PAD;
+    const edgeW = Math.max(rightExtent - MARGIN, minEdgeGridW);
+    const edgePlaced = layoutNodes(buckets.edge, EDGE_COLS, MARGIN, edgeY)!;
+    edgePlaced.rect.w = edgeW;
     containers.edge = edgePlaced.rect;
-    for (const n of edgePlaced.nodes) {
-      nodes[n.componentId] = { x: n.x, y: n.y, parent: "container-edge", serviceId: n.serviceId };
+
+    const actualCols = Math.min(edgePlaced.nodes.length, EDGE_COLS);
+    const contentW = actualCols * CELL_W + (actualCols - 1) * GAP;
+    const offsetStartX = Math.max(0, Math.round((edgeW - 2 * PAD - contentW) / 2));
+
+    for (let i = 0; i < edgePlaced.nodes.length; i++) {
+      const n = edgePlaced.nodes[i];
+      const col = i % EDGE_COLS;
+      const row = Math.floor(i / EDGE_COLS);
+      const nodeX = edgePlaced.rect.x + PAD + offsetStartX + col * (CELL_W + GAP);
+      const nodeY = edgePlaced.rect.y + LABEL_H + PAD_TOP + row * (CELL_H + GAP);
+      n.x = nodeX;
+      n.y = nodeY;
+      const placement = { x: nodeX, y: nodeY, parent: "container-edge", serviceId: n.serviceId };
+      if (!nodes[n.componentId]) {
+        nodes[n.componentId] = placement;
+      } else {
+        nodes[`${n.componentId}_${n.serviceId}`] = placement;
+      }
     }
   }
 
-  // Attach subnet node placements
-  const subnetPlacements: Array<[PlacedBucket | null, ContainerKey]> = [
-    [publicPlaced, "public_subnet"],
-    [computePlaced, "compute_subnet"],
-    [dataPlaced, "data_subnet"],
-  ];
-  for (const [placed, key] of subnetPlacements) {
-    if (!placed) continue;
-    for (const n of placed.nodes) {
-      nodes[n.componentId] = { x: n.x, y: n.y, parent: `container-${key}`, serviceId: n.serviceId };
-    }
-  }
-
-  // 7. AWS Cloud container wraps everything (outermost boundary)
+  // 5. AWS Cloud container wraps everything
   const allActiveRects: Rect[] = [];
   for (const key of Object.keys(containers) as ContainerKey[]) {
-    if (key === "aws_cloud") continue; // Don't include self
+    if (key === "aws_cloud") continue;
     const r = containers[key];
     if (r) allActiveRects.push(r);
   }
   if (allActiveRects.length > 0) {
     const cloudMinX = Math.min(...allActiveRects.map((r) => r.x)) - PAD;
-    const cloudMinY = Math.min(...allActiveRects.map((r) => r.y)) - LABEL_H - PAD;
+    const cloudMinY = Math.min(...allActiveRects.map((r) => r.y)) - LABEL_H - PAD_TOP;
     const cloudMaxX = Math.max(...allActiveRects.map((r) => r.x + r.w)) + PAD;
-    const cloudMaxY = Math.max(...allActiveRects.map((r) => r.y + r.h)) + PAD;
+    const cloudMaxY = Math.max(...allActiveRects.map((r) => r.y + r.h)) + PAD_BOTTOM;
     containers.aws_cloud = {
       x: cloudMinX,
       y: cloudMinY,
@@ -707,11 +1216,7 @@ export function computeLayout(services: AwsServiceMapping[]): DiagramLayout {
     };
   }
 
-  // -------------------------------------------------------------------------
-  // Automatic Diagram Centering
-  // Compute tight bounding box of all containers and center inside canvas
-  // -------------------------------------------------------------------------
-  // Use the AWS Cloud container as the bounding box (it wraps everything)
+  // 6. Centering on canvas with uniform margins
   const outerRect = containers.aws_cloud;
   const contentW = outerRect ? outerRect.w : 500;
   const contentH = outerRect ? outerRect.h : 400;
@@ -723,11 +1228,9 @@ export function computeLayout(services: AwsServiceMapping[]): DiagramLayout {
   const canvasW = Math.max(contentW + 2 * CANVAS_PAD_X, 760);
   const canvasH = Math.max(contentH + 2 * CANVAS_PAD_Y, 520);
 
-  // Translation shift
   const shiftX = Math.round((canvasW - contentW) / 2) - contentMinX;
   const shiftY = Math.round((canvasH - contentH) / 2) - contentMinY;
 
-  // Apply shift to containers
   for (const key of Object.keys(containers) as ContainerKey[]) {
     const r = containers[key];
     if (r) {
@@ -736,16 +1239,18 @@ export function computeLayout(services: AwsServiceMapping[]): DiagramLayout {
     }
   }
 
-  // Apply shift to nodes
   for (const compId of Object.keys(nodes)) {
     nodes[compId].x += shiftX;
     nodes[compId].y += shiftY;
   }
 
-  // Validate containment hierarchy before returning
-  validateContainmentHierarchy(containers);
+  const layout: DiagramLayout = { containers, nodes, canvasW, canvasH };
+  const validation = validateDiagramLayout(layout);
+  if (!validation.valid) {
+    console.warn("Diagram layout validation warnings:\n" + validation.errors.join("\n"));
+  }
 
-  return { containers, nodes, canvasW, canvasH };
+  return layout;
 }
 
 // ---------------------------------------------------------------------------
@@ -835,7 +1340,7 @@ function isEdgeConfirmed(
   }
 
   // 2. sdkEvidence cross-service proof
-  if (sdkEvidence && sdkEvidence.length > 0) {
+  if (Array.isArray(sdkEvidence) && sdkEvidence.length > 0) {
     const hasDstSdk = sdkEvidence.some((ev) => {
       const hint = ev.serviceHint ?? ev.service ?? "";
       return (
@@ -870,31 +1375,31 @@ function isEdgeConfirmed(
 
 const CONTAINER_THEMES: Record<ContainerKey, string> = {
   aws_cloud:
-    "rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=6;fontStyle=1;fontSize=14;" +
-    "fillColor=#F9FAFB;strokeColor=#232F3E;strokeWidth=2;fontColor=#232F3E;dashed=0;arcSize=8;",
+    "rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=8;fontStyle=1;fontSize=14;" +
+    "fillColor=#F9FAFB;strokeColor=#232F3E;strokeWidth=2;fontColor=#232F3E;dashed=0;arcSize=6;",
   edge:
-    "rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=6;fontStyle=1;fontSize=12;" +
+    "rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=8;fontStyle=1;fontSize=12;" +
     "fillColor=#F8FAFC;strokeColor=#CBD5E1;strokeWidth=1.5;fontColor=#334155;dashed=0;arcSize=6;",
   vpc:
-    "rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=6;fontStyle=1;fontSize=13;" +
+    "rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=8;fontStyle=1;fontSize=13;" +
     "fillColor=#FFFFFF;strokeColor=#1E293B;strokeWidth=2;fontColor=#0F172A;dashed=0;arcSize=6;",
   az:
-    "rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=6;fontStyle=1;fontSize=11;" +
+    "rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=8;fontStyle=1;fontSize=11;" +
     "fillColor=#F0FDFA;strokeColor=#14B8A6;strokeWidth=1.5;fontColor=#0D9488;dashed=1;dashPattern=6 4;arcSize=6;",
   public_subnet:
-    "rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=6;fontStyle=1;fontSize=11;" +
+    "rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=8;fontStyle=1;fontSize=11;" +
     "fillColor=#F0FDF4;strokeColor=#22C55E;strokeWidth=1.5;fontColor=#15803D;dashed=1;dashPattern=6 4;arcSize=6;",
   compute_subnet:
-    "rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=6;fontStyle=1;fontSize=11;" +
+    "rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=8;fontStyle=1;fontSize=11;" +
     "fillColor=#EFF6FF;strokeColor=#3B82F6;strokeWidth=1.5;fontColor=#1D4ED8;dashed=1;dashPattern=6 4;arcSize=6;",
   data_subnet:
-    "rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=6;fontStyle=1;fontSize=11;" +
+    "rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=8;fontStyle=1;fontSize=11;" +
     "fillColor=#FAF5FF;strokeColor=#A855F7;strokeWidth=1.5;fontColor=#6B21A8;dashed=1;dashPattern=6 4;arcSize=6;",
   cross_cutting:
-    "rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=6;fontStyle=1;fontSize=11;" +
+    "rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=8;fontStyle=1;fontSize=11;" +
     "fillColor=#FFF7ED;strokeColor=#F97316;strokeWidth=1.5;fontColor=#C2410C;dashed=1;dashPattern=6 4;arcSize=6;",
   external:
-    "rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=6;fontStyle=1;fontSize=12;" +
+    "rounded=1;whiteSpace=wrap;html=1;verticalAlign=top;align=left;spacingLeft=16;spacingTop=8;fontStyle=1;fontSize=12;" +
     "fillColor=#F8FAFC;strokeColor=#94A3B8;strokeWidth=1.5;fontColor=#475569;dashed=1;dashPattern=6 4;arcSize=6;",
 };
 
@@ -948,6 +1453,10 @@ export function routeEdges(
 
   // Track target incoming edge counts for label staggering
   const targetEdgeCount = new Map<string, number>();
+  // Track gutter lane allocation so multiple horizontal lines do not stack
+  const gutterEdgeCount = new Map<string, number>();
+
+  const allNodeGeos = Object.values(nodeAbsGeo);
 
   for (const e of edgesToRoute) {
     const src = nodeAbsGeo[e.source];
@@ -958,21 +1467,24 @@ export function routeEdges(
     targetEdgeCount.set(e.target, inIdx + 1);
 
     // Stagger label offset along edge path to eliminate overlap between adjacent labels
-    const labelOffsetX = (inIdx % 2 === 0 ? -1 : 1) * (inIdx * 10);
-    const labelOffsetY = -10;
+    const labelOffsetX = (inIdx % 2 === 0 ? -1 : 1) * (14 + inIdx * 10);
+    const labelOffsetY = inIdx % 2 === 0 ? -12 : 12;
 
     // Default to vertical progression: exit bottom, enter top
     let exitPort: Port = { x: 0.5, y: 1 };
     let entryPort: Port = { x: 0.5, y: 0 };
 
     if (src && dst) {
-      const srcCx = src.x + src.w / 2;
-      const srcCy = src.y + src.h / 2;
-      const dstCx = dst.x + dst.w / 2;
-      const dstCy = dst.y + dst.h / 2;
+      const srcCx = Math.round(src.x + src.w / 2);
+      const srcCy = Math.round(src.y + src.h / 2);
+      const dstCx = Math.round(dst.x + dst.w / 2);
+      const dstCy = Math.round(dst.y + dst.h / 2);
 
       const dx = dstCx - srcCx;
       const dy = dstCy - srcCy;
+
+      const srcBot = Math.round(src.y + src.h);
+      const dstTop = Math.round(dst.y);
 
       // Primary direction determines exit and entry ports
       if (Math.abs(dy) >= Math.abs(dx)) {
@@ -980,10 +1492,73 @@ export function routeEdges(
           // Downward vertical flow
           exitPort = { x: 0.5, y: 1 };
           entryPort = { x: 0.5, y: 0 };
+
+          // Check if intermediate nodes lie between source and target
+          const intermediateNodes = allNodeGeos.filter(
+            (n) => n !== src && n !== dst && n.y >= srcBot - 5 && n.y + n.h <= dstTop + 5
+          );
+
+          if (srcBot < dstTop - 15) {
+            // Allocate separate lane in this gutter
+            const gutterKey = `${Math.floor((srcBot + 10) / 40)}->${Math.floor(dstTop / 40)}`;
+            const laneIdx = gutterEdgeCount.get(gutterKey) ?? 0;
+            gutterEdgeCount.set(gutterKey, laneIdx + 1);
+            const laneOffset = (laneIdx % 2 === 0 ? 1 : -1) * Math.ceil(laneIdx / 2) * 12;
+
+            if (intermediateNodes.length > 0) {
+              // Bypass intermediate tier around the side
+              const maxInterX = Math.max(...intermediateNodes.map((n) => n.x + n.w));
+              const minInterX = Math.min(...intermediateNodes.map((n) => n.x));
+              const bypassRight = maxInterX + 36;
+              const bypassLeft = minInterX - 36;
+              const bypassX = Math.abs(srcCx - bypassRight) <= Math.abs(srcCx - bypassLeft) ? bypassRight : bypassLeft;
+              const g1Y = Math.round(srcBot + 16) + laneOffset;
+              const g2Y = Math.round(dstTop - 16) - laneOffset;
+              waypoints.push({ x: srcCx, y: g1Y });
+              waypoints.push({ x: bypassX, y: g1Y });
+              waypoints.push({ x: bypassX, y: g2Y });
+              waypoints.push({ x: dstCx, y: g2Y });
+            } else {
+              const midY = Math.round((srcBot + dstTop) / 2) + laneOffset;
+              if (Math.abs(srcCx - dstCx) > 8) {
+                waypoints.push({ x: srcCx, y: midY });
+                waypoints.push({ x: dstCx, y: midY });
+              }
+            }
+          }
         } else {
           // Upward vertical flow
           exitPort = { x: 0.5, y: 0 };
           entryPort = { x: 0.5, y: 1 };
+
+          const gutterKey = `up-${Math.floor(src.y / 40)}->${Math.floor(dst.y / 40)}`;
+          const laneIdx = gutterEdgeCount.get(gutterKey) ?? 0;
+          gutterEdgeCount.set(gutterKey, laneIdx + 1);
+          const laneOffset = (laneIdx % 2 === 0 ? 1 : -1) * Math.ceil(laneIdx / 2) * 12;
+
+          const intermediateNodes = allNodeGeos.filter(
+            (n) => n !== src && n !== dst && n.y >= dst.y + dst.h - 5 && n.y + n.h <= src.y + 5
+          );
+
+          if (intermediateNodes.length > 0) {
+            const maxInterX = Math.max(...intermediateNodes.map((n) => n.x + n.w));
+            const minInterX = Math.min(...intermediateNodes.map((n) => n.x));
+            const bypassRight = maxInterX + 36;
+            const bypassLeft = minInterX - 36;
+            const bypassX = Math.abs(srcCx - bypassRight) <= Math.abs(srcCx - bypassLeft) ? bypassRight : bypassLeft;
+            const g1Y = Math.round(src.y - 16) - laneOffset;
+            const g2Y = Math.round(dst.y + dst.h + 16) + laneOffset;
+            waypoints.push({ x: srcCx, y: g1Y });
+            waypoints.push({ x: bypassX, y: g1Y });
+            waypoints.push({ x: bypassX, y: g2Y });
+            waypoints.push({ x: dstCx, y: g2Y });
+          } else {
+            const midY = Math.round((src.y + dst.y + dst.h) / 2) + laneOffset;
+            if (Math.abs(srcCx - dstCx) > 8) {
+              waypoints.push({ x: srcCx, y: midY });
+              waypoints.push({ x: dstCx, y: midY });
+            }
+          }
         }
       } else {
         if (dx >= 0) {
@@ -995,22 +1570,6 @@ export function routeEdges(
           exitPort = { x: 0, y: 0.5 };
           entryPort = { x: 1, y: 0.5 };
         }
-      }
-
-      const srcBot = Math.round(src.y + src.h);
-      const dstTop = Math.round(dst.y);
-
-      // Vertical tier progression (e.g. Edge → Compute, Compute → Data)
-      if (srcBot < dstTop - 15) {
-        const midY = Math.round((srcBot + dstTop) / 2);
-        if (Math.abs(Math.round(srcCx) - Math.round(dstCx)) > 8) {
-          waypoints.push({ x: Math.round(srcCx), y: midY });
-          waypoints.push({ x: Math.round(dstCx), y: midY });
-        }
-      }
-      // Horizontal flow in same band
-      else if (Math.abs(src.y - dst.y) < 40 && src.x + src.w < dst.x - 20) {
-        // Direct clean horizontal line
       }
     }
 
@@ -1065,17 +1624,39 @@ export function generateDiagramXml(
   return generateSingleDiagramXml(planOrPlans, sdkEvidence);
 }
 
-export function generateSingleDiagramXml(
+export interface DiagramNode {
+  id: string;
+  componentId: string;
+  serviceId: ServiceId;
+  label: string;
+  geo: { x: number; y: number; w: number; h: number };
+  parent: string;
+}
+
+export interface DiagramElements {
+  layout: DiagramLayout;
+  nodes: DiagramNode[];
+  routedEdges: RoutedEdge[];
+  consolidatedMappings: AwsServiceMapping[];
+  compIdRedirect: Record<string, string>;
+}
+
+/**
+ * Builds the geometric nodes and routed edges from a Stage 1 ServicePlan.
+ * Enforces semantic integrity:
+ * 1. Component mapping and deduplication preserve logical service identity.
+ * 2. Explicit relationships from Stage 1 are processed FIRST and take absolute precedence.
+ * 3. Inferred template edges never conflict with, invert, or duplicate explicit relationships.
+ * 4. Label collision shifting is bounded within parent container margins.
+ */
+export function buildDiagramElements(
   plan: ServicePlan,
   sdkEvidence?: SdkEvidence[] | null
-): string {
+): DiagramElements {
   const pattern = plan.detectedPattern ?? "generic";
-  const patternTitle = xmlAttr(
-    pattern
-      .split("-")
-      .map((w) => w[0].toUpperCase() + w.slice(1))
-      .join(" ")
-  );
+
+  // STRICT GROUNDING: Authoritative Stage 1 service set
+  const stage1ServiceIds = new Set<ServiceId>(plan.awsMappings.map((m) => m.serviceId));
 
   // 1. Deduplication pass: consolidate duplicate generic infrastructure within the same tier
   const compMap = new Map(plan.components.map((c) => [c.id, c]));
@@ -1084,6 +1665,9 @@ export function generateSingleDiagramXml(
   const seenServiceTiers = new Map<string, string>(); // tier:serviceId -> masterComponentId
 
   for (const m of plan.awsMappings) {
+    // Strictly reject any service that is not in the authoritative stage1ServiceIds
+    if (!stage1ServiceIds.has(m.serviceId)) continue;
+
     const tier = SERVICE_TIERS[m.serviceId] ?? "vpc_data";
     const comp = compMap.get(m.componentId);
     const hasCustomTech =
@@ -1102,36 +1686,73 @@ export function generateSingleDiagramXml(
     }
   }
 
+  // Ensure every serviceId in stage1ServiceIds has at least one entry in consolidatedMappings
+  for (const sId of stage1ServiceIds) {
+    if (!consolidatedMappings.some((m) => m.serviceId === sId)) {
+      const orig = plan.awsMappings.find((m) => m.serviceId === sId);
+      if (orig) {
+        consolidatedMappings.push(orig);
+        compIdRedirect[orig.componentId] = orig.componentId;
+      }
+    }
+  }
+
   // 2. Compute layout geometry with mathematical centering
   const layout = computeLayout(consolidatedMappings);
 
   // 3. Build node list
-  interface DiagramNode {
-    id: string;
-    componentId: string;
-    serviceId: ServiceId;
-    label: string;
-    geo: { x: number; y: number; w: number; h: number };
-    parent: string;
-  }
-
   const nodes: DiagramNode[] = [];
   const compIdToNodeId: Record<string, string> = {};
+  const serviceIdToNodeId: Record<string, string> = {};
   // INVARIANT: nodeAbsGeo stores ABSOLUTE canvas positions for each node,
-  // not parent-relative positions. This is critical for routeEdges() (Fix 4)
+  // not parent-relative positions. This is critical for routeEdges()
   // which needs to compute source/target direction across different container parents.
-  // The mxCell geometry uses parent-relative coords (node.geo), but edge routing
-  // always operates on nodeAbsGeo.
   const nodeAbsGeo: Record<string, { x: number; y: number; w: number; h: number }> = {};
   let nextId = 2; // mxGraph cells start at 2 (0=root, 1=layer)
 
   for (const mapping of consolidatedMappings) {
-    const placement = layout.nodes[mapping.componentId];
-    if (!placement) continue;
+    if (!stage1ServiceIds.has(mapping.serviceId)) continue;
+
+    let placement =
+      layout.nodes[`${mapping.componentId}_${mapping.serviceId}`] ??
+      layout.nodes[mapping.componentId];
+
+    if (placement && placement.serviceId !== mapping.serviceId && layout.nodes[`${mapping.componentId}_${mapping.serviceId}`]) {
+      placement = layout.nodes[`${mapping.componentId}_${mapping.serviceId}`];
+    }
+
+    if (!placement) {
+      placement = Object.values(layout.nodes).find((n) => n.serviceId === mapping.serviceId);
+    }
+
+    if (!placement) {
+      // Missing Service Protection:
+      // If layout failed to position a service mapping, assign a safe fallback placement
+      // so no Stage 1 service is ever silently dropped.
+      const tier = SERVICE_TIERS[mapping.serviceId] ?? "vpc_data";
+      const fallbackParentMap: Record<Tier, string> = {
+        edge: "container-edge",
+        vpc_public: "container-public_subnet",
+        vpc_compute: "container-compute_subnet",
+        vpc_data: "container-data_subnet",
+        cross_cutting: "container-cross_cutting",
+        external: "container-external",
+      };
+      const fallbackParent = fallbackParentMap[tier] ?? "container-data_subnet";
+      placement = {
+        x: MARGIN + PAD,
+        y: MARGIN + PAD,
+        parent: fallbackParent,
+        serviceId: mapping.serviceId,
+      };
+    }
 
     const parent = placement.parent;
     const nodeId = `node-${nextId++}`;
     compIdToNodeId[mapping.componentId] = nodeId;
+    if (!serviceIdToNodeId[mapping.serviceId]) {
+      serviceIdToNodeId[mapping.serviceId] = nodeId;
+    }
 
     // Relative to parent container
     const containerKey = parent.replace("container-", "") as ContainerKey;
@@ -1155,9 +1776,6 @@ export function generateSingleDiagramXml(
     let displayName = normalizeServiceName(mapping.serviceId);
     if (comp?.technology && comp.technology.toLowerCase() !== mapping.serviceId.toLowerCase()) {
       const cleanSub = comp.technology.replace(/^(AWS|Amazon)\s+/i, "");
-      // Use normalizeForComparison to detect redundant labels:
-      // e.g., "ALB" vs "Application Load Balancer (ALB)" → same after normalization
-      // e.g., "Secrets Manager" vs "AWS Secrets Manager" → same after normalization
       const normalizedSub = normalizeForComparison(cleanSub);
       const normalizedDisplay = normalizeForComparison(displayName);
       const isRedundant =
@@ -1189,12 +1807,59 @@ export function generateSingleDiagramXml(
     });
   }
 
-  // 3b. Label collision resolution pass (Fix 2A)
-  // After all nodes are placed, check that no two label bounding boxes overlap.
-  // Uses bounded iteration (max 5 attempts per node) with occupied-bbox tracking.
+  // Missing Service Protection:
+  // Ensure every service in stage1ServiceIds has at least one node
+  const renderedServiceIds = new Set<ServiceId>(nodes.map((n) => n.serviceId));
+  for (const expServiceId of stage1ServiceIds) {
+    if (!renderedServiceIds.has(expServiceId)) {
+      const missingMapping = plan.awsMappings.find((m) => m.serviceId === expServiceId);
+      if (missingMapping) {
+        const tier = SERVICE_TIERS[expServiceId] ?? "vpc_data";
+        const fallbackParentMap: Record<Tier, string> = {
+          edge: "container-edge",
+          vpc_public: "container-public_subnet",
+          vpc_compute: "container-compute_subnet",
+          vpc_data: "container-data_subnet",
+          cross_cutting: "container-cross_cutting",
+          external: "container-external",
+        };
+        const fallbackParent = fallbackParentMap[tier] ?? "container-data_subnet";
+        const nodeId = `node-${nextId++}`;
+        compIdToNodeId[missingMapping.componentId] = nodeId;
+        if (!serviceIdToNodeId[missingMapping.serviceId]) {
+          serviceIdToNodeId[missingMapping.serviceId] = nodeId;
+        }
+        nodeAbsGeo[nodeId] = {
+          x: MARGIN + PAD,
+          y: MARGIN + PAD,
+          w: ICON_SIZE,
+          h: ICON_SIZE,
+        };
+        nodes.push({
+          id: nodeId,
+          componentId: missingMapping.componentId,
+          serviceId: missingMapping.serviceId,
+          label: wrapServiceName(normalizeServiceName(missingMapping.serviceId)),
+          geo: {
+            x: PAD,
+            y: LABEL_H + PAD_TOP,
+            w: ICON_SIZE,
+            h: ICON_SIZE,
+          },
+          parent: fallbackParent,
+        });
+        renderedServiceIds.add(expServiceId);
+      }
+    }
+  }
+
+  // Strictly filter nodes so ONLY authoritative Stage 1 services are ever kept
+  const groundedNodes = nodes.filter((n) => stage1ServiceIds.has(n.serviceId));
+
+  // 3b. Label collision resolution pass (clamped to parent container bounds)
   {
     const occupiedBboxes: Rect[] = [];
-    for (const node of nodes) {
+    for (const node of groundedNodes) {
       const absGeo = nodeAbsGeo[node.id];
       if (!absGeo) continue;
 
@@ -1203,16 +1868,21 @@ export function generateSingleDiagramXml(
       let attempts = 0;
       const MAX_ATTEMPTS = 5;
 
+      const containerKey = node.parent.replace("container-", "") as ContainerKey;
+      const containerRect = layout.containers[containerKey];
+      const maxRelY = containerRect ? containerRect.h - PAD_BOTTOM - node.geo.h : Infinity;
+
       while (attempts < MAX_ATTEMPTS && occupiedBboxes.some((ob) => rectsCollide(bbox, ob))) {
-        // Shift node down by one cell slot
         const shift = CELL_H + GAP;
+        if (node.geo.y + shift > maxRelY) {
+          break; // Stop shifting if it would exceed parent container bounds
+        }
         absGeo.y += shift;
         node.geo.y += shift;
         bbox = labelBbox(absGeo.x, absGeo.y, lines);
         attempts++;
       }
 
-      // Register both the icon bbox and label bbox as occupied
       occupiedBboxes.push({ x: absGeo.x, y: absGeo.y, w: absGeo.w, h: absGeo.h });
       occupiedBboxes.push(bbox);
     }
@@ -1228,9 +1898,41 @@ export function generateSingleDiagramXml(
     flowStep?: number;
   }
   const rawEdges: RawEdge[] = [];
-  const edgeKeys = new Set<string>();
+  const edgeKeys = new Set<string>(); // "srcId->dstId"
+  const connectedPairs = new Set<string>(); // "minId<->maxId"
 
-  // Primary path flow extraction (skip async, monitoring, IaC)
+  // 4a. Explicit relationships from Stage 1 plan (Highest priority: solid, preserve exact direction)
+  for (const rel of plan.relationships ?? []) {
+    const mappedFrom = compIdRedirect[rel.from] ?? rel.from;
+    const mappedTo = compIdRedirect[rel.to] ?? rel.to;
+    const srcNodeId = compIdToNodeId[mappedFrom] ?? serviceIdToNodeId[rel.from];
+    const dstNodeId = compIdToNodeId[mappedTo] ?? serviceIdToNodeId[rel.to];
+
+    if (srcNodeId && dstNodeId) {
+      const srcExists = groundedNodes.some((n) => n.id === srcNodeId);
+      const dstExists = groundedNodes.some((n) => n.id === dstNodeId);
+      if (!srcExists || !dstExists) continue;
+
+      const forwardKey = `${srcNodeId}->${dstNodeId}`;
+      if (!edgeKeys.has(forwardKey)) {
+        rawEdges.push({
+          source: srcNodeId,
+          target: dstNodeId,
+          label: rel.type ?? "",
+          style: "solid",
+          tooltip: rel.type ?? undefined,
+        });
+        edgeKeys.add(forwardKey);
+        const pairKey = srcNodeId < dstNodeId ? `${srcNodeId}<->${dstNodeId}` : `${dstNodeId}<->${srcNodeId}`;
+        connectedPairs.add(pairKey);
+      }
+    }
+  }
+
+  // 4b. Template edges by pattern (Inferred topology: dashed unless confirmed by evidence; never conflict with explicit)
+  const templateEdgeDefs = PATTERN_EDGES[pattern] ?? PATTERN_EDGES.generic ?? [];
+  let primaryFlowCounter = 1;
+
   const ASYNC_SERVICES = new Set<ServiceId>(["SQS", "SNS", "EventBridge", "Kinesis"]);
   const MONITORING_IAC_SERVICES = new Set<ServiceId>(["CloudWatch", "CloudFormation", "CodePipeline", "ECR"]);
   const ASYNC_OR_IAC_LABELS = /fanout|trigger|consume|publish|pull image|deploy|monitor/i;
@@ -1242,21 +1944,23 @@ export function generateSingleDiagramXml(
     return true;
   }
 
-  // Template edges by pattern
-  const templateEdgeDefs = PATTERN_EDGES[pattern] ?? PATTERN_EDGES.generic ?? [];
-  let primaryFlowCounter = 1;
-
   for (const [srcService, dstService, label] of templateEdgeDefs) {
-    const srcNodes = nodes.filter((n) => n.serviceId === srcService);
-    const dstNodes = nodes.filter((n) => n.serviceId === dstService);
+    const srcNodes = groundedNodes.filter((n) => n.serviceId === srcService);
+    const dstNodes = groundedNodes.filter((n) => n.serviceId === dstService);
 
     const isPrimary = isPrimaryPathEdge(srcService, dstService, label);
 
     for (const srcNode of srcNodes) {
       for (const dstNode of dstNodes) {
         if (srcNode.id === dstNode.id) continue;
-        const key = `${srcNode.id}->${dstNode.id}`;
-        if (edgeKeys.has(key)) continue;
+        const forwardKey = `${srcNode.id}->${dstNode.id}`;
+        const reverseKey = `${dstNode.id}->${srcNode.id}`;
+        const pairKey = srcNode.id < dstNode.id ? `${srcNode.id}<->${dstNode.id}` : `${dstNode.id}<->${srcNode.id}`;
+
+        // Explicit relationships take priority: never overwrite, reverse, or duplicate
+        if (edgeKeys.has(forwardKey) || edgeKeys.has(reverseKey) || connectedPairs.has(pairKey)) {
+          continue;
+        }
 
         const srcMapping = consolidatedMappings.find((m) => m.componentId === srcNode.componentId);
         const dstMapping = consolidatedMappings.find((m) => m.componentId === dstNode.componentId);
@@ -1288,40 +1992,48 @@ export function generateSingleDiagramXml(
           tooltip: confirmed ? undefined : "inferred topology",
           flowStep,
         });
-        edgeKeys.add(key);
-      }
-    }
-  }
-
-  // Explicit relationships
-  for (const rel of plan.relationships ?? []) {
-    const mappedFrom = compIdRedirect[rel.from] ?? rel.from;
-    const mappedTo = compIdRedirect[rel.to] ?? rel.to;
-    const srcNodeId = compIdToNodeId[mappedFrom];
-    const dstNodeId = compIdToNodeId[mappedTo];
-
-    if (srcNodeId && dstNodeId) {
-      const key = `${srcNodeId}->${dstNodeId}`;
-      if (edgeKeys.has(key)) {
-        const existing = rawEdges.find((e) => e.source === srcNodeId && e.target === dstNodeId);
-        if (existing) {
-          existing.style = "solid";
-          if (rel.type) existing.label = rel.type;
-        }
-      } else {
-        rawEdges.push({
-          source: srcNodeId,
-          target: dstNodeId,
-          label: rel.type ?? "",
-          style: "solid",
-        });
-        edgeKeys.add(key);
+        edgeKeys.add(forwardKey);
+        connectedPairs.add(pairKey);
       }
     }
   }
 
   // 5. Route edges with collision avoidance and label staggering
   const routedEdges = routeEdges(rawEdges, nodeAbsGeo);
+
+  return {
+    layout,
+    nodes: groundedNodes,
+    routedEdges,
+    consolidatedMappings,
+    compIdRedirect,
+  };
+}
+
+/**
+ * Convenience helper to validate semantic integrity directly on a ServicePlan.
+ */
+export function validatePlanSemantics(
+  plan: ServicePlan,
+  sdkEvidence?: SdkEvidence[] | null
+): SemanticValidationResult {
+  const { nodes, routedEdges } = buildDiagramElements(plan, sdkEvidence);
+  return validateDiagramSemantics(plan, nodes, routedEdges);
+}
+
+export function generateSingleDiagramXml(
+  plan: ServicePlan,
+  sdkEvidence?: SdkEvidence[] | null
+): string {
+  const pattern = plan.detectedPattern ?? "generic";
+  const patternTitle = xmlAttr(
+    pattern
+      .split("-")
+      .map((w) => w[0].toUpperCase() + w.slice(1))
+      .join(" ")
+  );
+
+  const { layout, nodes, routedEdges } = buildDiagramElements(plan, sdkEvidence);
 
   // 6. Render mxGraph cells
   const cellsXml: string[] = [];
@@ -1372,27 +2084,14 @@ export function generateSingleDiagramXml(
     );
   }
 
-  // Nodes (AWS services)
-  for (const node of nodes) {
-    const style = nodeStyle(node.serviceId);
-    const label = xmlAttr(node.label);
-    cellsXml.push(
-      `    <mxCell id="${node.id}" value="${label}" serviceId="${node.serviceId}" style="${xmlAttr(style)}" ` +
-        `vertex="1" parent="${node.parent}">` +
-        `<mxGeometry x="${node.geo.x}" y="${node.geo.y}" ` +
-        `width="${node.geo.w}" height="${node.geo.h}" as="geometry"/>` +
-        `</mxCell>`
-    );
-  }
-
-  // Edges (Orthogonal with clear arrowheads and shielded label badges)
+  // Edges (Orthogonal with clear arrowheads, parallel lane separation, and shielded label badges)
   for (const edge of routedEdges) {
     const label = xmlAttr(edge.label);
     const portStyle = `exitX=${edge.exitPort.x};exitY=${edge.exitPort.y};exitDx=0;exitDy=0;entryX=${edge.entryPort.x};entryY=${edge.entryPort.y};entryDx=0;entryDy=0;`;
     const edgeStyle =
       edge.style === "dashed"
-        ? `edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;${portStyle}dashed=1;dashPattern=8 8;strokeColor=#6B7280;strokeWidth=1;`
-        : `edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;${portStyle}strokeColor=#232F3E;strokeWidth=1.5;`;
+        ? `edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;${portStyle}dashed=1;dashPattern=8 8;strokeColor=#6B7280;strokeWidth=1;labelBackgroundColor=#FFFFFF;spacing=4;`
+        : `edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;${portStyle}strokeColor=#232F3E;strokeWidth=1.5;labelBackgroundColor=#FFFFFF;spacing=4;`;
 
     const waypointsXml =
       edge.waypoints.length > 0
@@ -1411,8 +2110,10 @@ export function generateSingleDiagramXml(
         `      </mxGeometry>` +
         `</mxCell>`
     );
+  }
 
-    // Emit badges as mxGraph edge-child cells with relative="1" geometry
+  // Badges (flow numbers on primary edges - drawn after edges)
+  for (const edge of routedEdges) {
     if (edge.flowStep !== undefined) {
       const badgeStyle =
         "shape=ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=#232F3E;strokeColor=none;" +
@@ -1424,6 +2125,36 @@ export function generateSingleDiagramXml(
           `</mxCell>`
       );
     }
+  }
+
+  // Nodes (AWS services - drawn last so icons and labels sit cleanly in the foreground)
+  for (const node of nodes) {
+    const style = nodeStyle(node.serviceId);
+    const label = xmlAttr(node.label);
+    cellsXml.push(
+      `    <mxCell id="${node.id}" value="${label}" serviceId="${node.serviceId}" style="${xmlAttr(style)}" ` +
+        `vertex="1" parent="${node.parent}">` +
+        `<mxGeometry x="${node.geo.x}" y="${node.geo.y}" ` +
+        `width="${node.geo.w}" height="${node.geo.h}" as="geometry"/>` +
+        `</mxCell>`
+    );
+  }
+
+  // 7. Validate full semantics and layout
+  const semanticValidation = validateDiagramSemantics(plan, nodes, routedEdges);
+  if (!semanticValidation.valid) {
+    console.warn(
+      "Diagram semantic validation warnings in generateSingleDiagramXml:\n" +
+        semanticValidation.errors.join("\n")
+    );
+  }
+
+  const layoutValidation = validateDiagramLayout(layout, nodes);
+  if (!layoutValidation.valid) {
+    console.warn(
+      "Diagram layout validation warnings in generateSingleDiagramXml:\n" +
+        layoutValidation.errors.join("\n")
+    );
   }
 
   return [

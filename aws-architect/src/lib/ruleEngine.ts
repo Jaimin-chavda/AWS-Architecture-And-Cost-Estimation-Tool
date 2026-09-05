@@ -16,9 +16,10 @@ import type {
   ComponentRelationship,
   DeploymentModel,
   AwsServiceMapping,
+  MappingCategory,
 } from "./schema.ts";
 import type { ProjectProfile } from "./repoAnalyzer.ts";
-import type { PatternId } from "./architecture.ts";
+import { type PatternId, deduplicateAwsMappings } from "./architecture.ts";
 import { buildAlternateProposal } from "./patternAlternates.ts";
 
 // ---------------------------------------------------------------------------
@@ -44,7 +45,21 @@ export interface DetectedService {
   serviceId: ServiceId;
   confidence: ConfidenceTier;
   evidence: string;
+  category?: MappingCategory;
 }
+
+const CONFIDENCE_RANK: Record<ConfidenceTier, number> = {
+  high: 3,
+  medium: 2,
+  low: 1,
+};
+
+const CATEGORY_RANK: Record<MappingCategory, number> = {
+  "repository-evidence": 4,
+  "deployment-requirement": 3,
+  "inference": 2,
+  "recommendation": 1,
+};
 
 function hasAny(text: string, keywords: string[]): boolean {
   const lower = text.toLowerCase();
@@ -113,9 +128,35 @@ function detectServices(
   const hasDbConnectionString = /(?:postgres|postgresql|mysql|mariadb):\/\/|DATABASE_URL|DB_HOST|DB_PASSWORD|POSTGRES_USER|MYSQL_DATABASE|RDS_ENDPOINT/i.test(combined);
   const hasRedisConnectionString = /(?:redis|rediss):\/\/|REDIS_URL|REDIS_HOST|REDIS_PORT|CACHE_HOST/i.test(combined);
 
-  const add = (serviceId: ServiceId, confidence: ConfidenceTier, evidence: string) => {
-    if (detected.some((d) => d.serviceId === serviceId)) return;
-    detected.push({ serviceId, confidence, evidence: evidence.slice(0, 200) });
+  const add = (
+    serviceId: ServiceId,
+    confidence: ConfidenceTier,
+    evidence: string,
+    category?: MappingCategory
+  ) => {
+    const existing = detected.find((d) => d.serviceId === serviceId);
+    if (existing) {
+      if (CONFIDENCE_RANK[confidence] > CONFIDENCE_RANK[existing.confidence]) {
+        existing.confidence = confidence;
+      }
+      if (category && (!existing.category || CATEGORY_RANK[category] > CATEGORY_RANK[existing.category])) {
+        existing.category = category;
+      }
+      if (!existing.evidence.includes(evidence)) {
+        existing.evidence = `${existing.evidence}; ${evidence}`.slice(0, 200);
+      }
+      return;
+    }
+
+    const defaultCategory: MappingCategory =
+      category ?? (confidence === "high" ? "repository-evidence" : "inference");
+
+    detected.push({
+      serviceId,
+      confidence,
+      evidence: evidence.slice(0, 200),
+      category: defaultCategory,
+    });
   };
 
   // --- Compute ---
@@ -151,8 +192,8 @@ function detectServices(
 
   if (hasAny(combined, [" ecr ", "elastic container registry", "ecr.aws", "aws_ecr_repository", "aws::ecr::repository"])) {
     add("ECR", "high", "ECR reference detected");
-  } else if (dockerfileEv && (infraEvidence(profile, "github actions") || infraEvidence(profile, "codebuild"))) {
-    add("ECR", "medium", "Dockerfile + CI/CD pipeline → ECR for container image storage");
+  } else if ((detected.some((s) => s.serviceId === "ECS" || s.serviceId === "EKS")) && (dockerfileEv || k8sEv || infraEvidence(profile, "kubernetes") || infraEvidence(profile, "github actions") || infraEvidence(profile, "codebuild"))) {
+    add("ECR", "medium", "Container deployment on AWS (ECS/EKS) → ECR for container image storage");
   }
 
   // --- Storage ---
@@ -179,9 +220,13 @@ function detectServices(
     add("Aurora", "high", typeof auroraEv === "string" ? auroraEv : "Aurora reference in repository files");
   } else if (rdsSdkEv || hasAny(combined, ["aws::rds::dbinstance", "aws_db_instance"])) {
     add("RDS", "high", rdsSdkEv ? `RDS SDK client imported — ${rdsSdkEv}` : "Explicit RDS declaration in IaC/config");
-  } else if (postgresEv || mysqlEv || hasAny(combined, ["mysql", "postgres", "postgresql", "mariadb"])) {
+  } else if (postgresEv || mysqlEv || hasAny(combined, ["mysql", "postgres", "postgresql", "mariadb", "sql server", "sqlserver", "mssql"])) {
     const weakLabel = postgresEv ? `PostgreSQL (${postgresEv})` : mysqlEv ? `MySQL/MariaDB (${mysqlEv})` : "Relational database";
-    const hasOrm = hasAny(combined, ["prisma", "typeorm", "sequelize", "sqlalchemy", "knex", "hibernate", "django.db", "diesel", "gorm"]);
+    const hasOrm = hasAny(combined, [
+      "prisma", "typeorm", "sequelize", "sqlalchemy", "knex", "hibernate",
+      "django.db", "diesel", "gorm", "sqlx", "entityframework", "efcore",
+      "activerecord", "active_record", "eloquent", "spring-data", "rails"
+    ]);
     if (hasDbConnectionString || hasOrm) {
       const corroboration = hasDbConnectionString
         ? "corroborated by database connection configuration"
@@ -194,12 +239,13 @@ function detectServices(
 
   // ElastiCache / Redis
   const elastiCacheSdkEv = awsEvidence(profile, "elasticache");
-  const redisEv = dbEvidence(profile, "redis") || (hasAny(combined, ["redis", "ioredis", "memcached"]) ? "redis keyword" : null);
+  const redisEv = dbEvidence(profile, "redis") || (hasAny(combined, ["redis", "ioredis", "memcached", "predis"]) ? "redis keyword" : null);
   if (elastiCacheSdkEv || hasAny(combined, ["aws::elasticache::cachecluster", "aws_elasticache_cluster"])) {
     add("ElastiCache", "high", elastiCacheSdkEv ? `ElastiCache SDK imported — ${elastiCacheSdkEv}` : "Explicit ElastiCache declaration in IaC");
   } else if (redisEv) {
-    if (hasRedisConnectionString) {
-      add("ElastiCache", "medium", `Redis dependency detected — corroborated by connection config → ElastiCache Redis`);
+    const hasRedisWorkload = hasRedisConnectionString || hasAny(combined, ["sidekiq", "celery", "bull", "cache", "session"]);
+    if (hasRedisWorkload) {
+      add("ElastiCache", "medium", `Redis dependency detected — corroborated by caching/worker configuration → ElastiCache Redis`);
     } else if (!hasDocker) {
       add("ElastiCache", "low", "Redis reference detected without connection config — suggested ElastiCache");
     }
@@ -207,17 +253,17 @@ function detectServices(
 
   // --- Networking ---
   const apigwEv = awsEvidence(profile, "api gateway") || awsEvidence(profile, "apigateway");
-  if (apigwEv) add("APIGateway", "high", `API Gateway SDK usage — ${apigwEv}`);
-  else if (hasAny(combined, ["api gateway", "apigateway", "aws_api_gateway", "aws::apigateway::restapi", "httpapi", "restapi"])) {
-    add("APIGateway", "high", "API Gateway reference in repository files");
+  if (apigwEv) add("APIGateway", "high", `API Gateway SDK usage — ${apigwEv}`, "repository-evidence");
+  else if (hasAny(combined, ["api gateway", "apigateway", "aws_api_gateway", "aws::apigateway::restapi", "httpapi"])) {
+    add("APIGateway", "high", "API Gateway reference in repository files", "repository-evidence");
   }
 
   if (hasAny(combined, ["cloudfront", "cdn", "distribution", "aws_cloudfront_distribution", "aws::cloudfront::distribution"])) {
     add("CloudFront", "high", "CloudFront/CDN reference in repository files");
   }
 
-  if (hasAny(combined, ["alb", "application load balancer", "load balancer", "elb", "aws_lb", "aws::elasticloadbalancingv2::loadbalancer"])) {
-    add("ALB", "medium", "Load balancer reference in repository files");
+  if (hasAny(combined, ["alb", "application load balancer", "load balancer", "elb", "aws_lb", "aws::elasticloadbalancingv2::loadbalancer", "kind: ingress", "ingress.yaml", "ingress.yml"])) {
+    add("ALB", "medium", "Load balancer / Ingress reference in repository files");
   } else if (profile && profileHasInfra(profile, "docker") && !hasAny(combined, ["serverless", "lambda"])) {
     add("ALB", "low", "Containerised app pattern — ALB typically fronts ECS services");
   }
@@ -227,6 +273,11 @@ function detectServices(
   }
 
   // --- Messaging ---
+  const kafkaEv = awsEvidence(profile, "msk") || (hasAny(combined, ["kafka", "confluent", "spring-kafka"]) ? "Apache Kafka event streaming detected" : null);
+  if (kafkaEv) {
+    add("MSK", "high", typeof kafkaEv === "string" ? kafkaEv : "Kafka reference in repository files");
+  }
+
   const sqsEv = awsEvidence(profile, "sqs");
   if (sqsEv) add("SQS", "high", `SQS SDK client imported — ${sqsEv}`);
   else if (hasAny(combined, [" sqs ", "simple queue", "aws sqs", "aws_sqs_queue", "aws::sqs::queue"])) {
@@ -258,15 +309,36 @@ function detectServices(
     add("Kinesis", "high", "Kinesis reference in repository files");
   }
 
+  // --- Search ---
+  const searchEv = awsEvidence(profile, "opensearch") || (hasAny(combined, ["opensearch", "elasticsearch"]) ? "OpenSearch/Elasticsearch search engine detected" : null);
+  if (searchEv) {
+    add("OpenSearch", "high", typeof searchEv === "string" ? searchEv : "OpenSearch reference in repository files");
+  }
+
   // --- Auth ---
   const cognitoEv = awsEvidence(profile, "cognito");
   if (cognitoEv) add("Cognito", "high", `Cognito SDK client imported — ${cognitoEv}`);
   else if (hasAny(combined, ["cognito", "user pool", "identity pool", "aws_cognito_user_pool", "aws::cognito::userpool"])) {
     add("Cognito", "high", "Cognito reference in repository files");
+  } else if (hasAny(combined, ["keycloak"])) {
+    add("Cognito", "medium", "Managed service substitution: Keycloak identity provider → Amazon Cognito");
   }
 
   // --- ML ---
-  if (hasAny(combined, ["sagemaker", "training job", "inference endpoint", "aws_sagemaker_model"])) {
+  if (profile?.workloadClassification?.type === "ml-inference") {
+    add("SageMaker", "high", "Machine learning inference endpoint detected → Amazon SageMaker Endpoint");
+    if (!detected.some((s) => s.serviceId === "ALB")) {
+      add("ALB", "medium", "Load balancer for inference API traffic → ALB");
+    }
+    if (!detected.some((s) => s.serviceId === "S3")) {
+      add("S3", "medium", "Model weights and serialized artifact storage → S3");
+    }
+  } else if (profile?.workloadClassification?.type === "ml-training" || hasAny(combined, ["cnn", "tensorflow", "pytorch", "keras", "model training", "train.py"])) {
+    add("SageMaker", "high", "Machine learning model training detected → Amazon SageMaker");
+    if (!detected.some((s) => s.serviceId === "S3")) {
+      add("S3", "medium", "Dataset and model artifact storage → S3");
+    }
+  } else if (hasAny(combined, ["sagemaker", "training job", "inference endpoint", "aws_sagemaker_model"])) {
     add("SageMaker", "high", "SageMaker reference in repository files");
   }
   if (hasAny(combined, ["rekognition"])) add("Rekognition", "high", "Rekognition reference in repository files");
@@ -284,6 +356,9 @@ function detectServices(
     }
     if (!detected.some((s) => s.serviceId === "CloudFront")) {
       add("CloudFront", "medium", "Static site generator or hosting config present → CloudFront CDN in front of S3");
+    }
+    if (!detected.some((s) => s.serviceId === "Route53")) {
+      add("Route53", "medium", "DNS routing for custom domain → Route 53");
     }
   }
 
@@ -312,10 +387,53 @@ function detectServices(
           break;
         }
         case "cache": { if (!detected.some((s) => s.serviceId === "ElastiCache")) add("ElastiCache", dc.confidence, dcEv); break; }
-        case "queue": { if (!detected.some((s) => s.serviceId === "SQS")) add("SQS", dc.confidence, dcEv); break; }
+        case "queue": {
+          const tech = dc.technology.toLowerCase();
+          if (/kafka|confluent/.test(tech)) {
+            if (!detected.some((s) => s.serviceId === "MSK")) add("MSK", dc.confidence, dcEv);
+          } else {
+            if (!detected.some((s) => s.serviceId === "SQS")) add("SQS", dc.confidence, dcEv);
+          }
+          break;
+        }
+        case "messaging": {
+          const tech = dc.technology.toLowerCase();
+          if (/kafka|confluent/.test(tech)) {
+            if (!detected.some((s) => s.serviceId === "MSK")) add("MSK", dc.confidence, dcEv);
+          } else if (/kinesis/.test(tech)) {
+            if (!detected.some((s) => s.serviceId === "Kinesis")) add("Kinesis", dc.confidence, dcEv);
+          } else if (/sns/.test(tech)) {
+            if (!detected.some((s) => s.serviceId === "SNS")) add("SNS", dc.confidence, dcEv);
+          } else {
+            if (!detected.some((s) => s.serviceId === "SQS")) add("SQS", dc.confidence, dcEv);
+          }
+          break;
+        }
+        case "search": {
+          if (!detected.some((s) => s.serviceId === "OpenSearch")) add("OpenSearch", dc.confidence, dcEv);
+          break;
+        }
         case "api": {
-          if (dc.source === "serverless-yml" && !detected.some((s) => s.serviceId === "Lambda")) add("Lambda", dc.confidence, dcEv);
-          if (!detected.some((s) => s.serviceId === "APIGateway")) add("APIGateway", dc.confidence, dcEv);
+          if (dc.source === "serverless-yml" && !detected.some((s) => s.serviceId === "Lambda")) {
+            add("Lambda", dc.confidence, dcEv, "deployment-requirement");
+          }
+          if (dc.source === "serverless-yml" || /serverless|lambda/.test(dc.technology.toLowerCase())) {
+            if (!detected.some((s) => s.serviceId === "APIGateway")) {
+              add("APIGateway", dc.confidence, `${dcEv} → Serverless HTTP entry`, "deployment-requirement");
+            }
+          } else if (/apigateway|api gateway|httpapi|aws_api_gateway/.test(dc.technology.toLowerCase())) {
+            if (!detected.some((s) => s.serviceId === "APIGateway")) {
+              add("APIGateway", dc.confidence, dcEv, "repository-evidence");
+            }
+          } else {
+            // Framework or generic API alone does not prove APIGateway. Recommend ALB for ingress.
+            if (!detected.some((s) => s.serviceId === "ALB")) {
+              add("ALB", "medium", `${dcEv} → Ingress load balancer recommendation`, "recommendation");
+            }
+            if (!detected.some((s) => s.serviceId === "ECS") && !detected.some((s) => s.serviceId === "Lambda")) {
+              add("ECS", "medium", `${dcEv} → container host inference`, "inference");
+            }
+          }
           break;
         }
         case "worker": {
@@ -335,16 +453,16 @@ function detectServices(
         }
         case "storage": { if (!detected.some((s) => s.serviceId === "S3")) add("S3", dc.confidence, dcEv); break; }
         case "auth": { if (!detected.some((s) => s.serviceId === "Cognito")) add("Cognito", dc.confidence, dcEv); break; }
-        case "frontend": { if (!detected.some((s) => s.serviceId === "CloudFront")) add("CloudFront", "low", dcEv); break; }
+        case "frontend": { if (!detected.some((s) => s.serviceId === "CloudFront")) add("CloudFront", "medium", `${dcEv} → CloudFront CDN`, "deployment-requirement"); break; }
       }
     }
   }
 
   // --- Observability (gated behind active compute) ---
-  const COMPUTE_SERVICES: ServiceId[] = ["Lambda", "ECS", "EC2", "Fargate", "EKS", "Batch", "Lightsail"];
+  const COMPUTE_SERVICES: ServiceId[] = ["Lambda", "ECS", "EC2", "Fargate", "EKS", "Batch", "Lightsail", "SageMaker"];
   const hasActiveCompute = detected.some((s) => COMPUTE_SERVICES.includes(s.serviceId));
   if (hasActiveCompute && !detected.some((s) => s.serviceId === "CloudWatch")) {
-    add("CloudWatch", "medium", "CloudWatch monitoring for active compute services");
+    add("CloudWatch", "medium", "CloudWatch monitoring for active compute services", "recommendation");
   }
 
   return detected;
@@ -452,13 +570,15 @@ export function buildServicePlan(
   });
 
   // Build AWS mappings (1:1 with components)
-  const awsMappings: AwsServiceMapping[] = cappedServices.map((s) => ({
+  const rawAwsMappings: AwsServiceMapping[] = cappedServices.map((s) => ({
     componentId: `svc-${s.serviceId.toLowerCase()}`,
     serviceId: s.serviceId,
     confidence: s.confidence,
     evidence: s.evidence,
     fromPattern: false,
+    category: s.category ?? (s.confidence === "high" ? "repository-evidence" : "inference"),
   }));
+  const awsMappings = deduplicateAwsMappings(rawAwsMappings);
 
   const plan = {
     inputKind: input.inputKind,
@@ -500,11 +620,11 @@ function serviceTypeFromId(serviceId: ServiceId): DiscoveredComponent["type"] {
     S3: "object-storage", EBS: "object-storage", EFS: "object-storage", Glacier: "object-storage",
     RDS: "database", DynamoDB: "database", ElastiCache: "cache", Aurora: "database", Redshift: "database", DocumentDB: "database",
     CloudFront: "frontend", APIGateway: "api", ALB: "api", Route53: "api", VPC: "proxy", NATGateway: "proxy",
-    SQS: "queue", SNS: "messaging", EventBridge: "messaging", Kinesis: "messaging",
+    SQS: "queue", SNS: "messaging", EventBridge: "messaging", Kinesis: "messaging", MSK: "messaging",
     Cognito: "auth", SecretsManager: "auth",
     CloudWatch: "proxy", CodePipeline: "proxy", ECR: "proxy", CloudFormation: "proxy", WAF: "proxy",
     SageMaker: "backend", Rekognition: "backend", Comprehend: "backend",
-    SES: "messaging", Amplify: "frontend",
+    SES: "messaging", Amplify: "frontend", OpenSearch: "search",
   };
   return map[serviceId] ?? "external-service";
 }

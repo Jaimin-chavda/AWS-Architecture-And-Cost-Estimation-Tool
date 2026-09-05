@@ -30,7 +30,10 @@ import {
   type ComponentRelationship,
   type DeploymentModel,
   type AwsServiceMapping,
+  type MappingCategory,
+  type EvidenceRecord,
 } from "./schema.ts";
+import type { WorkloadClassification } from "./repoAnalyzer.ts";
 
 // ---------------------------------------------------------------------------
 // Architecture Model schema (LLM output)
@@ -93,27 +96,263 @@ function dedupeStrings(arr: string[]): string[] {
 }
 
 /**
+ * Enforces semantic compatibility between component technologies and AWS services.
+ * Rejects architecturally incompatible mappings (e.g. Kafka → SQS, OpenSearch → SageMaker, Keycloak → SecretsManager).
+ */
+export function isMappingCompatible(technology: string, serviceId: ServiceId): boolean {
+  const t = technology.toLowerCase();
+
+  // 1. Kafka / Confluent event streaming must NEVER map to SQS, Kinesis, SNS
+  if (/kafka|confluent/.test(t)) {
+    if (serviceId === "SQS" || serviceId === "Kinesis" || serviceId === "SNS") return false;
+  }
+
+  // 2. OpenSearch / Elasticsearch must NEVER map to SageMaker, RDS, DynamoDB, DocumentDB
+  if (/opensearch|elasticsearch/.test(t)) {
+    if (serviceId === "SageMaker" || serviceId === "RDS" || serviceId === "DynamoDB" || serviceId === "DocumentDB") return false;
+  }
+
+  // 3. Keycloak / Identity providers must NEVER map to SecretsManager or KMS
+  if (/keycloak|auth0|okta|cognito/.test(t)) {
+    if (serviceId === "SecretsManager" || (serviceId as string) === "KMS") return false;
+  }
+
+  // 4. Relational databases must NEVER map to DynamoDB or DocumentDB
+  if (/postgres|mysql|mariadb|sqlite|sql server|oracle/.test(t)) {
+    if (serviceId === "DynamoDB" || serviceId === "DocumentDB") return false;
+  }
+
+  // 5. MongoDB must NEVER map to RDS, Aurora, DynamoDB
+  if (/mongo|mongodb/.test(t)) {
+    if (serviceId === "RDS" || serviceId === "Aurora" || serviceId === "DynamoDB") return false;
+  }
+
+  // 6. Redis / In-memory caches must NEVER map to RDS, Aurora, DynamoDB, S3
+  if (/redis|memcached|valkey/.test(t)) {
+    if (serviceId === "RDS" || serviceId === "Aurora" || serviceId === "DynamoDB" || serviceId === "S3") return false;
+  }
+
+  // 7. Kubernetes / Helm manifests must NOT map to Lambda or Lightsail
+  if (/kubernetes|k8s|helm/.test(t)) {
+    if (serviceId === "Lambda" || serviceId === "Lightsail") return false;
+  }
+
+  // 8. ML training scripts / CNN / PyTorch model must NOT map to Lambda or static S3
+  if (/cnn|training|pytorch|tensorflow|keras/.test(t)) {
+    if (serviceId === "Lambda") return false;
+  }
+
+  // 9. Admin tools (pgAdmin, MailDev, Grafana) must NOT map to S3+CloudFront static hosting
+  if (/pgadmin|maildev|grafana|kibana|dashboard/.test(t)) {
+    if (serviceId === "S3" || serviceId === "CloudFront") return false;
+  }
+
+  // 10. Web / backend frameworks must NOT map directly to APIGateway without serverless / lambda / api gateway context
+  if (/\b(?:express|fastapi|flask|spring|django|rails|laravel|gin|axum|actix|aspnet|nest(?:\.js)?)\b/i.test(t)) {
+    if (serviceId === "APIGateway" && !/lambda|serverless|sam|apigateway|api gateway|httpapi/.test(t)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Verifies that a cited EvidenceRecord genuinely supports the claimed component technology and type.
+ * Prevents LLMs from citing irrelevant real files (e.g. citing pom.xml with only Spring Web to claim Lambda or DynamoDB).
+ */
+export function isEvidenceSupportingComponent(
+  record: EvidenceRecord,
+  compTech: string,
+  compType: ComponentType
+): boolean {
+  const recTech = (record.technology || "").toLowerCase();
+  const recDetail = record.detail.toLowerCase();
+  const recPath = record.sourcePath.toLowerCase();
+  const t = compTech.toLowerCase();
+
+  // If the record explicitly mentions the tech:
+  if (recTech && (recTech.includes(t) || t.includes(recTech))) return true;
+  if (recDetail.includes(t)) return true;
+
+  // Type-based and semantic capability checks:
+  // Container: Dockerfile, docker-compose, Jib supports Docker, container, backend, microservices, ECS
+  if (recPath.includes("dockerfile") || recDetail.includes("jib") || recDetail.includes("docker") || recTech === "docker") {
+    if (/docker|container|fargate|ecs|backend|api|worker|service|spring|node|express|fastapi|django|app/.test(t) || compType === "backend" || compType === "worker") {
+      if (/lambda|serverless/.test(t)) return false;
+      return true;
+    }
+  }
+
+  // Kubernetes manifests support Kubernetes, EKS, backend, api
+  if (recPath.includes("k8s") || recPath.includes("helm") || recDetail.includes("kubernetes") || recTech === "kubernetes") {
+    if (/kubernetes|k8s|eks|helm|backend|api|service/.test(t) || compType === "backend" || compType === "api") {
+      return true;
+    }
+  }
+
+  // Kafka / messaging
+  if (recDetail.includes("kafka") || recTech.includes("kafka")) {
+    if (/kafka|messaging|streaming|event/.test(t) || compType === "messaging" || compType === "queue") {
+      return true;
+    }
+  }
+
+  // OpenSearch / Elasticsearch
+  if (recDetail.includes("opensearch") || recDetail.includes("elasticsearch") || recTech.includes("opensearch")) {
+    if (/opensearch|elasticsearch|search/.test(t) || compType === "search") {
+      return true;
+    }
+  }
+
+  // Relational DB (Postgres, MySQL, MariaDB, SQLite)
+  if (
+    recDetail.includes("postgres") ||
+    recDetail.includes("mysql") ||
+    recDetail.includes("mariadb") ||
+    recDetail.includes("jpa") ||
+    recDetail.includes("hibernate") ||
+    recDetail.includes("r2dbc") ||
+    recDetail.includes("jdbc") ||
+    recTech.includes("postgres") ||
+    recTech.includes("mysql")
+  ) {
+    if (/postgres|mysql|mariadb|sqlite|sql|database|relational|rds|aurora/.test(t) || compType === "database") {
+      if (/dynamo|mongo/.test(t)) return false;
+      return true;
+    }
+  }
+
+  // MongoDB
+  if (recDetail.includes("mongo") || recTech.includes("mongo")) {
+    if (/mongo|documentdb|nosql/.test(t) || compType === "database") {
+      return true;
+    }
+  }
+
+  // Redis / Cache
+  if (recDetail.includes("redis") || recDetail.includes("memcached") || recTech.includes("redis")) {
+    if (/redis|memcached|cache|elasticache/.test(t) || compType === "cache") {
+      return true;
+    }
+  }
+
+  // Keycloak / Auth
+  if (recDetail.includes("keycloak") || recDetail.includes("security") || recDetail.includes("oauth") || recTech.includes("keycloak")) {
+    if (/keycloak|auth|oauth|security|cognito|identity/.test(t) || compType === "auth") {
+      return true;
+    }
+  }
+
+  // Web framework supports backend/api/frontend
+  if (
+    recDetail.includes("spring-boot") ||
+    recDetail.includes("spring-web") ||
+    recDetail.includes("express") ||
+    recDetail.includes("fastapi") ||
+    recDetail.includes("django") ||
+    recDetail.includes("flask") ||
+    recDetail.includes("next") ||
+    recDetail.includes("react") ||
+    recDetail.includes("vue")
+  ) {
+    if (compType === "backend" || compType === "api" || compType === "frontend") {
+      if (/lambda|serverless/.test(t) && !recDetail.includes("lambda") && !recDetail.includes("serverless")) {
+        return false;
+      }
+      return true;
+    }
+  }
+
+  // Machine Learning
+  if (
+    recDetail.includes("tensorflow") ||
+    recDetail.includes("pytorch") ||
+    recDetail.includes("keras") ||
+    recDetail.includes("sagemaker") ||
+    recDetail.includes("cnn") ||
+    recTech.includes("pytorch") ||
+    recTech.includes("tensorflow")
+  ) {
+    if (/ml|training|pytorch|tensorflow|keras|sagemaker|model|cnn/.test(t)) {
+      return true;
+    }
+  }
+
+  // S3 / object storage / file upload
+  if (recDetail.includes("s3") || recDetail.includes("upload") || recDetail.includes("multer") || recDetail.includes("fileupload")) {
+    if (/s3|storage|upload|bucket/.test(t) || compType === "object-storage") {
+      return true;
+    }
+  }
+
+  // Mail / SES
+  if (recDetail.includes("mail") || recDetail.includes("ses") || recDetail.includes("nodemailer") || recDetail.includes("smtp")) {
+    if (/mail|email|ses|smtp|notification/.test(t)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Normalizes a parsed architecture model.
  *
- * Drops any component with an empty `evidence` array. A component that cites
- * nothing is a guess, not an observation — the prompt forbids emitting one, and
- * this is the backstop for when the LLM does it anyway (the "static HTML repo
- * gets Lambda + API Gateway + DynamoDB" failure mode). Blank/whitespace-only
- * citations count as no evidence.
+ * Drops any component with an empty `evidence` array. If an `evidenceRegister` is
+ * provided, drops any citations that do not correspond to authentic evidence records,
+ * and drops any component whose evidence does not support its claimed technology.
  */
-export function normalizeArchitectureModel(model: ArchitectureModel): ArchitectureModel {
+export function normalizeArchitectureModel(
+  model: ArchitectureModel,
+  evidenceRegister?: EvidenceRecord[]
+): ArchitectureModel {
   const seenIds = new Set<string>();
+  const register = evidenceRegister && evidenceRegister.length > 0 ? evidenceRegister : null;
+
   const components = model.components.reduce<ArchitectureComponent[]>((acc, c) => {
     if (seenIds.has(c.id)) return acc;
-    const evidence = c.evidence.map((e) => e.trim()).filter((e) => e.length > 0);
+
+    let evidence = c.evidence.map((e) => e.trim()).filter((e) => e.length > 0);
+
+    if (register) {
+      evidence = evidence.filter((evStr) => {
+        const clean = evStr.trim().toLowerCase();
+
+        // 1. Direct ID match (e.g. "ev-1", "ev-12")
+        const matchById = register.find((r) => r.id.toLowerCase() === clean);
+        if (matchById) {
+          return isEvidenceSupportingComponent(matchById, c.technology, c.type);
+        }
+
+        // 2. Match by sourcePath, technology, or detail
+        const matchByContent = register.find((r) => {
+          const src = r.sourcePath.toLowerCase();
+          const tech = (r.technology || "").toLowerCase();
+          const detail = r.detail.toLowerCase();
+          return (
+            clean === src ||
+            clean.includes(src) ||
+            src.includes(clean) ||
+            (tech && (clean.includes(tech) || tech.includes(clean))) ||
+            (detail && clean.includes(detail))
+          );
+        });
+
+        if (matchByContent) {
+          return isEvidenceSupportingComponent(matchByContent, c.technology, c.type);
+        }
+
+        return false;
+      });
+    }
+
     if (evidence.length === 0) return acc;
     seenIds.add(c.id);
     acc.push({ ...c, evidence });
     return acc;
   }, []);
 
-  // Relationship endpoints resolve against the SURVIVING components, so an edge
-  // pointing at a dropped component is dropped with it.
   const ids = seenIds;
 
   return {
@@ -132,7 +371,10 @@ export function normalizeArchitectureModel(model: ArchitectureModel): Architectu
   };
 }
 
-export function validateArchitectureModel(raw: unknown): ArchitectureModel | null {
+export function validateArchitectureModel(
+  raw: unknown,
+  evidenceRegister?: EvidenceRecord[]
+): ArchitectureModel | null {
   const result = ArchitectureModelSchema.safeParse(raw);
   if (!result.success) {
     console.warn(
@@ -141,11 +383,8 @@ export function validateArchitectureModel(raw: unknown): ArchitectureModel | nul
     );
     return null;
   }
-  const model = normalizeArchitectureModel(result.data);
+  const model = normalizeArchitectureModel(result.data, evidenceRegister);
   if (model.components.length === 0) {
-    // Every component was an evidence-free guess. An empty model would render as
-    // pattern baselines with nothing behind them; the deterministic rule engine
-    // upstream is the better fallback, and it takes over when we return null.
     console.warn(
       "[architecture] every LLM component lacked evidence — discarding model, falling back to rules"
     );
@@ -159,122 +398,164 @@ export function validateArchitectureModel(raw: unknown): ArchitectureModel | nul
 // Pattern lookup table — used as SANITY CHECK only, never to constrain components
 // ---------------------------------------------------------------------------
 
-const COMPUTE_SERVICES: ServiceId[] = ["Lambda", "EC2", "ECS", "EKS", "Fargate", "Batch", "Lightsail"];
+const COMPUTE_SERVICES: ServiceId[] = ["Lambda", "EC2", "ECS", "EKS", "Fargate", "Batch", "Lightsail", "SageMaker"];
 
 // Pattern → expected services lookup (for UI label only)
 const PATTERN_SERVICE_LOOKUP: Record<PatternId, ServiceId[]> = {
   "static-site": ["S3", "CloudFront", "Route53"],
   "serverless-api": ["Lambda", "APIGateway", "DynamoDB", "SQS", "SNS", "Cognito"],
   "containerised-app": ["ECS", "ECR", "ALB", "RDS", "ElastiCache", "S3"],
-  "event-driven": ["Lambda", "SQS", "SNS", "EventBridge", "DynamoDB", "RDS"],
+  "event-driven": ["Lambda", "SQS", "SNS", "EventBridge", "DynamoDB", "RDS", "MSK"],
   "ml-pipeline": ["SageMaker", "S3", "Lambda", "ECS"],
-  "full-stack-web": ["CloudFront", "APIGateway", "ECS", "RDS", "ElastiCache", "S3", "Cognito"],
+  "full-stack-web": ["CloudFront", "ALB", "ECS", "RDS", "ElastiCache", "S3", "Cognito"],
   "data-pipeline": ["Kinesis", "S3", "Lambda", "Redshift"],
   "generic": [],
 };
 
 // Component type + technology → AWS service mapping
-function mapComponentToAws(c: ArchitectureComponent): AwsServiceMapping[] {
+function mapComponentToAws(
+  c: ArchitectureComponent,
+  context?: { workloadClassification?: WorkloadClassification }
+): AwsServiceMapping[] {
   const tech = `${c.name} ${c.technology} ${c.details ?? ""}`.toLowerCase();
   const ev = `component ${c.name} (${c.technology})`;
   const mappings: AwsServiceMapping[] = [];
 
   switch (c.type) {
     case "database":
-      if (/dynamo/.test(tech)) mappings.push({ componentId: c.id, serviceId: "DynamoDB", confidence: "high", evidence: ev, fromPattern: false });
-      else if (/mongo/.test(tech)) mappings.push({ componentId: c.id, serviceId: "DocumentDB", confidence: "high", evidence: ev, fromPattern: false });
-      else if (/redis|memcached/.test(tech)) mappings.push({ componentId: c.id, serviceId: "ElastiCache", confidence: "high", evidence: ev, fromPattern: false });
-      else if (/aurora/.test(tech)) mappings.push({ componentId: c.id, serviceId: "Aurora", confidence: "high", evidence: ev, fromPattern: false });
-      else mappings.push({ componentId: c.id, serviceId: "RDS", confidence: "high", evidence: ev, fromPattern: false });
-      break;
-
-    case "cache":
-      mappings.push({ componentId: c.id, serviceId: "ElastiCache", confidence: "high", evidence: ev, fromPattern: false });
-      break;
-
-    case "queue":
-      mappings.push({ componentId: c.id, serviceId: "SQS", confidence: "high", evidence: ev, fromPattern: false });
-      break;
-
-    case "object-storage":
-      mappings.push({ componentId: c.id, serviceId: "S3", confidence: "high", evidence: ev, fromPattern: false });
-      break;
-
-    case "search":
-      mappings.push({ componentId: c.id, serviceId: "SageMaker", confidence: "medium", evidence: ev, fromPattern: false }); // OpenSearch not in catalog
-      break;
-
-    case "auth":
-      if (/secrets|key|vault|jwt/.test(tech)) {
-        mappings.push({ componentId: c.id, serviceId: "SecretsManager", confidence: "high", evidence: ev, fromPattern: false });
+      if (/dynamo/.test(tech)) {
+        mappings.push({ componentId: c.id, serviceId: "DynamoDB", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
+      } else if (/mongo/.test(tech)) {
+        mappings.push({ componentId: c.id, serviceId: "DocumentDB", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
+      } else if (/redis|memcached|valkey/.test(tech)) {
+        mappings.push({ componentId: c.id, serviceId: "ElastiCache", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
+      } else if (/aurora/.test(tech)) {
+        mappings.push({ componentId: c.id, serviceId: "Aurora", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
       } else {
-        mappings.push({ componentId: c.id, serviceId: "Cognito", confidence: "high", evidence: ev, fromPattern: false });
+        mappings.push({ componentId: c.id, serviceId: "RDS", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
       }
       break;
 
+    case "cache":
+      mappings.push({ componentId: c.id, serviceId: "ElastiCache", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
+      break;
+
+    case "queue":
     case "messaging":
-      if (/sns|notification/.test(tech)) mappings.push({ componentId: c.id, serviceId: "SNS", confidence: "high", evidence: ev, fromPattern: false });
-      else if (/eventbridge|event.bus/.test(tech)) mappings.push({ componentId: c.id, serviceId: "EventBridge", confidence: "high", evidence: ev, fromPattern: false });
-      else if (/kinesis|stream/.test(tech)) mappings.push({ componentId: c.id, serviceId: "Kinesis", confidence: "high", evidence: ev, fromPattern: false });
-      else mappings.push({ componentId: c.id, serviceId: "SQS", confidence: "high", evidence: ev, fromPattern: false });
+      if (/kafka|confluent/.test(tech)) {
+        mappings.push({ componentId: c.id, serviceId: "MSK", confidence: "high", evidence: `${ev} → Amazon MSK (Managed Streaming for Kafka)`, fromPattern: false, category: "repository-evidence" });
+      } else if (/kinesis/.test(tech)) {
+        mappings.push({ componentId: c.id, serviceId: "Kinesis", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
+      } else if (/sns|notification/.test(tech)) {
+        mappings.push({ componentId: c.id, serviceId: "SNS", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
+      } else if (/eventbridge|event.bus/.test(tech)) {
+        mappings.push({ componentId: c.id, serviceId: "EventBridge", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
+      } else {
+        mappings.push({ componentId: c.id, serviceId: "SQS", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
+      }
+      break;
+
+    case "object-storage":
+      mappings.push({ componentId: c.id, serviceId: "S3", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
+      break;
+
+    case "search":
+      mappings.push({ componentId: c.id, serviceId: "OpenSearch", confidence: "high", evidence: `${ev} → Amazon OpenSearch Service`, fromPattern: false, category: "repository-evidence" });
+      break;
+
+    case "auth":
+      if (/keycloak|auth0|okta|cognito|identity|oauth/.test(tech)) {
+        mappings.push({ componentId: c.id, serviceId: "Cognito", confidence: "high", evidence: `${ev} → Amazon Cognito`, fromPattern: false, category: "repository-evidence" });
+      } else if (/secrets|vault|credentials|\bkms\b/.test(tech)) {
+        mappings.push({ componentId: c.id, serviceId: "SecretsManager", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
+      } else {
+        mappings.push({ componentId: c.id, serviceId: "Cognito", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
+      }
       break;
 
     case "frontend":
       mappings.push(
-        { componentId: c.id, serviceId: "S3", confidence: "high", evidence: `${ev} → static assets`, fromPattern: false },
-        { componentId: c.id, serviceId: "CloudFront", confidence: "high", evidence: `${ev} → CDN`, fromPattern: false }
+        { componentId: c.id, serviceId: "S3", confidence: "high", evidence: `${ev} → static assets`, fromPattern: false, category: "repository-evidence" },
+        { componentId: c.id, serviceId: "CloudFront", confidence: "high", evidence: `${ev} → CDN`, fromPattern: false, category: "deployment-requirement" }
       );
       break;
 
     case "backend":
-      if (/serverless|lambda/.test(tech)) {
-        mappings.push(
-          { componentId: c.id, serviceId: "Lambda", confidence: "high", evidence: ev, fromPattern: false },
-          { componentId: c.id, serviceId: "APIGateway", confidence: "medium", evidence: `${ev} → HTTP entry`, fromPattern: false }
-        );
-      } else if (/container|docker|kubernetes|k8s|ecs|fargate|eks/.test(tech)) {
-        mappings.push({ componentId: c.id, serviceId: "ECS", confidence: "high", evidence: ev, fromPattern: false });
-      } else if (/ec2|virtual machine|vm|instance/.test(tech)) {
-        mappings.push({ componentId: c.id, serviceId: "EC2", confidence: "high", evidence: ev, fromPattern: false });
-      } else {
-        mappings.push({ componentId: c.id, serviceId: "ECS", confidence: "medium", evidence: `${ev} (Fargate container host)`, fromPattern: false });
-      }
-      break;
-
     case "worker":
-      if (/serverless|lambda/.test(tech)) {
-        mappings.push({ componentId: c.id, serviceId: "Lambda", confidence: "high", evidence: ev, fromPattern: false });
+      if (context?.workloadClassification?.type === "ml-training" || /cnn|training|tensorflow|pytorch|keras|deep learning|machine learning/.test(tech)) {
+        mappings.push({ componentId: c.id, serviceId: "SageMaker", confidence: "high", evidence: `${ev} → Amazon SageMaker (ML training)`, fromPattern: false, category: "repository-evidence" });
+      } else if (/serverless|lambda/.test(tech)) {
+        mappings.push(
+          { componentId: c.id, serviceId: "Lambda", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" },
+          { componentId: c.id, serviceId: "APIGateway", confidence: "medium", evidence: `${ev} → HTTP entry`, fromPattern: false, category: "deployment-requirement" }
+        );
+      } else if (/kubernetes|k8s|helm/.test(tech)) {
+        mappings.push(
+          { componentId: c.id, serviceId: "EKS", confidence: "high", evidence: `${ev} → Amazon EKS`, fromPattern: false, category: "repository-evidence" },
+          { componentId: c.id, serviceId: "ECR", confidence: "medium", evidence: `${ev} → container image registry`, fromPattern: false, category: "deployment-requirement" }
+        );
+      } else if (/container|docker|jib|ecs|fargate/.test(tech)) {
+        mappings.push(
+          { componentId: c.id, serviceId: "ECS", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" },
+          { componentId: c.id, serviceId: "ECR", confidence: "medium", evidence: `${ev} → container image registry`, fromPattern: false, category: "deployment-requirement" }
+        );
+      } else if (/ec2|virtual machine|vm|instance/.test(tech)) {
+        mappings.push({ componentId: c.id, serviceId: "EC2", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
       } else {
-        mappings.push({ componentId: c.id, serviceId: "ECS", confidence: "medium", evidence: ev, fromPattern: false });
+        mappings.push({ componentId: c.id, serviceId: "ECS", confidence: "medium", evidence: `${ev} (Fargate container host)`, fromPattern: false, category: "inference" });
       }
       break;
 
     case "scheduler":
       if (/serverless|lambda/.test(tech)) {
         mappings.push(
-          { componentId: c.id, serviceId: "Lambda", confidence: "high", evidence: ev, fromPattern: false },
-          { componentId: c.id, serviceId: "EventBridge", confidence: "medium", evidence: `${ev} → schedule trigger`, fromPattern: false }
+          { componentId: c.id, serviceId: "Lambda", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" },
+          { componentId: c.id, serviceId: "EventBridge", confidence: "medium", evidence: `${ev} → schedule trigger`, fromPattern: false, category: "deployment-requirement" }
         );
       } else {
         mappings.push(
-          { componentId: c.id, serviceId: "ECS", confidence: "medium", evidence: ev, fromPattern: false },
-          { componentId: c.id, serviceId: "EventBridge", confidence: "medium", evidence: `${ev} → schedule trigger`, fromPattern: false }
+          { componentId: c.id, serviceId: "ECS", confidence: "medium", evidence: ev, fromPattern: false, category: "inference" },
+          { componentId: c.id, serviceId: "EventBridge", confidence: "medium", evidence: `${ev} → schedule trigger`, fromPattern: false, category: "deployment-requirement" }
         );
       }
       break;
 
     case "api":
-      if (/alb|load balancer/.test(tech)) {
-        mappings.push({ componentId: c.id, serviceId: "ALB", confidence: "high", evidence: ev, fromPattern: false });
+      if (/alb|load balancer|ingress/.test(tech)) {
+        mappings.push({ componentId: c.id, serviceId: "ALB", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
+      } else if (/apigateway|api gateway|httpapi|aws_api_gateway/.test(tech)) {
+        mappings.push({ componentId: c.id, serviceId: "APIGateway", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
+      } else if (/serverless|lambda/.test(tech)) {
+        mappings.push(
+          { componentId: c.id, serviceId: "Lambda", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" },
+          { componentId: c.id, serviceId: "APIGateway", confidence: "medium", evidence: `${ev} → Serverless HTTP entry`, fromPattern: false, category: "deployment-requirement" }
+        );
+      } else if (/kubernetes|k8s|helm/.test(tech)) {
+        mappings.push(
+          { componentId: c.id, serviceId: "EKS", confidence: "high", evidence: `${ev} → Amazon EKS`, fromPattern: false, category: "repository-evidence" },
+          { componentId: c.id, serviceId: "ECR", confidence: "medium", evidence: `${ev} → container image registry`, fromPattern: false, category: "deployment-requirement" },
+          { componentId: c.id, serviceId: "ALB", confidence: "medium", evidence: `${ev} → Ingress load balancer`, fromPattern: false, category: "recommendation" }
+        );
+      } else if (/container|docker|jib|ecs|fargate/.test(tech)) {
+        mappings.push(
+          { componentId: c.id, serviceId: "ECS", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" },
+          { componentId: c.id, serviceId: "ECR", confidence: "medium", evidence: `${ev} → container image registry`, fromPattern: false, category: "deployment-requirement" },
+          { componentId: c.id, serviceId: "ALB", confidence: "medium", evidence: `${ev} → Ingress load balancer`, fromPattern: false, category: "recommendation" }
+        );
       } else {
-        mappings.push({ componentId: c.id, serviceId: "APIGateway", confidence: "high", evidence: ev, fromPattern: false });
+        // Framework API alone (Express, FastAPI, Flask, Spring Boot, etc.) does NOT prove API Gateway.
+        // Ingress recommended as ALB, compute inferred as managed container host.
+        mappings.push(
+          { componentId: c.id, serviceId: "ECS", confidence: "medium", evidence: `${ev} (managed container compute)`, fromPattern: false, category: "inference" },
+          { componentId: c.id, serviceId: "ALB", confidence: "medium", evidence: `${ev} → Application Load Balancer recommendation`, fromPattern: false, category: "recommendation" }
+        );
       }
       break;
 
     case "proxy":
-      if (/route ?53|dns/.test(tech)) mappings.push({ componentId: c.id, serviceId: "Route53", confidence: "high", evidence: ev, fromPattern: false });
-      else if (/alb|load balancer/.test(tech)) mappings.push({ componentId: c.id, serviceId: "ALB", confidence: "high", evidence: ev, fromPattern: false });
-      else if (/waf|firewall/.test(tech)) mappings.push({ componentId: c.id, serviceId: "WAF", confidence: "high", evidence: ev, fromPattern: false });
+      if (/route ?53|dns/.test(tech)) mappings.push({ componentId: c.id, serviceId: "Route53", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
+      else if (/alb|load balancer/.test(tech)) mappings.push({ componentId: c.id, serviceId: "ALB", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
+      else if (/waf|firewall/.test(tech)) mappings.push({ componentId: c.id, serviceId: "WAF", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
       break;
 
     case "external-service":
@@ -282,71 +563,249 @@ function mapComponentToAws(c: ArchitectureComponent): AwsServiceMapping[] {
       break;
   }
 
-  return mappings;
+  return mappings.filter((m) => isMappingCompatible(c.technology, m.serviceId));
 }
 
 // Additional mappings from structured lists
-function mapListTechnologies(model: ArchitectureModel, existing: Map<string, ServiceId>): AwsServiceMapping[] {
+function mapListTechnologies(model: ArchitectureModel, alreadyMapped: AwsServiceMapping[]): AwsServiceMapping[] {
   const mappings: AwsServiceMapping[] = [];
   const listText = [
     ...model.databases,
     ...model.frameworks,
     ...model.buildConfig,
     ...model.languages,
+    ...model.dependencies,
   ].join(" ").toLowerCase();
 
-  const hasService = (s: ServiceId) => Array.from(existing.values()).includes(s);
+  const hasService = (s: ServiceId) =>
+    alreadyMapped.some((m) => m.serviceId === s) || mappings.some((m) => m.serviceId === s);
   const add = (service: ServiceId, confidence: ConfidenceTier, evidence: string) => {
     if (hasService(service)) return;
     const pseudoId = `list-${service.toLowerCase()}`;
-    mappings.push({ componentId: pseudoId, serviceId: service, confidence, evidence, fromPattern: false });
+    mappings.push({
+      componentId: pseudoId,
+      serviceId: service,
+      confidence,
+      evidence,
+      fromPattern: false,
+      category: "inference",
+    });
   };
 
   if (/dynamo/.test(listText)) add("DynamoDB", "medium", "DynamoDB listed in model");
   if (/mongo/.test(listText)) add("DocumentDB", "medium", "MongoDB listed in model");
-  if (/redis|memcached/.test(listText)) add("ElastiCache", "medium", "Redis/cache listed in model");
+  if (/redis|memcached|valkey/.test(listText)) add("ElastiCache", "medium", "Redis/cache listed in model");
   if (/aurora/.test(listText)) add("Aurora", "medium", "Aurora listed in model");
   if (/(postgres|postgresql|mysql|mariadb|sql)/.test(listText) && !hasService("RDS") && !hasService("Aurora")) {
     add("RDS", "medium", "relational database listed in model");
   }
-  if (/(sagemaker|tensorflow|pytorch|scikit|huggingface|transformers)/.test(listText)) {
+  if (/kafka|confluent/.test(listText) && !hasService("MSK")) {
+    add("MSK", "medium", "Kafka event streaming listed in model");
+  }
+  if (/(opensearch|elasticsearch)/.test(listText) && !hasService("OpenSearch")) {
+    add("OpenSearch", "medium", "OpenSearch/Elasticsearch listed in model");
+  }
+  if (/(kubernetes|k8s|helm)/.test(listText) && !hasService("EKS")) {
+    add("EKS", "medium", "Kubernetes listed in model");
+  }
+  if (/(sagemaker|tensorflow|pytorch|scikit|huggingface|transformers|cnn)/.test(listText) && !hasService("SageMaker")) {
     add("SageMaker", "medium", "ML framework/model training listed in model");
   }
-  if (/(s3|bucket|object storage)/.test(listText)) add("S3", "medium", "object storage referenced in model");
+  if (/(s3|bucket|object storage)/.test(listText) && !hasService("S3")) {
+    add("S3", "medium", "object storage referenced in model");
+  }
 
-  return mappings;
+  return mappings.filter((m) => isMappingCompatible(listText, m.serviceId));
 }
 
 // Pattern baselines — ensures complete enterprise cloud blueprint
-function applyPatternBaselines(model: ArchitectureModel, existing: Map<string, ServiceId>): AwsServiceMapping[] {
+function applyPatternBaselines(
+  model: ArchitectureModel,
+  alreadyMapped: AwsServiceMapping[],
+  workloadClassification?: WorkloadClassification
+): AwsServiceMapping[] {
   const mappings: AwsServiceMapping[] = [];
-  const hasService = (s: ServiceId) => Array.from(existing.values()).includes(s);
-  const add = (service: ServiceId, confidence: ConfidenceTier, evidence: string) => {
+  const hasService = (s: ServiceId) =>
+    alreadyMapped.some((m) => m.serviceId === s) || mappings.some((m) => m.serviceId === s);
+  const add = (
+    service: ServiceId,
+    confidence: ConfidenceTier,
+    evidence: string,
+    category: MappingCategory = "recommendation"
+  ) => {
     if (hasService(service)) return;
-    mappings.push({ componentId: `pattern-${service.toLowerCase()}`, serviceId: service, confidence, evidence, fromPattern: true });
+    const cappedConfidence: ConfidenceTier = confidence === "high" ? "medium" : confidence;
+    mappings.push({
+      componentId: `pattern-${service.toLowerCase()}`,
+      serviceId: service,
+      confidence: cappedConfidence,
+      evidence,
+      fromPattern: true,
+      category,
+    });
   };
 
-  // 1. Edge & DNS Ingress for Web/API workloads
-  add("Route53", "medium", "Route 53 DNS routing for web domain");
+  const isMlTraining = workloadClassification?.type === "ml-training";
+  const isMlInference = workloadClassification?.type === "ml-inference";
+  const isStaticSite = workloadClassification?.type === "static-frontend";
+
+  if (isMlTraining) {
+    if (!COMPUTE_SERVICES.some((s) => hasService(s))) {
+      add("SageMaker", "medium", "SageMaker ML training instance", "inference");
+    }
+    add("S3", "medium", "S3 bucket for training datasets, checkpoints, and model weights", "recommendation");
+    add("CloudWatch", "medium", "CloudWatch logging and metrics for training jobs", "recommendation");
+    add("CloudFormation", "low", "CloudFormation infrastructure definition", "recommendation");
+    return mappings;
+  }
+
+  if (isMlInference) {
+    if (!COMPUTE_SERVICES.some((s) => hasService(s))) {
+      add("SageMaker", "medium", "SageMaker real-time inference endpoint or container compute", "inference");
+    }
+    add("ALB", "medium", "Application Load Balancer for routing API requests to model endpoints", "recommendation");
+    add("S3", "medium", "S3 bucket for serialized model weights and artifacts", "recommendation");
+    add("CloudWatch", "medium", "CloudWatch logging and metrics for inference endpoint", "recommendation");
+    add("CloudFormation", "low", "CloudFormation infrastructure definition", "recommendation");
+    return mappings;
+  }
+
+  if (isStaticSite) {
+    add("Route53", "medium", "Route 53 DNS routing for web domain", "recommendation");
+    add("CloudFront", "medium", "CloudFront CDN edge distribution", "recommendation");
+    add("S3", "medium", "S3 static asset storage & hosting", "recommendation");
+    add("CloudWatch", "low", "CloudWatch metrics for CloudFront", "recommendation");
+    add("CloudFormation", "low", "CloudFormation infrastructure definition", "recommendation");
+    return mappings;
+  }
+
+  // Standard web / API / microservices blueprint:
+  // 1. Edge & DNS Ingress
+  add("Route53", "medium", "Route 53 DNS routing for web domain", "recommendation");
   if (model.components.some((c) => c.type === "frontend" || /react|vue|angular|svelte|next|static/i.test(c.technology))) {
-    add("CloudFront", "high", "CloudFront CDN edge distribution");
-    add("S3", "high", "S3 static asset storage & hosting");
+    add("CloudFront", "medium", "CloudFront CDN edge distribution", "recommendation");
+    add("S3", "medium", "S3 static asset storage & hosting", "recommendation");
   }
 
   // 2. Ingress & Compute
   if (model.components.some((c) => c.type === "backend" || c.type === "api")) {
-    add("ALB", "medium", "Application Load Balancer for public ingress");
+    add("ALB", "medium", "Application Load Balancer for public ingress", "recommendation");
   }
   if (!COMPUTE_SERVICES.some((s) => hasService(s))) {
-    add("ECS", "high", "ECS Fargate managed container host");
+    add("ECS", "medium", "ECS Fargate managed container host", "inference");
   }
 
   // 3. Observability, Security & IaC
-  add("CloudWatch", "high", "CloudWatch logging, alarms, and performance metrics");
-  add("SecretsManager", "medium", "Secrets Manager for environment variables and cryptographic keys");
-  add("CloudFormation", "low", "CloudFormation / CDK infrastructure definition");
+  add("CloudWatch", "medium", "CloudWatch logging, alarms, and performance metrics", "recommendation");
+  add("SecretsManager", "medium", "Secrets Manager for environment variables and cryptographic keys", "recommendation");
+  add("CloudFormation", "low", "CloudFormation / CDK infrastructure definition", "recommendation");
 
   return mappings;
+}
+
+// ---------------------------------------------------------------------------
+// AWS Service Deduplication & Provenance Merging
+// ---------------------------------------------------------------------------
+
+const CONFIDENCE_RANK: Record<ConfidenceTier, number> = {
+  high: 3,
+  medium: 2,
+  low: 1,
+};
+
+const CATEGORY_RANK: Record<MappingCategory, number> = {
+  "repository-evidence": 4,
+  "deployment-requirement": 3,
+  "inference": 2,
+  "recommendation": 1,
+};
+
+/**
+ * Merges multiple AwsServiceMapping entries for the same AWS serviceId into one logical service.
+ * Preserves all applicable provenance and evidence from all contributing sources.
+ */
+export function deduplicateAwsMappings(mappings: AwsServiceMapping[]): AwsServiceMapping[] {
+  const byService = new Map<ServiceId, AwsServiceMapping[]>();
+
+  for (const m of mappings) {
+    const list = byService.get(m.serviceId) || [];
+    list.push(m);
+    byService.set(m.serviceId, list);
+  }
+
+  const result: AwsServiceMapping[] = [];
+
+  for (const [serviceId, list] of byService.entries()) {
+    if (list.length === 1) {
+      result.push(list[0]);
+      continue;
+    }
+
+    // 1. Highest confidence
+    let highestConf: ConfidenceTier = "low";
+    for (const item of list) {
+      if (CONFIDENCE_RANK[item.confidence] > CONFIDENCE_RANK[highestConf]) {
+        highestConf = item.confidence;
+      }
+    }
+
+    // 2. Highest category
+    let highestCat: MappingCategory | undefined = undefined;
+    for (const item of list) {
+      if (item.category) {
+        if (!highestCat || CATEGORY_RANK[item.category] > CATEGORY_RANK[highestCat]) {
+          highestCat = item.category;
+        }
+      }
+    }
+
+    // 3. Combine unique evidence fragments
+    const evidenceSet = new Set<string>();
+    for (const item of list) {
+      if (item.evidence) {
+        const segments = item.evidence.split(";").map((s) => s.trim()).filter(Boolean);
+        for (const seg of segments) {
+          if (!Array.from(evidenceSet).some((existing) => existing.toLowerCase() === seg.toLowerCase())) {
+            evidenceSet.add(seg);
+          }
+        }
+      }
+    }
+    const combinedEvidence = Array.from(evidenceSet).join("; ").slice(0, 200);
+
+    // 4. fromPattern is true ONLY if ALL sources were fromPattern
+    const allFromPattern = list.every((item) => item.fromPattern === true);
+
+    // 5. Select best componentId (prefer real component ID over pattern- or list- or svc-)
+    const isGenericId = (id: string) =>
+      id.startsWith("pattern-") || id.startsWith("list-") || id.startsWith("svc-") || id === "fallback";
+
+    let bestComponentId = list[0].componentId;
+    for (const item of list) {
+      if (!isGenericId(item.componentId)) {
+        bestComponentId = item.componentId;
+        break;
+      }
+    }
+    if (isGenericId(bestComponentId)) {
+      const preferred =
+        list.find((i) => i.componentId.startsWith("svc-")) ||
+        list.find((i) => i.componentId.startsWith("list-")) ||
+        list[0];
+      bestComponentId = preferred.componentId;
+    }
+
+    result.push({
+      componentId: bestComponentId,
+      serviceId,
+      confidence: highestConf,
+      evidence: combinedEvidence || `${serviceId} mapped from architecture analysis`,
+      fromPattern: allFromPattern,
+      category: highestCat,
+    });
+  }
+
+  return result;
 }
 
 function detectPatternFromComponents(components: ArchitectureComponent[]): PatternId {
@@ -373,6 +832,8 @@ export interface ModelContext {
   grounding: Grounding;
   truncated: boolean;
   parseErrors: string[];
+  workloadClassification?: WorkloadClassification;
+  evidenceRegister?: EvidenceRecord[];
 }
 
 export function mapArchitectureModelToServicePlan(
@@ -384,7 +845,7 @@ export function mapArchitectureModelToServicePlan(
 
   // 1. Map each discovered component to AWS services
   for (const c of model.components) {
-    const mapped = mapComponentToAws(c);
+    const mapped = mapComponentToAws(c, { workloadClassification: ctx.workloadClassification });
     for (const m of mapped) {
       if (!componentServices.has(c.id)) componentServices.set(c.id, m.serviceId);
       // Deduplicate by (componentId, serviceId)
@@ -394,14 +855,17 @@ export function mapArchitectureModelToServicePlan(
   }
 
   // 2. Map technologies from structured lists
-  const listMappings = mapListTechnologies(model, componentServices);
+  const listMappings = mapListTechnologies(model, awsMappings);
   awsMappings.push(...listMappings);
 
   // 3. Apply pattern baselines (marked fromPattern: true for sanity-check only)
-  const patternMappings = applyPatternBaselines(model, componentServices);
+  const patternMappings = applyPatternBaselines(model, awsMappings, ctx.workloadClassification);
   awsMappings.push(...patternMappings);
 
-  // 4. Build DiscoveredComponent output (pass through with status)
+  // 4. Global deduplication of logical AWS services (merges multiple instances, preserves provenance)
+  const finalAwsMappings = deduplicateAwsMappings(awsMappings);
+
+  // 5. Build DiscoveredComponent output (pass through with status)
   const components: DiscoveredComponent[] = model.components.map((c) => ({
     id: c.id,
     type: c.type,
@@ -411,14 +875,14 @@ export function mapArchitectureModelToServicePlan(
     status: c.evidence.length > 0 ? "detected" : "inferred",
   }));
 
-  // 5. Build Relationships output
+  // 6. Build Relationships output
   const relationships: ComponentRelationship[] = model.relationships.map((r) => ({
     from: r.from,
     to: r.to,
     type: r.type,
   }));
 
-  // 6. Build DeploymentModel per component (inferred, not templated)
+  // 7. Build DeploymentModel per component (inferred, not templated)
   const deploymentModel: DeploymentModel[] = model.components.map((c) => {
     const mapped = componentServices.get(c.id);
     const isCompute = mapped && COMPUTE_SERVICES.includes(mapped);
@@ -436,16 +900,16 @@ export function mapArchitectureModelToServicePlan(
     };
   });
 
-  // 7. Detect pattern for UI label (never constrains output)
+  // 8. Detect pattern for UI label (never constrains output)
   const detectedPattern = detectPatternFromComponents(model.components);
 
-  // 8. Build ServicePlan
+  // 9. Build ServicePlan
   const plan = {
     inputKind: ctx.inputKind,
     components,
     relationships,
     deploymentModel,
-    awsMappings,
+    awsMappings: finalAwsMappings,
     detectedPattern,
     metadata: {
       grounding: ctx.grounding,
