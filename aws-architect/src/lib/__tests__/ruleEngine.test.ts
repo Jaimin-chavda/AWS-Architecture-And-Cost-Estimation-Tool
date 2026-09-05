@@ -72,15 +72,144 @@ describe("runRuleEngine — always produces a valid ServicePlan", () => {
     }
   });
 
-  it("never exceeds 12 distinct services", () => {
-    // Give it a ton of signals to stress the cap
+  it("supports >12 distinct services without hard truncation", () => {
+    // Give it a ton of signals to verify the old 12-cap is removed
     const plan = runRuleEngine(makeInput({
       description: "lambda apigateway dynamodb s3 cloudfront route53 sqs sns eventbridge cognito elasticache rds ec2 ecs fargate eks ecr alb kinesis sagemaker",
       fileContent: "sagemaker rekognition comprehend bedrock DATABASE_URL=postgresql://localhost REDIS_URL=redis://localhost",
       fileNames: ["Dockerfile", "serverless.yml", "docker-compose.yml", "terraform/main.tf"],
     }));
     const unique = new Set(serviceIds(plan));
-    assert.ok(unique.size <= 12, `Expected ≤12 services, got ${unique.size}`);
+    assert.ok(unique.size > 12, `Expected >12 services with hard cap removed, got ${unique.size}`);
+    const check = ServicePlanSchema.safeParse(plan);
+    assert.ok(check.success, "Plan with >12 services must pass validation");
+  });
+
+  it("validates a 20+ service valid plan successfully", () => {
+    const twentyPlusServices = [
+      "EC2", "Lambda", "ECS", "EKS", "Fargate", "Batch",
+      "S3", "EBS", "EFS", "Glacier",
+      "RDS", "Aurora", "DynamoDB", "ElastiCache", "Redshift",
+      "CloudFront", "APIGateway", "ALB", "Route53", "VPC",
+      "SQS", "SNS",
+    ] as const;
+    const plan = {
+      inputKind: "description" as const,
+      components: twentyPlusServices.map((s) => ({
+        id: `c-${s.toLowerCase()}`,
+        type: "backend" as const,
+        technology: s,
+        evidence: ["test"],
+        confidence: "high" as const,
+        status: "detected" as const,
+      })),
+      relationships: [],
+      deploymentModel: [],
+      awsMappings: twentyPlusServices.map((s) => ({
+        componentId: `c-${s.toLowerCase()}`,
+        serviceId: s,
+        confidence: "high" as const,
+        evidence: "test",
+        fromPattern: false,
+      })),
+      metadata: { grounding: "repo" as const, truncated: false, parseErrors: [] },
+      warnings: [],
+    };
+    const check = ServicePlanSchema.safeParse(plan);
+    assert.ok(check.success, "20+ service plan must parse successfully");
+    assert.strictEqual(check.data.warnings.length, 0, "No warning when <=25 services");
+  });
+
+  it("parses real-but-previously-uncatalogued AWS services successfully", () => {
+    const newServices = ["Bedrock", "Athena", "EMR", "StepFunctions", "KMS", "AppRunner", "Glue"] as const;
+    const plan = {
+      inputKind: "description" as const,
+      components: newServices.map((s) => ({
+        id: `c-${s.toLowerCase()}`,
+        type: "backend" as const,
+        technology: s,
+        evidence: ["test"],
+        confidence: "high" as const,
+        status: "detected" as const,
+      })),
+      relationships: [],
+      deploymentModel: [],
+      awsMappings: newServices.map((s) => ({
+        componentId: `c-${s.toLowerCase()}`,
+        serviceId: s,
+        confidence: "high" as const,
+        evidence: "test",
+        fromPattern: false,
+      })),
+      metadata: { grounding: "repo" as const, truncated: false, parseErrors: [] },
+      warnings: [],
+    };
+    const check = ServicePlanSchema.safeParse(plan);
+    assert.ok(check.success, "Previously uncatalogued AWS services must parse successfully");
+  });
+
+  it("fails validation when a genuinely hallucinated service string is provided", () => {
+    const plan = {
+      inputKind: "description" as const,
+      components: [{
+        id: "c1",
+        type: "backend" as const,
+        technology: "FakeAwsCloudDatabase",
+        evidence: ["test"],
+        confidence: "high" as const,
+        status: "detected" as const,
+      }],
+      relationships: [],
+      deploymentModel: [],
+      awsMappings: [{
+        componentId: "c1",
+        serviceId: "FakeAwsCloudDatabase" as any,
+        confidence: "high" as const,
+        evidence: "test",
+        fromPattern: false,
+      }],
+      metadata: { grounding: "repo" as const, truncated: false, parseErrors: [] },
+      warnings: [],
+    };
+    const check = ServicePlanSchema.safeParse(plan);
+    assert.strictEqual(check.success, false, "Hallucinated service string must fail validation");
+  });
+
+  it("fires soft-cap warning at >25 services without failing parse", () => {
+    const twentySixServices = [
+      "EC2", "Lambda", "ECS", "EKS", "Fargate", "Batch",
+      "S3", "EBS", "EFS", "Glacier",
+      "RDS", "Aurora", "DynamoDB", "ElastiCache", "Redshift",
+      "CloudFront", "APIGateway", "ALB", "Route53", "VPC",
+      "SQS", "SNS", "EventBridge", "Kinesis", "MSK",
+      "Cognito", "SecretsManager",
+    ] as const;
+    const plan = {
+      inputKind: "description" as const,
+      components: twentySixServices.map((s) => ({
+        id: `c-${s.toLowerCase()}`,
+        type: "backend" as const,
+        technology: s,
+        evidence: ["test"],
+        confidence: "high" as const,
+        status: "detected" as const,
+      })),
+      relationships: [],
+      deploymentModel: [],
+      awsMappings: twentySixServices.map((s) => ({
+        componentId: `c-${s.toLowerCase()}`,
+        serviceId: s,
+        confidence: "high" as const,
+        evidence: "test",
+        fromPattern: false,
+      })),
+      metadata: { grounding: "repo" as const, truncated: false, parseErrors: [] },
+      warnings: [],
+    };
+    const check = ServicePlanSchema.safeParse(plan);
+    assert.ok(check.success, "Plan with >25 services must not fail safeParse");
+    assert.ok(check.data.warnings.length > 0, "Warnings array must contain soft-ceiling warning");
+    assert.ok(check.data.warnings[0].includes("exceeds soft ceiling of 25 services"), "Warning text must mention 25 services ceiling");
   });
 });
 

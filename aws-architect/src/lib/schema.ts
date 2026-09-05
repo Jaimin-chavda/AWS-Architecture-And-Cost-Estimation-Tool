@@ -9,19 +9,70 @@
 import { z } from "zod";
 
 // ---------------------------------------------------------------------------
-// Catalog allowlist (~35 services)
+// ---------------------------------------------------------------------------
+// Catalog allowlist (155 practical AWS services)
 // ---------------------------------------------------------------------------
 export const SERVICE_IDS = [
+  // Compute
   "EC2", "Lambda", "ECS", "EKS", "Fargate", "Lightsail", "Batch",
-  "S3", "EBS", "EFS", "Glacier",
-  "RDS", "DynamoDB", "ElastiCache", "Aurora", "Redshift", "DocumentDB",
-  "CloudFront", "APIGateway", "ALB", "Route53", "VPC", "NATGateway", "WAF",
-  "SQS", "SNS", "EventBridge", "Kinesis", "MSK",
-  "Cognito", "SecretsManager",
-  "CloudWatch", "CodePipeline", "ECR", "CloudFormation",
-  "SageMaker", "Rekognition", "Comprehend",
-  "OpenSearch",
-  "SES", "Amplify",
+  "AppRunner", "ElasticBeanstalk", "Outposts", "Wavelength", "LocalZones",
+  "ServerlessApplicationRepository", "EC2ImageBuilder", "SimSpaceWeaver",
+
+  // Storage
+  "S3", "EBS", "EFS", "Glacier", "FSx", "StorageGateway", "Backup",
+  "Snowball", "Snowcone", "S3GlacierDeepArchive",
+
+  // Database, Cache & Data Warehouse
+  "RDS", "Aurora", "DynamoDB", "ElastiCache", "Redshift", "DocumentDB",
+  "Neptune", "Keyspaces", "Timestream", "MemoryDB", "QLDB",
+
+  // Networking & Content Delivery
+  "CloudFront", "APIGateway", "ALB", "NLB", "GLB", "Route53", "VPC",
+  "NATGateway", "DirectConnect", "TransitGateway", "GlobalAccelerator",
+  "PrivateLink", "AppMesh", "CloudMap", "VPCEndpoints", "SiteToSiteVPN",
+  "ClientVPN",
+
+  // Messaging, Integration & Streaming
+  "SQS", "SNS", "EventBridge", "Kinesis", "KinesisDataFirehose",
+  "KinesisDataStreams", "KinesisDataAnalytics", "MSK", "MQ", "AppSync",
+  "StepFunctions", "ManagedAirflow", "EventBridgePipes", "EventBridgeScheduler",
+
+  // Security, Identity & Compliance
+  "WAF", "Shield", "IAM", "Cognito", "SecretsManager", "KMS", "GuardDuty",
+  "Inspector", "Macie", "SecurityHub", "CertificateManager", "DirectoryService",
+  "IAMIdentityCenter", "NetworkFirewall", "Artifact", "AuditManager",
+  "Detective", "CloudHSM", "SystemsManager", "ParameterStore",
+
+  // Observability, Management & Governance
+  "CloudWatch", "CloudWatchLogs", "CloudWatchSynthetics", "CloudWatchEvidently",
+  "CloudWatchRUM", "CloudTrail", "XRay", "Config", "ServiceCatalog",
+  "ComputeOptimizer", "TrustedAdvisor", "HealthDashboard", "Organizations",
+  "ControlTower", "LicenseManager", "WellArchitectedTool",
+
+  // Developer Tools & CI/CD
+  "CodePipeline", "CodeBuild", "CodeDeploy", "CodeCommit", "CodeArtifact",
+  "CodeCatalyst", "CloudFormation", "CDK", "ECR", "Cloud9",
+  "FaultInjectionSimulator",
+
+  // AI & Machine Learning
+  "SageMaker", "Rekognition", "Comprehend", "Transcribe", "Translate",
+  "Polly", "Textract", "Kendra", "Lex", "Personalize", "Forecast",
+  "Bedrock", "Q", "CodeWhisperer",
+
+  // Analytics & Big Data
+  "OpenSearch", "EMR", "Athena", "Glue", "QuickSight", "LakeFormation",
+  "DataPipeline", "CleanRooms", "MSKConnect",
+
+  // Application Integration, Web & Mobile
+  "SES", "Amplify", "AppFlow", "DeviceFarm", "LocationService", "Pinpoint",
+  "Connect", "WorkSpaces", "AppStream",
+
+  // Migration & Transfer
+  "DMS", "DataSync", "TransferFamily", "ApplicationDiscoveryService",
+  "MigrationHub",
+
+  // IoT
+  "IoTCore", "Greengrass", "IoTEvents", "IoTAnalytics",
 ] as const;
 
 export type ServiceId = (typeof SERVICE_IDS)[number];
@@ -32,18 +83,72 @@ export type ServiceId = (typeof SERVICE_IDS)[number];
 export const SERVICE_CATEGORIES: Record<ServiceId, string> = {
   EC2: "compute", Lambda: "compute", ECS: "compute", EKS: "compute",
   Fargate: "compute", Lightsail: "compute", Batch: "compute",
+  AppRunner: "compute", ElasticBeanstalk: "compute", Outposts: "compute",
+  Wavelength: "compute", LocalZones: "compute", ServerlessApplicationRepository: "compute",
+  EC2ImageBuilder: "compute", SimSpaceWeaver: "compute",
+
   S3: "storage", EBS: "storage", EFS: "storage", Glacier: "storage",
+  FSx: "storage", StorageGateway: "storage", Backup: "storage",
+  Snowball: "storage", Snowcone: "storage", S3GlacierDeepArchive: "storage",
+
   RDS: "relational_db", Aurora: "relational_db",
-  DynamoDB: "nosql_db", DocumentDB: "nosql_db",
-  ElastiCache: "cache", Redshift: "warehouse",
+  DynamoDB: "nosql_db", DocumentDB: "nosql_db", Neptune: "nosql_db",
+  Keyspaces: "nosql_db", Timestream: "nosql_db", MemoryDB: "cache",
+  QLDB: "database", ElastiCache: "cache", Redshift: "warehouse",
+
   CloudFront: "networking", APIGateway: "networking", ALB: "networking",
-  Route53: "networking", VPC: "networking", NATGateway: "networking", WAF: "security",
-  SQS: "messaging", SNS: "messaging", EventBridge: "messaging", Kinesis: "messaging", MSK: "messaging",
-  Cognito: "auth", SecretsManager: "security",
-  CloudWatch: "observability", CodePipeline: "observability", ECR: "observability", CloudFormation: "observability",
-  SageMaker: "ml", Rekognition: "ml", Comprehend: "ml",
-  OpenSearch: "search",
-  SES: "misc", Amplify: "misc",
+  NLB: "networking", GLB: "networking", Route53: "networking", VPC: "networking",
+  NATGateway: "networking", DirectConnect: "networking", TransitGateway: "networking",
+  GlobalAccelerator: "networking", PrivateLink: "networking", AppMesh: "networking",
+  CloudMap: "networking", VPCEndpoints: "networking", SiteToSiteVPN: "networking",
+  ClientVPN: "networking",
+
+  SQS: "messaging", SNS: "messaging", EventBridge: "messaging",
+  Kinesis: "messaging", KinesisDataFirehose: "messaging",
+  KinesisDataStreams: "messaging", KinesisDataAnalytics: "messaging",
+  MSK: "messaging", MQ: "messaging", AppSync: "messaging",
+  StepFunctions: "messaging", ManagedAirflow: "messaging",
+  EventBridgePipes: "messaging", EventBridgeScheduler: "messaging",
+
+  WAF: "security", Shield: "security", IAM: "security", Cognito: "auth",
+  SecretsManager: "security", KMS: "security", GuardDuty: "security",
+  Inspector: "security", Macie: "security", SecurityHub: "security",
+  CertificateManager: "security", DirectoryService: "security",
+  IAMIdentityCenter: "security", NetworkFirewall: "security",
+  Artifact: "security", AuditManager: "security", Detective: "security",
+  CloudHSM: "security", SystemsManager: "security", ParameterStore: "security",
+
+  CloudWatch: "observability", CloudWatchLogs: "observability",
+  CloudWatchSynthetics: "observability", CloudWatchEvidently: "observability",
+  CloudWatchRUM: "observability", CloudTrail: "observability", XRay: "observability",
+  Config: "observability", ServiceCatalog: "observability",
+  ComputeOptimizer: "observability", TrustedAdvisor: "observability",
+  HealthDashboard: "observability", Organizations: "observability",
+  ControlTower: "observability", LicenseManager: "observability",
+  WellArchitectedTool: "observability",
+
+  CodePipeline: "devtools", CodeBuild: "devtools", CodeDeploy: "devtools",
+  CodeCommit: "devtools", CodeArtifact: "devtools", CodeCatalyst: "devtools",
+  CloudFormation: "devtools", CDK: "devtools", ECR: "devtools",
+  Cloud9: "devtools", FaultInjectionSimulator: "devtools",
+
+  SageMaker: "ml", Rekognition: "ml", Comprehend: "ml", Transcribe: "ml",
+  Translate: "ml", Polly: "ml", Textract: "ml", Kendra: "ml", Lex: "ml",
+  Personalize: "ml", Forecast: "ml", Bedrock: "ml", Q: "ml",
+  CodeWhisperer: "ml",
+
+  OpenSearch: "search", EMR: "analytics", Athena: "analytics",
+  Glue: "analytics", QuickSight: "analytics", LakeFormation: "analytics",
+  DataPipeline: "analytics", CleanRooms: "analytics", MSKConnect: "analytics",
+
+  SES: "misc", Amplify: "misc", AppFlow: "misc", DeviceFarm: "misc",
+  LocationService: "misc", Pinpoint: "misc", Connect: "misc",
+  WorkSpaces: "misc", AppStream: "misc",
+
+  DMS: "migration", DataSync: "migration", TransferFamily: "migration",
+  ApplicationDiscoveryService: "migration", MigrationHub: "migration",
+
+  IoTCore: "iot", Greengrass: "iot", IoTEvents: "iot", IoTAnalytics: "iot",
 };
 
 // ---------------------------------------------------------------------------
@@ -153,25 +258,84 @@ export type AwsServiceMapping = z.infer<typeof AwsServiceMappingSchema>;
 // ---------------------------------------------------------------------------
 // Root ServicePlan (new design)
 // ---------------------------------------------------------------------------
-export const ServicePlanSchema = z.object({
-  inputKind: z.enum(["github_url", "description"]),
-  /** Open array — no max length, no pattern slots */
-  components: z.array(DiscoveredComponentSchema),
-  relationships: z.array(ComponentRelationshipSchema),
-  deploymentModel: z.array(DeploymentModelSchema),
-  awsMappings: z.array(AwsServiceMappingSchema),
-  /** Pattern detection for UI label only — never constrains output */
-  detectedPattern: z.string().optional(),
-  proposalTitle: z.string().optional(),
-  tradeOffDimension: z.string().optional(),
-  tradeOffDescription: z.string().optional(),
-  metadata: z.object({
-    grounding: z.enum(GROUNDING_VALUES),
-    truncated: z.boolean(),
-    parseErrors: z.array(z.string()),
-  }),
-  proposals: z.array(z.any()).optional(),
-});
+export const ServicePlanSchema = z
+  .object({
+    inputKind: z.enum(["github_url", "description"]),
+    /** Open array — no max length, no pattern slots */
+    components: z.array(DiscoveredComponentSchema),
+    relationships: z.array(ComponentRelationshipSchema),
+    deploymentModel: z.array(DeploymentModelSchema),
+    awsMappings: z.array(AwsServiceMappingSchema),
+    /** Pattern detection for UI label only — never constrains output */
+    detectedPattern: z.string().optional(),
+    proposalTitle: z.string().optional(),
+    tradeOffDimension: z.string().optional(),
+    tradeOffDescription: z.string().optional(),
+    metadata: z.object({
+      grounding: z.enum(GROUNDING_VALUES),
+      truncated: z.boolean(),
+      parseErrors: z.array(z.string()),
+    }),
+    warnings: z.array(z.string()).default([]),
+    proposals: z.array(z.any()).optional(),
+  })
+  .refine(
+    (plan) => {
+      // Catalog allowlist gate (Decision 17): every serviceId must be in SERVICE_IDS
+      const ids = (plan.awsMappings || []).map((m) => m.serviceId);
+      return ids.every((id) => (SERVICE_IDS as readonly string[]).includes(id));
+    },
+    {
+      message:
+        "ServicePlan contains one or more serviceIds not in the catalog allowlist",
+    }
+  )
+  .refine(
+    (plan) => {
+      // Soft ceiling (replaces hard 12-cap): warn if unique services > 25 without failing parse
+      const uniqueServices = new Set((plan.awsMappings || []).map((m) => m.serviceId));
+      if (uniqueServices.size > 25) {
+        if (!plan.warnings) {
+          plan.warnings = [];
+        }
+        const warning = `Service count (${uniqueServices.size}) exceeds soft ceiling of 25 services`;
+        if (!plan.warnings.includes(warning)) {
+          plan.warnings.push(warning);
+        }
+      }
+      return true;
+    },
+    {
+      message: "Service count exceeds soft ceiling of 25 services",
+    }
+  )
+  .refine(
+    (plan) => {
+      // Component ID uniqueness guard: ensure no two components share the same id
+      const compIds = (plan.components || []).map((c) => c.id);
+      const uniqueCompIds = new Set(compIds);
+      if (uniqueCompIds.size < compIds.length) {
+        if (!plan.warnings) {
+          plan.warnings = [];
+        }
+        const warning = `Duplicate componentId detected: ${compIds.length - uniqueCompIds.size} redundant component(s) consolidated`;
+        if (!plan.warnings.includes(warning)) {
+          plan.warnings.push(warning);
+        }
+        // Auto-dedupe components keeping first entry
+        const seen = new Set<string>();
+        plan.components = plan.components.filter((c) => {
+          if (seen.has(c.id)) return false;
+          seen.add(c.id);
+          return true;
+        });
+      }
+      return true;
+    },
+    {
+      message: "Components must have unique componentId identifiers",
+    }
+  );
 
 export type ServicePlan = z.infer<typeof ServicePlanSchema> & {
   proposals?: ServicePlan[];

@@ -15,6 +15,7 @@
 import { z } from "zod";
 import {
   SERVICE_IDS,
+  SERVICE_CATEGORIES,
   COMPONENT_TYPES,
   DiscoveredComponentSchema,
   ComponentRelationshipSchema,
@@ -34,6 +35,7 @@ import {
   type EvidenceRecord,
 } from "./schema.ts";
 import type { WorkloadClassification } from "./repoAnalyzer.ts";
+import { serviceTypeFromId } from "./ruleEngine.ts";
 
 // ---------------------------------------------------------------------------
 // Architecture Model schema (LLM output)
@@ -475,7 +477,7 @@ function mapComponentToAws(
 
     case "frontend":
       mappings.push(
-        { componentId: c.id, serviceId: "S3", confidence: "high", evidence: `${ev} → static assets`, fromPattern: false, category: "repository-evidence" },
+        { componentId: `${c.id}-storage`, serviceId: "S3", confidence: "high", evidence: `${ev} → static assets`, fromPattern: false, category: "repository-evidence" },
         { componentId: c.id, serviceId: "CloudFront", confidence: "high", evidence: `${ev} → CDN`, fromPattern: false, category: "deployment-requirement" }
       );
       break;
@@ -487,17 +489,17 @@ function mapComponentToAws(
       } else if (/serverless|lambda/.test(tech)) {
         mappings.push(
           { componentId: c.id, serviceId: "Lambda", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" },
-          { componentId: c.id, serviceId: "APIGateway", confidence: "medium", evidence: `${ev} → HTTP entry`, fromPattern: false, category: "deployment-requirement" }
+          { componentId: `${c.id}-gateway`, serviceId: "APIGateway", confidence: "medium", evidence: `${ev} → HTTP entry`, fromPattern: false, category: "deployment-requirement" }
         );
       } else if (/kubernetes|k8s|helm/.test(tech)) {
         mappings.push(
           { componentId: c.id, serviceId: "EKS", confidence: "high", evidence: `${ev} → Amazon EKS`, fromPattern: false, category: "repository-evidence" },
-          { componentId: c.id, serviceId: "ECR", confidence: "medium", evidence: `${ev} → container image registry`, fromPattern: false, category: "deployment-requirement" }
+          { componentId: `${c.id}-registry`, serviceId: "ECR", confidence: "medium", evidence: `${ev} → container image registry`, fromPattern: false, category: "deployment-requirement" }
         );
       } else if (/container|docker|jib|ecs|fargate/.test(tech)) {
         mappings.push(
           { componentId: c.id, serviceId: "ECS", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" },
-          { componentId: c.id, serviceId: "ECR", confidence: "medium", evidence: `${ev} → container image registry`, fromPattern: false, category: "deployment-requirement" }
+          { componentId: `${c.id}-registry`, serviceId: "ECR", confidence: "medium", evidence: `${ev} → container image registry`, fromPattern: false, category: "deployment-requirement" }
         );
       } else if (/ec2|virtual machine|vm|instance/.test(tech)) {
         mappings.push({ componentId: c.id, serviceId: "EC2", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
@@ -510,12 +512,12 @@ function mapComponentToAws(
       if (/serverless|lambda/.test(tech)) {
         mappings.push(
           { componentId: c.id, serviceId: "Lambda", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" },
-          { componentId: c.id, serviceId: "EventBridge", confidence: "medium", evidence: `${ev} → schedule trigger`, fromPattern: false, category: "deployment-requirement" }
+          { componentId: `${c.id}-scheduler`, serviceId: "EventBridge", confidence: "medium", evidence: `${ev} → schedule trigger`, fromPattern: false, category: "deployment-requirement" }
         );
       } else {
         mappings.push(
           { componentId: c.id, serviceId: "ECS", confidence: "medium", evidence: ev, fromPattern: false, category: "inference" },
-          { componentId: c.id, serviceId: "EventBridge", confidence: "medium", evidence: `${ev} → schedule trigger`, fromPattern: false, category: "deployment-requirement" }
+          { componentId: `${c.id}-scheduler`, serviceId: "EventBridge", confidence: "medium", evidence: `${ev} → schedule trigger`, fromPattern: false, category: "deployment-requirement" }
         );
       }
       break;
@@ -527,27 +529,27 @@ function mapComponentToAws(
         mappings.push({ componentId: c.id, serviceId: "APIGateway", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
       } else if (/serverless|lambda/.test(tech)) {
         mappings.push(
-          { componentId: c.id, serviceId: "Lambda", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" },
+          { componentId: `${c.id}-compute`, serviceId: "Lambda", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" },
           { componentId: c.id, serviceId: "APIGateway", confidence: "medium", evidence: `${ev} → Serverless HTTP entry`, fromPattern: false, category: "deployment-requirement" }
         );
       } else if (/kubernetes|k8s|helm/.test(tech)) {
         mappings.push(
           { componentId: c.id, serviceId: "EKS", confidence: "high", evidence: `${ev} → Amazon EKS`, fromPattern: false, category: "repository-evidence" },
-          { componentId: c.id, serviceId: "ECR", confidence: "medium", evidence: `${ev} → container image registry`, fromPattern: false, category: "deployment-requirement" },
-          { componentId: c.id, serviceId: "ALB", confidence: "medium", evidence: `${ev} → Ingress load balancer`, fromPattern: false, category: "recommendation" }
+          { componentId: `${c.id}-registry`, serviceId: "ECR", confidence: "medium", evidence: `${ev} → container image registry`, fromPattern: false, category: "deployment-requirement" },
+          { componentId: `${c.id}-alb`, serviceId: "ALB", confidence: "medium", evidence: `${ev} → Ingress load balancer`, fromPattern: false, category: "recommendation" }
         );
       } else if (/container|docker|jib|ecs|fargate/.test(tech)) {
         mappings.push(
           { componentId: c.id, serviceId: "ECS", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" },
-          { componentId: c.id, serviceId: "ECR", confidence: "medium", evidence: `${ev} → container image registry`, fromPattern: false, category: "deployment-requirement" },
-          { componentId: c.id, serviceId: "ALB", confidence: "medium", evidence: `${ev} → Ingress load balancer`, fromPattern: false, category: "recommendation" }
+          { componentId: `${c.id}-registry`, serviceId: "ECR", confidence: "medium", evidence: `${ev} → container image registry`, fromPattern: false, category: "deployment-requirement" },
+          { componentId: `${c.id}-alb`, serviceId: "ALB", confidence: "medium", evidence: `${ev} → Ingress load balancer`, fromPattern: false, category: "recommendation" }
         );
       } else {
         // Framework API alone (Express, FastAPI, Flask, Spring Boot, etc.) does NOT prove API Gateway.
         // Ingress recommended as ALB, compute inferred as managed container host.
         mappings.push(
           { componentId: c.id, serviceId: "ECS", confidence: "medium", evidence: `${ev} (managed container compute)`, fromPattern: false, category: "inference" },
-          { componentId: c.id, serviceId: "ALB", confidence: "medium", evidence: `${ev} → Application Load Balancer recommendation`, fromPattern: false, category: "recommendation" }
+          { componentId: `${c.id}-alb`, serviceId: "ALB", confidence: "medium", evidence: `${ev} → Application Load Balancer recommendation`, fromPattern: false, category: "recommendation" }
         );
       }
       break;
@@ -875,6 +877,20 @@ export function mapArchitectureModelToServicePlan(
     status: c.evidence.length > 0 ? "detected" : "inferred",
   }));
 
+  // Ensure every mapping has a matching component
+  for (const m of finalAwsMappings) {
+    if (!components.some((c) => c.id === m.componentId)) {
+      components.push({
+        id: m.componentId,
+        type: serviceTypeFromId(m.serviceId),
+        technology: m.serviceId,
+        evidence: m.evidence ? [m.evidence] : [],
+        confidence: m.confidence,
+        status: m.confidence === "high" ? "detected" : "inferred",
+      });
+    }
+  }
+
   // 6. Build Relationships output
   const relationships: ComponentRelationship[] = model.relationships.map((r) => ({
     from: r.from,
@@ -882,9 +898,25 @@ export function mapArchitectureModelToServicePlan(
     type: r.type,
   }));
 
+  // Add auxiliary component links
+  for (const c of model.components) {
+    const storageComp = `${c.id}-storage`;
+    if (components.some((x) => x.id === storageComp) && !relationships.some((r) => r.from === c.id && r.to === storageComp)) {
+      relationships.push({ from: c.id, to: storageComp, type: "reads/writes" });
+    }
+    const registryComp = `${c.id}-registry`;
+    if (components.some((x) => x.id === registryComp) && !relationships.some((r) => r.from === c.id && r.to === registryComp)) {
+      relationships.push({ from: c.id, to: registryComp, type: "reads/writes" });
+    }
+    const albComp = `${c.id}-alb`;
+    if (components.some((x) => x.id === albComp) && !relationships.some((r) => r.from === albComp && r.to === c.id)) {
+      relationships.push({ from: albComp, to: c.id, type: "calls" });
+    }
+  }
+
   // 7. Build DeploymentModel per component (inferred, not templated)
-  const deploymentModel: DeploymentModel[] = model.components.map((c) => {
-    const mapped = componentServices.get(c.id);
+  const deploymentModel: DeploymentModel[] = components.map((c) => {
+    const mapped = componentServices.get(c.id) ?? finalAwsMappings.find((m) => m.componentId === c.id)?.serviceId;
     const isCompute = mapped && COMPUTE_SERVICES.includes(mapped);
     const isDatabase = c.type === "database";
     const isCache = c.type === "cache";

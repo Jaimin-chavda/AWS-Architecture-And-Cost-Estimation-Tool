@@ -344,6 +344,52 @@ function detectServices(
   if (hasAny(combined, ["rekognition"])) add("Rekognition", "high", "Rekognition reference in repository files");
   if (hasAny(combined, ["comprehend"])) add("Comprehend", "high", "Comprehend reference in repository files");
 
+  const bedrockEv = awsEvidence(profile, "bedrock");
+  if (bedrockEv) add("Bedrock", "high", `AWS Bedrock client imported — ${bedrockEv}`);
+  else if (hasAny(combined, ["bedrock", "aws-bedrock", "aws::bedrock", "bedrock-runtime"])) {
+    add("Bedrock", "high", "Amazon Bedrock foundation model reference detected");
+  }
+
+  // --- Analytics & ETL ---
+  const athenaEv = awsEvidence(profile, "athena");
+  if (athenaEv) add("Athena", "high", `AWS Athena client imported — ${athenaEv}`);
+  else if (hasAny(combined, ["athena", "aws-athena", "aws::athena", "aws_athena"])) {
+    add("Athena", "high", "Amazon Athena serverless analytics query engine reference detected");
+  }
+
+  const glueEv = awsEvidence(profile, "glue");
+  if (glueEv) add("Glue", "high", `AWS Glue client imported — ${glueEv}`);
+  else if (hasAny(combined, ["glue", "aws glue", "glue job", "glue etl", "aws_glue", "aws::glue::job"])) {
+    add("Glue", "high", "AWS Glue ETL service reference detected in repository files");
+  }
+
+  const emrEv = awsEvidence(profile, "emr");
+  if (emrEv) add("EMR", "high", `AWS EMR client imported — ${emrEv}`);
+  else if (hasAny(combined, ["elastic mapreduce", "aws::emr", "aws_emr_cluster"]) || (hasAny(combined, ["emr", "pyspark"]) && !hasDocker)) {
+    add("EMR", "high", "Amazon EMR cluster reference detected in repository files");
+  }
+
+  // --- Step Functions ---
+  const sfnEv = awsEvidence(profile, "stepfunctions") || awsEvidence(profile, "states");
+  if (sfnEv) add("StepFunctions", "high", `AWS Step Functions client imported — ${sfnEv}`);
+  else if (hasAny(combined, ["step functions", "stepfunctions", "aws-stepfunctions", "aws::stepfunctions", "states:::"])) {
+    add("StepFunctions", "high", "AWS Step Functions state machine workflow reference detected");
+  }
+
+  // --- Security & Encryption ---
+  const kmsEv = awsEvidence(profile, "kms");
+  if (kmsEv) add("KMS", "high", `AWS KMS client imported — ${kmsEv}`);
+  else if (hasAny(combined, ["kms", "aws-kms", "aws_kms_key", "aws::kms::key", "kms:encrypt", "kms:decrypt"])) {
+    add("KMS", "high", "AWS Key Management Service (KMS) reference detected");
+  }
+
+  // --- App Runner ---
+  const apprunnerEv = awsEvidence(profile, "apprunner");
+  if (apprunnerEv) add("AppRunner", "high", `AWS App Runner client imported — ${apprunnerEv}`);
+  else if (hasAny(combined, ["app runner", "apprunner", "aws_apprunner", "aws::apprunner"])) {
+    add("AppRunner", "high", "AWS App Runner container service reference detected");
+  }
+
   // --- Static site / frontend hosting ---
   const isStaticSite =
     hasAny(combined, ["static site", "static website", "gatsby", "hugo", "jekyll", "astro"]) ||
@@ -383,6 +429,7 @@ function detectServices(
           if (/dynamo/.test(tech)) { if (!detected.some((s) => s.serviceId === "DynamoDB")) add("DynamoDB", dc.confidence, dcEv); }
           else if (/mongo/.test(tech)) { if (!detected.some((s) => s.serviceId === "DocumentDB")) add("DocumentDB", dc.confidence, dcEv); }
           else if (/aurora/.test(tech)) { if (!detected.some((s) => s.serviceId === "Aurora")) add("Aurora", dc.confidence, dcEv); }
+          else if (/athena/.test(tech)) { if (!detected.some((s) => s.serviceId === "Athena")) add("Athena", dc.confidence, dcEv); }
           else { if (!detected.some((s) => s.serviceId === "RDS" || s.serviceId === "Aurora")) add("RDS", dc.confidence, dcEv); }
           break;
         }
@@ -404,6 +451,8 @@ function detectServices(
             if (!detected.some((s) => s.serviceId === "Kinesis")) add("Kinesis", dc.confidence, dcEv);
           } else if (/sns/.test(tech)) {
             if (!detected.some((s) => s.serviceId === "SNS")) add("SNS", dc.confidence, dcEv);
+          } else if (/step.?function/.test(tech)) {
+            if (!detected.some((s) => s.serviceId === "StepFunctions")) add("StepFunctions", dc.confidence, dcEv);
           } else {
             if (!detected.some((s) => s.serviceId === "SQS")) add("SQS", dc.confidence, dcEv);
           }
@@ -436,8 +485,18 @@ function detectServices(
           }
           break;
         }
+        case "backend": {
+          const tech = dc.technology.toLowerCase();
+          if (/bedrock/.test(tech)) { if (!detected.some((s) => s.serviceId === "Bedrock")) add("Bedrock", dc.confidence, dcEv); }
+          else if (/app.?runner/.test(tech)) { if (!detected.some((s) => s.serviceId === "AppRunner")) add("AppRunner", dc.confidence, dcEv); }
+          break;
+        }
         case "worker": {
+          const tech = dc.technology.toLowerCase();
           if (dc.source === "serverless-yml") { if (!detected.some((s) => s.serviceId === "Lambda")) add("Lambda", dc.confidence, dcEv); }
+          else if (/glue/.test(tech)) { if (!detected.some((s) => s.serviceId === "Glue")) add("Glue", dc.confidence, dcEv); }
+          else if (/emr|spark/.test(tech)) { if (!detected.some((s) => s.serviceId === "EMR")) add("EMR", dc.confidence, dcEv); }
+          else if (/step.?function/.test(tech)) { if (!detected.some((s) => s.serviceId === "StepFunctions")) add("StepFunctions", dc.confidence, dcEv); }
           else if (!detected.some((s) => s.serviceId === "ECS") && !detected.some((s) => s.serviceId === "Fargate") && !detected.some((s) => s.serviceId === "Lambda")) {
             add("ECS", dc.confidence, dcEv);
           }
@@ -452,7 +511,12 @@ function detectServices(
           break;
         }
         case "storage": { if (!detected.some((s) => s.serviceId === "S3")) add("S3", dc.confidence, dcEv); break; }
-        case "auth": { if (!detected.some((s) => s.serviceId === "Cognito")) add("Cognito", dc.confidence, dcEv); break; }
+        case "auth": {
+          const tech = dc.technology.toLowerCase();
+          if (/kms/.test(tech)) { if (!detected.some((s) => s.serviceId === "KMS")) add("KMS", dc.confidence, dcEv); }
+          else { if (!detected.some((s) => s.serviceId === "Cognito")) add("Cognito", dc.confidence, dcEv); }
+          break;
+        }
         case "frontend": { if (!detected.some((s) => s.serviceId === "CloudFront")) add("CloudFront", "medium", `${dcEv} → CloudFront CDN`, "deployment-requirement"); break; }
       }
     }
@@ -536,11 +600,11 @@ export function buildServicePlan(
   input: RuleInput,
   services: DetectedService[]
 ): ServicePlan {
-  // Cap at 12 distinct services
-  const cappedServices = services.slice(0, 12);
+  // Retain all detected services (hard 12-cap removed; soft ceiling handled by schema warnings)
+  const planServices = services;
 
   // Convert detected services to DiscoveredComponent format
-  const components: DiscoveredComponent[] = cappedServices.map((s, i) => ({
+  const components: DiscoveredComponent[] = planServices.map((s) => ({
     id: `svc-${s.serviceId.toLowerCase()}`,
     type: serviceTypeFromId(s.serviceId),
     technology: s.serviceId,
@@ -554,7 +618,7 @@ export function buildServicePlan(
 
   // Build deployment model (inferred)
   const deploymentModel: DeploymentModel[] = components.map((c) => {
-    const isCompute = ["Lambda", "ECS", "EC2", "Fargate", "EKS", "Batch", "Lightsail"].includes(c.technology);
+    const isCompute = ["Lambda", "ECS", "EC2", "Fargate", "EKS", "Batch", "Lightsail", "AppRunner", "ElasticBeanstalk"].includes(c.technology);
     const isDatabase = c.type === "database";
     const isCache = c.type === "cache";
 
@@ -563,14 +627,14 @@ export function buildServicePlan(
       public: c.type === "frontend" || c.type === "api",
       needsVpc: isCompute || isDatabase || isCache,
       needsMultiAz: isDatabase || isCache,
-      needsAutoscaling: isCompute && ["ECS", "EC2", "EKS"].includes(c.technology),
+      needsAutoscaling: isCompute && ["ECS", "EC2", "EKS", "AppRunner"].includes(c.technology),
       source: "recommended" as const,
       notes: isDatabase ? "Production DB → recommend Multi-AZ" : undefined,
     };
   });
 
   // Build AWS mappings (1:1 with components)
-  const rawAwsMappings: AwsServiceMapping[] = cappedServices.map((s) => ({
+  const rawAwsMappings: AwsServiceMapping[] = planServices.map((s) => ({
     componentId: `svc-${s.serviceId.toLowerCase()}`,
     serviceId: s.serviceId,
     confidence: s.confidence,
@@ -592,6 +656,7 @@ export function buildServicePlan(
       truncated: input.truncated,
       parseErrors: input.parseErrors,
     },
+    warnings: [],
   };
 
   const check = ServicePlanSchema.safeParse(plan);
@@ -605,6 +670,7 @@ export function buildServicePlan(
       awsMappings: [{ componentId: "fallback", serviceId: "S3", confidence: "low", evidence: "fallback", fromPattern: false }],
       detectedPattern: "generic",
       metadata: { grounding: input.grounding, truncated: input.truncated, parseErrors: [...input.parseErrors, "rule-engine-validation-failed"] },
+      warnings: [],
     };
     return floor;
   }
@@ -614,17 +680,42 @@ export function buildServicePlan(
 
 const buildPlan = buildServicePlan;
 
-function serviceTypeFromId(serviceId: ServiceId): DiscoveredComponent["type"] {
-  const map: Record<ServiceId, DiscoveredComponent["type"]> = {
+export function serviceTypeFromId(serviceId: ServiceId): DiscoveredComponent["type"] {
+  const map: Partial<Record<ServiceId, DiscoveredComponent["type"]>> = {
     EC2: "backend", Lambda: "backend", ECS: "backend", EKS: "backend", Fargate: "backend", Lightsail: "backend", Batch: "worker",
-    S3: "object-storage", EBS: "object-storage", EFS: "object-storage", Glacier: "object-storage",
+    AppRunner: "backend", ElasticBeanstalk: "backend", Outposts: "backend", Wavelength: "backend", LocalZones: "backend",
+    ServerlessApplicationRepository: "backend", EC2ImageBuilder: "worker", SimSpaceWeaver: "backend",
+    S3: "object-storage", EBS: "object-storage", EFS: "object-storage", Glacier: "object-storage", FSx: "object-storage",
+    StorageGateway: "object-storage", Backup: "object-storage", Snowball: "object-storage", Snowcone: "object-storage",
+    S3GlacierDeepArchive: "object-storage",
     RDS: "database", DynamoDB: "database", ElastiCache: "cache", Aurora: "database", Redshift: "database", DocumentDB: "database",
-    CloudFront: "frontend", APIGateway: "api", ALB: "api", Route53: "api", VPC: "proxy", NATGateway: "proxy",
-    SQS: "queue", SNS: "messaging", EventBridge: "messaging", Kinesis: "messaging", MSK: "messaging",
-    Cognito: "auth", SecretsManager: "auth",
-    CloudWatch: "proxy", CodePipeline: "proxy", ECR: "proxy", CloudFormation: "proxy", WAF: "proxy",
-    SageMaker: "backend", Rekognition: "backend", Comprehend: "backend",
-    SES: "messaging", Amplify: "frontend", OpenSearch: "search",
+    Neptune: "database", Keyspaces: "database", Timestream: "database", MemoryDB: "cache", QLDB: "database",
+    CloudFront: "frontend", APIGateway: "api", ALB: "api", NLB: "api", GLB: "api", Route53: "api", VPC: "proxy", NATGateway: "proxy",
+    DirectConnect: "proxy", TransitGateway: "proxy", GlobalAccelerator: "proxy", PrivateLink: "proxy", AppMesh: "proxy",
+    CloudMap: "proxy", VPCEndpoints: "proxy", SiteToSiteVPN: "proxy", ClientVPN: "proxy",
+    SQS: "queue", SNS: "messaging", EventBridge: "messaging", Kinesis: "messaging", KinesisDataFirehose: "messaging",
+    KinesisDataStreams: "messaging", KinesisDataAnalytics: "messaging", MSK: "messaging", MQ: "messaging", AppSync: "api",
+    StepFunctions: "worker", ManagedAirflow: "worker", EventBridgePipes: "messaging", EventBridgeScheduler: "scheduler",
+    Cognito: "auth", SecretsManager: "auth", WAF: "proxy", Shield: "proxy", IAM: "auth", KMS: "auth", GuardDuty: "proxy",
+    Inspector: "proxy", Macie: "proxy", SecurityHub: "proxy", CertificateManager: "proxy", DirectoryService: "auth",
+    IAMIdentityCenter: "auth", NetworkFirewall: "proxy", Artifact: "proxy", AuditManager: "proxy", Detective: "proxy",
+    CloudHSM: "auth", SystemsManager: "proxy", ParameterStore: "auth",
+    CloudWatch: "proxy", CloudWatchLogs: "proxy", CloudWatchSynthetics: "proxy", CloudWatchEvidently: "proxy",
+    CloudWatchRUM: "proxy", CloudTrail: "proxy", XRay: "proxy", Config: "proxy", ServiceCatalog: "proxy",
+    ComputeOptimizer: "proxy", TrustedAdvisor: "proxy", HealthDashboard: "proxy", Organizations: "proxy",
+    ControlTower: "proxy", LicenseManager: "proxy", WellArchitectedTool: "proxy",
+    CodePipeline: "proxy", CodeBuild: "worker", CodeDeploy: "worker", CodeCommit: "proxy", CodeArtifact: "proxy",
+    CodeCatalyst: "proxy", CloudFormation: "proxy", CDK: "proxy", ECR: "proxy", Cloud9: "backend",
+    FaultInjectionSimulator: "proxy",
+    SageMaker: "backend", Rekognition: "backend", Comprehend: "backend", Transcribe: "backend", Translate: "backend",
+    Polly: "backend", Textract: "backend", Kendra: "search", Lex: "backend", Personalize: "backend", Forecast: "backend",
+    Bedrock: "backend", Q: "backend", CodeWhisperer: "backend",
+    OpenSearch: "search", EMR: "worker", Athena: "database", Glue: "worker", QuickSight: "frontend",
+    LakeFormation: "database", DataPipeline: "worker", CleanRooms: "database", MSKConnect: "messaging",
+    SES: "messaging", Amplify: "frontend", AppFlow: "proxy", DeviceFarm: "worker", LocationService: "proxy",
+    Pinpoint: "messaging", Connect: "backend", WorkSpaces: "backend", AppStream: "backend",
+    DMS: "worker", DataSync: "worker", TransferFamily: "proxy", ApplicationDiscoveryService: "proxy", MigrationHub: "proxy",
+    IoTCore: "messaging", Greengrass: "backend", IoTEvents: "messaging", IoTAnalytics: "messaging",
   };
   return map[serviceId] ?? "external-service";
 }
