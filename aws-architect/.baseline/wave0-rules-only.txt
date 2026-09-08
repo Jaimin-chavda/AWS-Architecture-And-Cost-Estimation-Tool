@@ -1,0 +1,89 @@
+
+> aws-architect@0.1.0 test:baseline
+> node --experimental-strip-types src/lib/__tests__/baseline-check.ts --rules-only
+
+========================================================================
+  AWS Architecture Inference — Baseline Diagnostic Check
+========================================================================
+  Mode           : rules-only (--rules-only)
+  env files      : /home/jaimin/Desktop/SGP/AWS-Architecture-Cost-Estimation-tool/aws-architect/.env.local, /home/jaimin/Desktop/SGP/AWS-Architecture-Cost-Estimation-tool/.env.local
+  LLM configured : YES
+  GitHub token   : YES (authenticated)
+========================================================================
+
+=== Kuzma02 Electronics eCommerce ===
+  URL    : https://github.com/Kuzma02/Electronics-eCommerce-Shop-With-Admin-Dashboard-NextJS-NodeJS
+  Expected: Amplify Hosting | App Runner | Fargate, RDS for MySQL, S3 + CloudFront
+  [rules-only] fetching + running... done
+  Rules-only: [CloudWatch, ECR, EKS, Lambda, RDS, S3]
+    MISSING: Amplify Hosting | App Runner | Fargate
+    DO-NOT-INFER violations: EKS
+    → FAIL
+  Status : FAIL
+
+=== Decentralized Voting System ===
+  URL    : https://github.com/Jaimin-chavda/Decentralized-Voting-System
+  Expected: S3 + CloudFront, App Runner | Fargate, DocumentDB | DocumentDB or external MongoDB Atlas
+  [rules-only] fetching + running... done
+  Rules-only: [Route53]
+    MISSING: S3 + CloudFront, App Runner | Fargate, DocumentDB | DocumentDB or external MongoDB Atlas
+    → FAIL
+  Status : FAIL
+
+=== Plant Disease Identification using CNN ===
+  URL    : https://github.com/sumanismcse/Plant-Disease-Identification-using-CNN
+  Expected: SageMaker Training Job | EC2 g4dn/g5, S3, ECR
+  [rules-only] fetching + running... done
+  Rules-only: [CloudWatch, S3, SageMaker]
+    MISSING: ECR
+    → FAIL
+  Status : FAIL
+
+=== SatvikPraveen Next.js eCommerce ===
+  URL    : https://github.com/SatvikPraveen/Nextjs-Ecommerce
+  Expected: Fargate | Amplify Hosting, ECR, RDS for PostgreSQL, S3 + CloudFront, SES
+  [rules-only] fetching + running... done
+  Rules-only: [ALB, CloudWatch, ECR, ECS, ElastiCache, RDS, S3]
+    MISSING: Fargate | Amplify Hosting, SES
+    DO-NOT-INFER violations: ElastiCache
+    → FAIL
+  Status : FAIL
+
+=== pandaind/springboot-microservices ===
+  URL    : https://github.com/pandaind/springboot-microservices
+  Expected: EKS, ECR, ALB, RDS for PostgreSQL, DocumentDB, MSK for Kafka, SES
+  [rules-only] fetching + running... done
+  Rules-only: [ALB, APIGateway, CloudWatch, DocumentDB, ECR, ECS, EKS, MSK, RDS]
+    MISSING: SES
+    → FAIL
+  Status : FAIL
+
+=== rahult18/springcommerce ===
+  URL    : https://github.com/rahult18/springcommerce
+  Expected: Fargate, ECR, RDS for MySQL, DocumentDB, MSK, SES
+  [rules-only] fetching + running... done
+  Rules-only: [ALB, APIGateway, CloudWatch, Cognito, DocumentDB, ECR, ECS, MSK, RDS]
+    MISSING: Fargate, SES
+    → FAIL
+  Status : FAIL
+
+=== ibatulanandjp/ecommerce-microservices ===
+  URL    : https://github.com/ibatulanandjp/ecommerce-microservices
+  Expected: Fargate, ECR, RDS for MySQL, DocumentDB, MSK, SES
+  [rules-only] fetching + running... done
+  Rules-only: [ALB, APIGateway, CloudWatch, Cognito, DocumentDB, ECR, ECS, MSK, RDS]
+    MISSING: Fargate, SES
+    → FAIL
+  Status : FAIL
+
+=== omarfesal/ecommerce-multi-vendor-platform ===
+  URL    : https://github.com/omarfesal/ecommerce-multi-vendor-platform
+  Expected: EKS | Fargate, ECR, ALB, RDS for PostgreSQL, DynamoDB, ElastiCache for Redis, MSK, OpenSearch Service, S3 + CloudFront
+  [rules-only] fetching + running... done
+  Rules-only: [ALB, APIGateway, CloudWatch, DynamoDB, ECR, ECS, EKS, ElastiCache, MSK, OpenSearch, RDS, S3, SQS]
+    → PASS
+  Status : PASS
+
+========================================================================
+1/8 repos passing (rules-only mode; LLM path not exercised)
+========================================================================

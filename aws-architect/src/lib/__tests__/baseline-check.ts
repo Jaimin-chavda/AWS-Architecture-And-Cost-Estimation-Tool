@@ -16,10 +16,16 @@
  *            Search for "SYNC WITH testing_baseline.md" to find all spots.
  */
 
+// MUST be the first import: populates process.env from .env.local before any
+// pipeline module initialises. Import declarations are hoisted, so an inline
+// process.loadEnvFile() call further down this file would run too late.
+import { loadedEnvFiles, envCandidatePaths } from "./loadEnv.ts";
+
 import { fetchRepoSignals, signalsToRuleInput } from "../repoFetcher.ts";
 import { analyzeProject } from "../repoAnalyzer.ts";
 import { runRuleEngine } from "../ruleEngine.ts";
 import { runInference, deriveGrounding } from "../inference.ts";
+import { llmConfigured } from "../llmClient.ts";
 import type { ServiceId } from "../schema.ts";
 import type { RepoSignals } from "../repoFetcher.ts";
 import type { ServicePlan } from "../schema.ts";
@@ -411,34 +417,57 @@ async function runMerged(
   url: string,
   signals: RepoSignals,
   _githubToken?: string
-): Promise<ServicePlan> {
+): Promise<{ plan: ServicePlan; usedLlm: boolean }> {
   const grounding = deriveGrounding({ description: "", fetchedFiles: signals.keyFiles });
   const ruleInput = signalsToRuleInput(signals, "github_url", grounding);
   const profile = analyzeProject(signals);
   // runInference calls llmConfigured() internally; if no key is set it uses rules.
-  const { plan } = await runInference({ ruleInput, signals, description: "", profile });
-  return plan;
+  // architectureModel is non-null only when the LLM path actually produced a model,
+  // so it is the honest signal for whether this column measured anything new.
+  const { plan, architectureModel } = await runInference({
+    ruleInput,
+    signals,
+    description: "",
+    profile,
+  });
+  return { plan, usedLlm: architectureModel !== null };
 }
 
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
+/**
+ * The merged column only means something if an LLM provider is actually
+ * reachable. Pass --rules-only to intentionally measure the rules baseline
+ * alone; otherwise a missing key is a hard failure, not a silent fallback.
+ */
+const RULES_ONLY_MODE = process.argv.includes("--rules-only");
+
 async function main(): Promise<void> {
   const githubToken = process.env.GITHUB_TOKEN;
-  const llmPresent = !!(
-    process.env.DEEPSEEK_API_KEY ||
-    process.env.GOOGLE_API_KEY ||
-    process.env.GROQ_API_KEY
-  );
+  const llmPresent = llmConfigured();
 
   console.log("=".repeat(72));
   console.log("  AWS Architecture Inference — Baseline Diagnostic Check");
   console.log("=".repeat(72));
-  console.log(`  LLM configured : ${llmPresent ? "YES" : "NO (merged falls back to rules)"}`);
+  console.log(`  Mode           : ${RULES_ONLY_MODE ? "rules-only (--rules-only)" : "merged (rules + LLM)"}`);
+  console.log(`  env files      : ${loadedEnvFiles.length > 0 ? loadedEnvFiles.join(", ") : "(none found)"}`);
+  console.log(`  LLM configured : ${llmPresent ? "YES" : "NO"}`);
   console.log(`  GitHub token   : ${githubToken ? "YES (authenticated)" : "NO (60 req/hr)"}`);
   console.log("=".repeat(72));
   console.log();
+
+  // Wave 0 gate: never let the merged column silently re-measure rules-only.
+  if (!RULES_ONLY_MODE && !llmPresent) {
+    throw new Error(
+      "No LLM provider key found — the 'merged' column would silently re-run the " +
+        "rules baseline, making both columns identical and the measurement invalid.\n" +
+        `  Checked .env.local at: ${envCandidatePaths.join(", ")}\n` +
+        "  Set DEEPSEEK_API_KEY, GOOGLE_API_KEY, or GROQ_API_KEY in .env.local,\n" +
+        "  or pass --rules-only to measure the rules baseline deliberately."
+    );
+  }
 
   let totalPass = 0;
   let totalFail = 0;
@@ -447,6 +476,9 @@ async function main(): Promise<void> {
   let mergedPass = 0;
   let mergedFail = 0;
   let skipped = 0;
+  // How many merged runs genuinely used the LLM vs. silently fell back to rules.
+  let llmPathUsed = 0;
+  let llmPathFellBack = 0;
 
   for (const fixture of FIXTURES) {
     console.log(`=== ${fixture.name} ===`);
@@ -506,11 +538,27 @@ async function main(): Promise<void> {
     console.log(`    → ${rulesOk ? "PASS" : "FAIL"}`);
     if (rulesOk) rulesOnlyPass++; else rulesOnlyFail++;
 
+    // ── Rules-only mode stops here: no LLM call, verdict from rules alone ──
+    if (RULES_ONLY_MODE) {
+      const rulesModeRepoPass = rulesOk;
+      console.log(`  Status : ${rulesModeRepoPass ? "PASS" : "FAIL"}`);
+      console.log();
+      if (rulesModeRepoPass) totalPass++; else totalFail++;
+      continue;
+    }
+
     // ── Merged (rules+LLM) report ─────────────────────────────────────────
     try {
       process.stdout.write("  [merged]     running inference...   ");
-      mergedPlan = await runMerged(fixture.url, signals, githubToken);
-      console.log("done");
+      const merged = await runMerged(fixture.url, signals, githubToken);
+      mergedPlan = merged.plan;
+      if (merged.usedLlm) {
+        llmPathUsed++;
+        console.log("done (LLM)");
+      } else {
+        llmPathFellBack++;
+        console.log("done (LLM UNAVAILABLE — rules fallback)");
+      }
     } catch (err) {
       console.log(`FAILED: ${(err as Error).message}`);
       console.log(`  Status : FAIL (merged inference error)\n`);
@@ -558,7 +606,26 @@ async function main(): Promise<void> {
   const ran = total - skipped;
 
   console.log("=".repeat(72));
-  console.log(`${totalPass}/${ran} repos passing (rules-only: ${rulesOnlyPass}/${ran}, merged: ${mergedPass}/${ran})`);
+  if (RULES_ONLY_MODE) {
+    console.log(`${totalPass}/${ran} repos passing (rules-only mode; LLM path not exercised)`);
+  } else {
+    console.log(`${totalPass}/${ran} repos passing (rules-only: ${rulesOnlyPass}/${ran}, merged: ${mergedPass}/${ran})`);
+    console.log(
+      `merged column: ${llmPathUsed} run(s) used the LLM, ${llmPathFellBack} fell back to rules`
+    );
+  }
+  if (!RULES_ONLY_MODE && llmPathUsed === 0 && ran > 0) {
+    console.log(
+      "WARNING: no merged run reached the LLM — the two columns above measure the " +
+        "same pipeline and are not comparable."
+    );
+  }
+  if (llmPathFellBack > 0 && llmPathUsed > 0) {
+    console.log(
+      `NOTE: ${llmPathFellBack} repo(s) fell back to rules mid-run (LLM error or ` +
+        "all components rejected by evidence validation)."
+    );
+  }
 
   if (skipped > 0) {
     console.log();
