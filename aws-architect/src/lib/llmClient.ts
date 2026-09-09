@@ -49,7 +49,7 @@ import type { ProjectProfile } from "./repoAnalyzer.ts";
  */
 const MODEL_IDS = {
   deepseek: "deepseek-v4-flash",
-  google: "gemini-2.5-flash",
+  google: "gemini-3.6-flash",
   groq: "llama-3.3-70b-versatile",
 } as const;
 
