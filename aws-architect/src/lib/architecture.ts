@@ -22,6 +22,8 @@ import {
   DeploymentModelSchema,
   AwsServiceMappingSchema,
   ServicePlanSchema,
+  pushDiagnostic,
+  type DiagnosticSink,
   type ServiceId,
   type ComponentType,
   type ConfidenceTier,
@@ -373,26 +375,58 @@ export function normalizeArchitectureModel(
   };
 }
 
+/**
+ * Why an LLM answer was rejected.
+ *   "schema"       — the object did not match ArchitectureModelSchema.
+ *   "no-evidence"  — it parsed, but every component was dropped for citing
+ *                    evidence that does not exist in the register.
+ */
+export type ArchitectureValidationReason = "schema" | "no-evidence";
+
+export interface ArchitectureValidationFailure {
+  model: null;
+  reason: ArchitectureValidationReason;
+  /** Human-readable specifics: zod issues, or the count of dropped components. */
+  detail: string;
+}
+
+export type ArchitectureValidationResult =
+  | { model: ArchitectureModel; reason: null; detail: null }
+  | ArchitectureValidationFailure;
+
+/**
+ * Validates and normalizes a raw LLM answer.
+ *
+ * Returns a result object rather than `ArchitectureModel | null`: the two
+ * failure modes need different handling upstream and were previously
+ * indistinguishable at the call site, visible only as a console.warn.
+ */
 export function validateArchitectureModel(
   raw: unknown,
   evidenceRegister?: EvidenceRecord[]
-): ArchitectureModel | null {
+): ArchitectureValidationResult {
   const result = ArchitectureModelSchema.safeParse(raw);
   if (!result.success) {
-    console.warn(
-      "[architecture] LLM architecture model failed validation:",
-      result.error.issues.map((i) => i.message).join("; ")
-    );
-    return null;
+    const detail = result.error.issues
+      .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+      .join("; ");
+    console.warn("[architecture] LLM architecture model failed validation:", detail);
+    return { model: null, reason: "schema", detail };
   }
+
+  const rawComponentCount = result.data.components.length;
   const model = normalizeArchitectureModel(result.data, evidenceRegister);
   if (model.components.length === 0) {
+    const detail =
+      `all ${rawComponentCount} component(s) were dropped: none cited evidence ` +
+      `present in the evidence register (${evidenceRegister?.length ?? 0} record(s))`;
     console.warn(
       "[architecture] every LLM component lacked evidence — discarding model, falling back to rules"
     );
-    return null;
+    return { model: null, reason: "no-evidence", detail };
   }
-  return model;
+
+  return { model, reason: null, detail: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -836,6 +870,13 @@ export interface ModelContext {
   parseErrors: string[];
   workloadClassification?: WorkloadClassification;
   evidenceRegister?: EvidenceRecord[];
+  /**
+   * Optional collector. When supplied, a validation failure of the mapped plan
+   * is reported here instead of only reaching a console.warn — the caller can
+   * then tell the user their diagram came from the emergency floor rather than
+   * from their repository.
+   */
+  diagnostics?: DiagnosticSink;
 }
 
 export function mapArchitectureModelToServicePlan(
@@ -953,7 +994,22 @@ export function mapArchitectureModelToServicePlan(
   const check = ServicePlanSchema.safeParse(plan);
   if (check.success) return check.data;
 
-  console.warn("[architecture] mapped plan failed validation — using minimal floor");
+  // The floor is a single S3 bucket. It is NOT an architecture — it is what we
+  // show when our own mapping produced something the contract rejects. Say so.
+  const detail = check.error.issues
+    .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+    .join("; ");
+  console.warn("[architecture] mapped plan failed validation — using minimal floor:", detail);
+  pushDiagnostic(ctx.diagnostics, {
+    stage: "architecture",
+    severity: "error",
+    code: "mapped-plan-validation-failed",
+    message:
+      "The AWS mapping produced a plan that failed the ServicePlan contract. " +
+      "The result shown is a placeholder, not an inference from your project.",
+    detail,
+  });
+
   const floor = ServicePlanSchema.safeParse({
     inputKind: ctx.inputKind,
     components: [{ id: "fallback", type: "object-storage" as ComponentType, technology: "S3", evidence: [], confidence: "low" as ConfidenceTier, status: "inferred" as const }],
@@ -963,5 +1019,16 @@ export function mapArchitectureModelToServicePlan(
     detectedPattern: "generic",
     metadata: { grounding: ctx.grounding, truncated: ctx.truncated, parseErrors: [...ctx.parseErrors, "mapped-plan-validation-failed"] },
   });
-  return floor.success ? floor.data : plan as unknown as ServicePlan;
+  if (floor.success) return floor.data;
+
+  // The floor itself failed to parse — that can only be a bug in this file, and
+  // returning an unvalidated plan downstream would corrupt diagram and cost.
+  pushDiagnostic(ctx.diagnostics, {
+    stage: "architecture",
+    severity: "error",
+    code: "floor-plan-validation-failed",
+    message: "Internal error: even the minimal fallback plan failed validation.",
+    detail: floor.error.issues.map((i) => i.message).join("; "),
+  });
+  return plan as unknown as ServicePlan;
 }

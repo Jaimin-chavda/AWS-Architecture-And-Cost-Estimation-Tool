@@ -1,6 +1,10 @@
 # AWS Architect — Pipeline & Code Flow
 
-How a request moves through the code, stage by stage — including the boundaries, gates, and fallbacks defined by flaw resolutions 1–8 (`Problems.md`). Mirrors the module layout in `.planning/research/ARCHITECTURE.md`.
+How a request moves through the code, stage by stage — including the boundaries, gates, and fallbacks defined by flaw resolutions 1–8 (`Problems.md`). Mirrors the module layout in `.planning/ARCHITECTURE.md`.
+
+**Scope:** this is the Module A (AI Architecture Advisor) pipeline, which is the entire project. Modules B/C/D are descoped (2026-09-05) and have no pipeline here.
+
+Stage 3's output contract was rewritten after decisions I-22/I-23 removed the closed pattern-template slots and the 12-service cap. If you are reading an older copy that says `pattern: <1 of 5–8 templates>` or `services:≤12`, it is stale.
 
 <!-- GSD:flow-start -->
 
@@ -24,6 +28,7 @@ How a request moves through the code, stage by stage — including the boundarie
   Stage 3: INFERENCE                  RuleEngine (baseline, never fails)
                 │                     LLM enhance (if key) → schema gate (flaw 5)
                 │                     merge → grounded, catalog-validated ServicePlan
+                │                     + optional curated alternate (patternAlternates.ts)
                 ▼
   Stage 4: DIAGRAM (pure fn)          ServicePlan → deterministic mxGraph XML
                 ▼
@@ -33,7 +38,8 @@ How a request moves through the code, stage by stage — including the boundarie
                 ▼                           ▼
   Stage 6: RESPOND                   7. CLIENT RENDER
    {service_plan, diagram_xml,        draw.io iframe · cost table · slider (client math) ·
-    cost_rows}                         .drawio download · region switch (re-fetch) · save/reopen
+    cost_rows, alternate?,             .drawio download · CFT YAML download · alternate compare ·
+    cft_yaml?}                         region switch (re-fetch) · save/reopen
 ```
 
 ---
@@ -120,7 +126,8 @@ evidence (RepoSignals | description)
 
 **Schema + validation gate (flaw 5) — provider-agnostic:**
 - One fixed contract: the zod `ServicePlan` schema. Every provider runs through the *same* `generateObject(schema)`.
-- Single gate: `SP.safeParse(llmResult)` **and** catalog-allowlist check (~30–40 service enum).
+- `generateObject` uses `LlmOutputSchema` (shape only, no `.refine()` guards) so retries are spent on shape errors, not semantics (I-8).
+- Single explicit gate: `ServicePlanSchema.safeParse()` — catalog-allowlist check against the **155-entry** `ServiceId` catalog, plus the soft >25-service ceiling warning and the `componentId` uniqueness auto-dedupe refine.
 - Any failure → **discard LLM result, return baseline**. No provider-specific thresholds.
 - A provider that can't emit the schema via `generateObject` is out of rotation — never tuned around.
 
@@ -129,11 +136,46 @@ evidence (RepoSignals | description)
 - Repo-grounded → confidence tier High/Medium from rules↔LLM consensus.
 - Description-grounded → **capped at "Low confidence"** regardless of internal agreement → UI banner: *"Inferred from your description only — not verified against code."*
 
-**Output:** validated `ServicePlan`:
-`{ input_kind, pattern: <1 of 5–8 templates>, slots: {slotName: {serviceId, confidence, evidence}}, customEdges[], metadata:{grounding, truncated, parseErrors}, services:≤12 }`
+**Output contract — current state (post I-22 / I-23):** validated `ServicePlan`:
+```
+{ input_kind,
+  detectedPattern,            // one of the closed 8-value PATTERN_IDS enum (architecture.ts):
+                              // static-site · serverless-api · containerised-app · event-driven ·
+                              // ml-pipeline · full-stack-web · data-pipeline · generic
+                              // UI label + sanity lookup ONLY — it does NOT constrain which
+                              // components or how many services the plan may contain
+  components: [{ id, name, type, technology, details, evidence[], confidence }],
+  awsMappings: [{ componentId, serviceId, confidence, evidence, category }],
+  relationships: [...],
+  proposalTitle?, tradeOffDimension?, tradeOffDescription?,   // set when an alternate exists
+  metadata: { grounding, truncated, parseErrors } }
+```
 
-- Single-deployable rule (flaw 2): only root/depth-≤1 manifests were seen by the fetcher, so classification always picks **one** pattern — the strongest root-level deployable. No composition.
-- Template slot max ≤ 12 distinct services (bounds Stage 5 cost, flaw 3).
+Four things changed from the original design and are load-bearing:
+
+- **Open 155-entry catalog, not a ~30–40 enum.** `ServiceId` in `schema.ts` is a deliberately-open allowlist of 155 AWS services. It is safe to extend. The **PATTERN_IDS enum (8 values) is a separate thing and must NOT be widened** — the two are distinct (see `.planning/ARCHITECTURE.md`, "Two-Enum Distinction").
+- **Soft ceiling, no hard 12-service cap (I-22).** The old "≤ 12 distinct services by construction" template-slot cap is gone. A plan with more than 25 services emits a **warning and still passes** `safeParse`. Nothing in the pipeline hard-rejects on service count.
+- **`componentId` uniqueness enforced, non-fatally (I-23).** A `.refine()` guard on `ServicePlanSchema` detects duplicate component IDs and auto-deduplicates (keeps the first, logs a warning) — never a `safeParse` rejection. Merge-time clustering in `mergeSingleServicePlan()` (union-find) unifies identical components across baseline and LLM, and multi-service mappings that would collide get semantic suffixes: `-storage` (S3), `-registry` (ECR), `-alb` (ALB), `-gateway` (APIGateway), `-scheduler` (EventBridge).
+- **Every component and mapping must cite real evidence (commit 6286583).** `normalizeArchitectureModel()` drops components whose `evidence[]` is empty. When an `evidenceRegister` is present, citations are resolved against it and citations failing `isEvidenceSupportingComponent()` are dropped. Nothing may be emitted from prose alone where repo-grounded evidence is expected.
+
+Single-deployable rule (flaw 2) still holds: only root/depth-≤1 manifests reach the fetcher, so classification picks **one** pattern — the strongest root-level deployable. No composition.
+
+### Alternate proposal path
+
+**Code:** `services/patternAlternates.ts`
+
+After the primary `ServicePlan` is validated, `buildAlternateProposal(primaryPlan, input)` may emit a **second** plan for side-by-side trade-off comparison. Trade-offs are **curated and hardcoded — never inferred from score proximity or heuristics.** `CURATED_ALTERNATE_PAIRS` is keyed by `detectedPattern`; a pattern with no entry returns `null` and the analysis produces exactly one proposal.
+
+Currently curated:
+
+| Primary pattern | Alternate | Trade-off dimension |
+|-----------------|-----------|---------------------|
+| `serverless-api` (DynamoDB OLTP) | `data-pipeline` (S3 + Redshift + Kinesis) | Low-latency transactions vs. ad-hoc query flexibility |
+| `containerised-app` (ECS/Fargate) | `serverless-api` (Lambda) | Predictable latency & concurrency vs. scale-to-zero idle cost |
+
+The alternate is built by applying `serviceModifications` (remove/add) to the primary's mappings, then re-running `buildServicePlan()` — so the alternate is a full `ServicePlan` and flows through Stages 4–6 identically (its own diagram XML and cost rows). Both plans get `proposalTitle` / `tradeOffDimension` / `tradeOffDescription` stamped.
+
+> **Ground-truth constraint.** Any evidence-triggered alternate must be checked against `aws-architect/testing baseline.md`'s per-repo **"Do not infer"** lists before it is treated as correct. That file is a live evaluation spec, not documentation. Concretely: for a public-testnet + RPC-provider evidence pattern (Solidity/Hardhat/ethers.js/Sepolia), the blockchain layer is an **external service ($0, non-AWS)** and **Managed Blockchain must not be proposed**, not even as an alternate.
 
 ---
 
@@ -180,7 +222,7 @@ Emits: valid .drawio mxGraph XML (<mxfile>, <diagram>, <mxGraphModel>, container
 **Code:** `services/prices.ts` (PriceService), `services/cost.ts` (CostService)
 
 ### At analysis time (flaw 3)
-- **On analysis:** fetch Price List API **once per (region, service)** for the ~≤12 services in the plan; cache raw unit prices server-side (in-memory, keyed `region:serviceCode:usageType`, TTL 24h).
+- **On analysis:** fetch Price List API **once per (region, service)** for the distinct services in the plan; cache raw unit prices server-side (in-memory, keyed `region:serviceCode:usageType`, TTL 24h). The old "≤12 services" bound no longer comes from a template slot cap (I-22) — batch size is now whatever the plan contains, typically well under the soft ceiling of 25.
 - Defaults from `SERVICE_DEFAULTS.ts` (each with a `source` annotation — free-tier limit or stated "small-app baseline", flaws 6) fall back when the API is unavailable. Baseline quantities are **never derived from repo content** — always labeled assumptions.
 
 ### Quantity formulas
@@ -191,9 +233,9 @@ Emits: valid .drawio mxGraph XML (<mxfile>, <diagram>, <mxGraphModel>, container
 ```
 region changed on cost tab
   → cost panel shows "Loading prices…", slider disabled
-  → POST /api/prices { services (≤12), region }
+  → POST /api/prices { services (distinct services in plan), region }
   → PriceService: cache hit? → instant
-    miss? → fetch only the planned services (~≤10 GetProducts, within token-bucket burst) → ~1-2s typical, ≤3s worst case
+    miss? → fetch only the planned services (GetProducts batch, within token-bucket burst) → ~1-2s typical
   → enable slider with new prices
 ```
 - No pre-warming of other regions; default region = analysis region (us-east-1) → common path never re-fetches.
@@ -208,12 +250,22 @@ Response to the client (all server-side compute, no secrets):
 ```
 {
   input_kind, grounding,
-  service_plan,             // validated ServicePlan (≤12 services, pattern, slots)
+  service_plan,             // validated ServicePlan (no service cap; detectedPattern is a label)
   diagram_xml,              // mxGraph XML for the iframe + .drawio download
   cost_rows: [{service, unit, unitPrice, quantityFormula, monthly}],
-  warnings: [truncated, parse_errors, grounding disclaimer, insufficient?]
+  alternate?: {             // present only when patternAlternates has a curated pair
+    service_plan,           // full alternate ServicePlan
+    diagram_xml,
+    cost_rows,
+    proposalTitle, tradeOffDimension, tradeOffDescription
+  },
+  cft_yaml?,                // CloudFormation template (cftExport.ts) when requested
+  warnings: [truncated, parse_errors, grounding disclaimer, soft-ceiling (>25 services),
+             duplicate-componentId auto-dedupe, insufficient?]
 }
 ```
+
+**CloudFormation export — `services/cftExport.ts`:** deterministic `ServicePlan → CFT YAML`. Covers Lambda, ECS (cluster/task-def/service), API Gateway REST, ALB, VPC + public/private subnets, S3, DynamoDB, RDS, SQS, SNS, EventBridge. Injects least-privilege IAM execution roles, `AppName`/`Environment` parameters, and output ARNs, with a review disclaimer. Like the diagram, it is a pure deterministic function of the plan — the LLM never emits YAML (Decision 4).
 
 Error paths:
 - Insufficient signal (Stage 2 gate) → advisory payload, no plan/diagram/cost.
@@ -232,6 +284,8 @@ Error paths:
 | **Fullscreen Mode** | Toolbar toggle switches the diagram workspace into an immersive `100vw × 100vh` modal canvas. |
 | **Download .drawio** | Client-side Blob download of `diagram_xml` string; opens directly in Diagrams.net / draw.io desktop without server round-trip. |
 | **External Editor** | Direct link button to `https://app.diagrams.net` for advanced external editing. |
+| **Alternate proposal compare** | Shown only when `alternate` is present. Renders the alternate's title, trade-off dimension, and description beside the primary, with its own diagram and cost rows for side-by-side evaluation. |
+| **Download CloudFormation** | Client-side Blob download of `cft_yaml` (`cftExport.ts` output) with the accompanying architectural-review disclaimer. |
 | **Loading Visualizer** | Calm central breathing core orb with `Layers` icon, ambient glow, concentric ripple rings, orbital SVG dashes, and live progress percentage counter. |
 | **User slider (100→1M)** | **Pure client math** from cached `cost_rows` formulas — no network per tick. |
 | **Region picker** | Triggers `POST /api/prices` (Stage 5); spinner + disabled slider while loading. |
@@ -273,10 +327,10 @@ logged-in, "Save analysis"
 |----------|-------|
 | GitHub API | PAT via env (5k req/hr) + per-`owner/repo@sha` evidence cache; unauthenticated path still works (60/hr). |
 | LLM | ≤3 retries; no key → rules-only. |
-| AWS Pricing | 24h TTL cache; ≤12 services/region; burst ~10 (5/s refill) fits the whole batch. |
+| AWS Pricing | 24h TTL cache; one fetch per (region, service) for the plan's distinct services; burst ~10 (5/s refill) covers a typical batch. |
 | draw.io embed | Server sends XML; iframe does the rendering — no bundling of mxGraph. |
 
 <!-- GSD:flow-end -->
 
 ---
-*Last updated: 2026-08-12 — consolidated from `.planning/research/ARCHITECTURE.md` and flaw resolutions 1–8.*
+*Last updated: 2026-09-05 — Stage 3 output contract rewritten for the 155-service open catalog, soft >25 ceiling (replacing the hard 12-service cap), `componentId` uniqueness refine + merge-time clustering, and the evidence-citation invariant; alternate-proposal path and CloudFormation export added; scope narrowed to Module A.*

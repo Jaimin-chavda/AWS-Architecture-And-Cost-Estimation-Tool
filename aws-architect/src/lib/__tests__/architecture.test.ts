@@ -79,7 +79,7 @@ function makeModel(overrides: Partial<ArchitectureModel> = {}): ArchitectureMode
 
 describe("validateArchitectureModel", () => {
   it("accepts a valid model and normalizes it", () => {
-    const model = validateArchitectureModel(makeModel());
+    const { model } = validateArchitectureModel(makeModel());
     assert.ok(model, "Valid model should pass validation");
     assert.strictEqual(model!.appType, "full-stack-web");
     assert.strictEqual(model!.components.length, 3);
@@ -87,7 +87,11 @@ describe("validateArchitectureModel", () => {
 
   it("rejects a model with an invalid appType", () => {
     const bad = makeModel({ appType: "not-a-pattern" as ArchitectureModel["appType"] });
-    assert.strictEqual(validateArchitectureModel(bad), null);
+    const result = validateArchitectureModel(bad);
+    assert.strictEqual(result.model, null);
+    // The reason distinguishes "the shape was wrong" from "nothing was cited",
+    // which the previous bare null could not.
+    assert.strictEqual(result.reason, "schema");
   });
 
   it("rejects a model with an invalid component type", () => {
@@ -96,18 +100,20 @@ describe("validateArchitectureModel", () => {
         comp("web", "Web UI", "not-a-type" as ArchitectureModel["components"][number]["type"], "React"),
       ],
     });
-    assert.strictEqual(validateArchitectureModel(bad), null);
+    const result = validateArchitectureModel(bad);
+    assert.strictEqual(result.model, null);
+    assert.strictEqual(result.reason, "schema");
   });
 
   it("dedupes duplicate string arrays case-insensitively", () => {
-    const model = validateArchitectureModel(
+    const { model } = validateArchitectureModel(
       makeModel({ languages: ["typescript", "TypeScript", "python", "typescript"] })
     );
     assert.deepStrictEqual(model!.languages, ["typescript", "python"]);
   });
 
   it("drops relationships that reference unknown component ids", () => {
-    const model = validateArchitectureModel(
+    const { model } = validateArchitectureModel(
       makeModel({
         relationships: [
           { from: "web", to: "api", type: "calls" },
@@ -131,7 +137,7 @@ describe("validateArchitectureModel", () => {
 
 describe("evidence backstop — components without evidence are dropped", () => {
   it("drops an evidence-free component while keeping its evidence-backed siblings", () => {
-    const model = validateArchitectureModel(
+    const { model } = validateArchitectureModel(
       makeModel({
         components: [
           comp("web", "Web UI", "frontend", "React", "high", ["package.json → react"]),
@@ -147,7 +153,7 @@ describe("evidence backstop — components without evidence are dropped", () => 
   });
 
   it("treats blank and whitespace-only citations as no evidence", () => {
-    const model = validateArchitectureModel(
+    const { model } = validateArchitectureModel(
       makeModel({
         components: [
           comp("api", "API", "backend", "Express", "high", ["package.json → express"]),
@@ -161,7 +167,7 @@ describe("evidence backstop — components without evidence are dropped", () => 
   });
 
   it("drops relationships whose endpoint was dropped for lacking evidence", () => {
-    const model = validateArchitectureModel(
+    const { model } = validateArchitectureModel(
       makeModel({
         components: [
           comp("web", "Web UI", "frontend", "React", "high", ["index.html"]),
@@ -181,7 +187,7 @@ describe("evidence backstop — components without evidence are dropped", () => 
 
   it("static HTML/CSS/JS repo stays a single frontend component — no backend tiers", () => {
     // The reported bug: zero backend evidence, yet the LLM emits a full stack.
-    const model = validateArchitectureModel(
+    const { model } = validateArchitectureModel(
       makeModel({
         appType: "static-site",
         components: [
@@ -214,7 +220,7 @@ describe("evidence backstop — components without evidence are dropped", () => 
   });
 
   it("returns null when every component lacks evidence, so inference falls back to rules", () => {
-    const model = validateArchitectureModel(
+    const { model } = validateArchitectureModel(
       makeModel({
         components: [
           comp("fn", "Handlers", "backend", "AWS Lambda", "high", []),
@@ -312,7 +318,7 @@ describe("mapArchitectureModelToServicePlan", () => {
   });
 
   it("keeps every serviceId on the catalog allowlist and never exceeds 12", () => {
-    const model = validateArchitectureModel(makeModel())!;
+    const { model } = validateArchitectureModel(makeModel());
     const plan = mapArchitectureModelToServicePlan(model, CTX);
     const check = ServicePlanSchema.safeParse(plan);
     assert.ok(check.success, "mapped plan must satisfy the ServicePlan contract");
@@ -380,7 +386,7 @@ describe("mapArchitectureModelToServicePlan", () => {
   });
 
   it("ArchitectureComponent evidence and confidence survive round-trip validation", () => {
-    const model = validateArchitectureModel(
+    const { model } = validateArchitectureModel(
       makeModel({
         components: [
           {

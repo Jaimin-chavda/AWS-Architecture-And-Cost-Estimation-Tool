@@ -7,13 +7,21 @@
  * It does NOT choose AWS services. AWS service selection happens later,
  * deterministically, in architecture.ts::mapArchitectureModelToServicePlan().
  *
- * Provider chain (first configured key wins):
+ * Provider chain — tried IN ORDER until one returns a model. This is failover,
+ * not precedence: a configured-but-dead DEEPSEEK_API_KEY no longer prevents
+ * Google and Groq from being attempted.
  *   1. DEEPSEEK_API_KEY  → deepseek-v4-flash  (@ai-sdk/deepseek)
  *   2. GOOGLE_API_KEY    → gemini-2.5-flash   (@ai-sdk/google)
  *   3. GROQ_API_KEY      → llama-3.3-70b      (@ai-sdk/groq)
+ *
+ * Failure is never silent. analyzeArchitecture returns a discriminated
+ * LlmArchitectureResult carrying the reason and per-provider diagnostics, so
+ * callers can tell "no provider configured" from "every provider failed" from
+ * "the model answered but cited no real evidence".
  */
 
 import { generateObject } from "ai";
+import type { LanguageModel } from "ai";
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createGroq } from "@ai-sdk/groq";
@@ -23,8 +31,8 @@ import {
   validateArchitectureModel,
 } from "./architecture.ts";
 import { COMPONENT_TYPES } from "./schema.ts";
-import type { ArchitectureModel } from "./architecture.ts";
-import type { Grounding } from "./schema.ts";
+import type { ArchitectureModel, ArchitectureValidationFailure } from "./architecture.ts";
+import type { Diagnostic, Grounding } from "./schema.ts";
 import type { RepoSignals } from "./repoFetcher.ts";
 import type { ProjectProfile } from "./repoAnalyzer.ts";
 
@@ -32,51 +40,89 @@ import type { ProjectProfile } from "./repoAnalyzer.ts";
 // Provider selection
 // ---------------------------------------------------------------------------
 
+/**
+ * Model IDs. Pinned to one verified value each — the Google entry previously
+ * disagreed with this file's own header comment and with CLAUDE.md
+ * ("gemini-3.5-flash" in code, "gemini-2.5-flash" in docs). gemini-2.5-flash is
+ * the id the stack research verified as having a real free tier, so that is the
+ * one kept; the header comment above now matches.
+ */
+const MODEL_IDS = {
+  deepseek: "deepseek-v4-flash",
+  google: "gemini-2.5-flash",
+  groq: "llama-3.3-70b-versatile",
+} as const;
+
 interface ProviderConfig {
   name: string;
   model: string;
-  getModel: () => ReturnType<typeof createDeepSeek> extends (...args: unknown[]) => infer R ? R : never;
+  /**
+   * `LanguageModel` is the AI SDK's own union of accepted model values, so
+   * generateObject takes this directly. The previous signature resolved to
+   * `never` and forced `as never` at every call site, which defeated type
+   * checking at exactly the boundary where provider clients differ.
+   */
+  getModel: () => LanguageModel;
 }
 
-function resolveProvider(): ProviderConfig | null {
+/**
+ * Every configured provider, in failover order.
+ *
+ * Returns a list rather than the first match: analyzeArchitecture walks it and
+ * tries the next provider when one throws. A configured-but-dead key used to
+ * make the whole LLM path unavailable.
+ */
+function resolveProviders(): ProviderConfig[] {
+  const providers: ProviderConfig[] = [];
+
   if (process.env.DEEPSEEK_API_KEY) {
     const client = createDeepSeek({ apiKey: process.env.DEEPSEEK_API_KEY });
-    return {
+    providers.push({
       name: "deepseek",
-      model: "deepseek-v4-flash",
-      getModel: () => client("deepseek-v4-flash") as never,
-    };
+      model: MODEL_IDS.deepseek,
+      getModel: () => client(MODEL_IDS.deepseek),
+    });
   }
   if (process.env.GOOGLE_API_KEY) {
     const client = createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY });
-    return {
+    providers.push({
       name: "google",
-      model: "gemini-3.5-flash",
-      getModel: () => client("gemini-3.5-flash") as never,
-    };
+      model: MODEL_IDS.google,
+      getModel: () => client(MODEL_IDS.google),
+    });
   }
   if (process.env.GROQ_API_KEY) {
     const client = createGroq({ apiKey: process.env.GROQ_API_KEY });
-    return {
+    providers.push({
       name: "groq",
-      model: "llama-3.3-70b-versatile",
-      getModel: () => client("llama-3.3-70b-versatile") as never,
-    };
+      model: MODEL_IDS.groq,
+      getModel: () => client(MODEL_IDS.groq),
+    });
   }
-  return null;
+
+  return providers;
 }
 
 export function llmConfigured(): boolean {
-  return !!(
-    process.env.DEEPSEEK_API_KEY ||
-    process.env.GOOGLE_API_KEY ||
-    process.env.GROQ_API_KEY
-  );
+  return resolveProviders().length > 0;
 }
 
 // ---------------------------------------------------------------------------
 // Prompt builders
 // ---------------------------------------------------------------------------
+
+/**
+ * The component vocabulary, generated from the schema enum.
+ *
+ * Both prompt branches used to hand-write this list, and both disagreed with
+ * `COMPONENT_TYPES`: the repo branch omitted scheduler/search/websocket, the
+ * description branch omitted search. A model that answered with a type the
+ * prompt named but the enum lacked — or picked a wrong-but-listed type because
+ * the right one was never offered — failed `generateObject` schema validation,
+ * which surfaced only as a rules fallback. Deriving it removes that class of
+ * failure permanently.
+ */
+const COMPONENT_TYPE_LIST = COMPONENT_TYPES.join(", ");
 
 function buildSystemPrompt(): string {
   return `You are a Senior Principal AWS Cloud Architect. You are given structured evidence extracted from a software repository or project description. Build a model of the system that ACTUALLY EXISTS in that evidence — nothing more.
@@ -108,7 +154,7 @@ Output schema requirements:
 - appType: primary pattern (static-site, serverless-api, containerised-app, event-driven, ml-pipeline, full-stack-web, data-pipeline, generic). Pick the one the evidence supports — "static-site" and "generic" are ordinary answers, not failures.
 - appName: clean project / system name taken from the repo or description.
 - description: 1-2 sentence overview of the application as it actually is.
-- components: the system components the evidence proves, drawn from frontend, backend, api, worker, database, cache, queue, object-storage, auth, proxy, external-service, messaging. Each has { id, name, type, technology, details, evidence, confidence }.
+- components: the system components the evidence proves. "type" MUST be exactly one of: ${COMPONENT_TYPE_LIST}. Any other value is rejected. Each has { id, name, type, technology, details, evidence, confidence }.
   - evidence: array of specific citations, as defined by THE EVIDENCE RULE. Never empty.
   - confidence: "high" when the evidence is a direct declaration (a dependency, a compose service, an IaC resource); "medium" when inferred from strong indirect signals such as an import or a README statement; "low" when the signal is weak. Do not report "high" for a guess — prefer omitting the component entirely.
 - relationships: runtime connections you can actually justify between components you emitted: { from: <component id>, to: <component id>, type: "calls" | "reads" | "writes" | "triggers" | "sends" | "receives" | "subscribes" }. Both ids must refer to emitted components. If the project has one component, relationships is an empty array.
@@ -217,9 +263,7 @@ export function buildArchitecturePrompt(
       "\nactually states or unambiguously implies, and cite the phrase you took each" +
       "\none from in that component's 'evidence' array (e.g. evidence:" +
       "\n[\"description: 'stores votes in MongoDB'\"])." +
-      "\n\nComponent types available: frontend, backend, api, worker, scheduler," +
-      "\ndatabase, cache, queue, object-storage, auth, proxy, messaging," +
-      "\nexternal-service." +
+      `\n\nComponent types available (use EXACTLY one of these): ${COMPONENT_TYPE_LIST}.` +
       "\n\nEmit a tier ONLY where the description supports it. A description that" +
       "\nmentions no database gets no database; one that mentions no background" +
       "\nprocessing gets no worker and no queue; one that mentions no login gets no" +
@@ -239,15 +283,58 @@ export function buildArchitecturePrompt(
 // Main call
 // ---------------------------------------------------------------------------
 
+/** Why the LLM path did not produce a usable ArchitectureModel. */
+export type LlmFailureReason =
+  /** No provider key is set. Rules are the intended answer, not a degradation. */
+  | "no-provider"
+  /** Every configured provider threw (network, auth, rate limit, schema mismatch). */
+  | "all-providers-failed"
+  /** A provider answered, but the object failed schema or evidence validation. */
+  | "model-invalid";
+
+export type LlmArchitectureResult =
+  | { model: ArchitectureModel; error: null; provider: string; diagnostics: Diagnostic[] }
+  | {
+      model: null;
+      error: LlmFailureReason;
+      /** Provider that produced the final failure, when one got that far. */
+      provider: string | null;
+      diagnostics: Diagnostic[];
+    };
+
+/** How long a single provider attempt may take before we move to the next one. */
+const LLM_TIMEOUT_MS = 60_000;
+
+/**
+ * Builds the ArchitectureModel, trying each configured provider in turn.
+ *
+ * Never throws and never returns a bare null: the result always says WHY there
+ * is no model, and `diagnostics` carries one entry per failed attempt. Callers
+ * forward those into the API response so an LLM outage is visible to the user
+ * instead of appearing as an unusually thin but confident inference.
+ */
 export async function analyzeArchitecture(opts: {
   signals: RepoSignals | null;
   description: string;
   inputKind: "github_url" | "description";
   grounding: Grounding;
   profile?: ProjectProfile | null;
-}): Promise<ArchitectureModel | null> {
-  const provider = resolveProvider();
-  if (!provider) return null;
+  /** Overall pipeline deadline; aborts the in-flight provider call. */
+  signal?: AbortSignal;
+}): Promise<LlmArchitectureResult> {
+  const diagnostics: Diagnostic[] = [];
+  const providers = resolveProviders();
+
+  if (providers.length === 0) {
+    diagnostics.push({
+      stage: "llm",
+      severity: "info",
+      code: "llm-not-configured",
+      message:
+        "No LLM provider key is configured — the deterministic rule engine produced this plan.",
+    });
+    return { model: null, error: "no-provider", provider: null, diagnostics };
+  }
 
   const prompt = buildArchitecturePrompt(
     opts.profile ?? null,
@@ -255,20 +342,77 @@ export async function analyzeArchitecture(opts: {
     opts.description,
     opts.grounding
   );
+  const system = buildSystemPrompt();
 
-  try {
-    const { object: raw } = await generateObject({
-      model: provider.getModel() as Parameters<typeof generateObject>[0]["model"],
-      schema: ArchitectureModelSchema,
-      system: buildSystemPrompt(),
-      prompt,
-      temperature: 0,
-      maxRetries: 3,
-    });
+  // Tracks the most informative failure so the caller can distinguish "the
+  // model answered but cited nothing real" from "nobody answered at all".
+  let lastValidationFailure: { provider: string; failure: ArchitectureValidationFailure } | null =
+    null;
 
-    return validateArchitectureModel(raw, opts.profile?.evidenceRegister);
-  } catch (err) {
-    console.warn("[llmClient] Architecture model call failed:", (err as Error).message ?? String(err));
-    return null;
+  for (const provider of providers) {
+    const timeout = AbortSignal.timeout(LLM_TIMEOUT_MS);
+    const abort = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
+
+    try {
+      const { object: raw } = await generateObject({
+        model: provider.getModel(),
+        schema: ArchitectureModelSchema,
+        system,
+        prompt,
+        temperature: 0,
+        maxRetries: 3,
+        abortSignal: abort,
+      });
+
+      const validation = validateArchitectureModel(raw, opts.profile?.evidenceRegister);
+      if (validation.model) {
+        return { model: validation.model, error: null, provider: provider.name, diagnostics };
+      }
+
+      // The provider is alive and answering; the answer is unusable. Trying the
+      // next provider is still worth it — a different model may cite properly.
+      lastValidationFailure = { provider: provider.name, failure: validation };
+      diagnostics.push({
+        stage: "llm",
+        severity: "warning",
+        code: `llm-model-${validation.reason}`,
+        message: `${provider.name} returned a model that failed validation (${validation.reason}).`,
+        detail: validation.detail,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[llmClient] ${provider.name}/${provider.model} architecture call failed:`,
+        message
+      );
+      diagnostics.push({
+        stage: "llm",
+        severity: "warning",
+        code: "llm-call-failed",
+        message: `LLM provider ${provider.name} failed; trying the next configured provider.`,
+        detail: `${provider.model}: ${message}`.slice(0, 1_000),
+      });
+
+      // An aborted overall request is not a provider problem — stop retrying.
+      if (opts.signal?.aborted) break;
+    }
   }
+
+  if (lastValidationFailure) {
+    return {
+      model: null,
+      error: "model-invalid",
+      provider: lastValidationFailure.provider,
+      diagnostics,
+    };
+  }
+
+  diagnostics.push({
+    stage: "llm",
+    severity: "error",
+    code: "llm-all-providers-failed",
+    message: `All ${providers.length} configured LLM provider(s) failed — falling back to the rule engine.`,
+    detail: providers.map((p) => `${p.name}/${p.model}`).join(", "),
+  });
+  return { model: null, error: "all-providers-failed", provider: null, diagnostics };
 }

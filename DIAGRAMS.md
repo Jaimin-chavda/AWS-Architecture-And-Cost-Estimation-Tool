@@ -1,7 +1,9 @@
 # DFD & Use Case Diagrams
 
-Project: AWS Cloud Governance Platform (Modules A–D).
+Project: **AWS Architect — Module A (AI Architecture Advisor)**.
 Mermaid diagrams — render on GitHub / VS Code / any mermaid-enabled markdown viewer.
+
+> **Scope note (2026-09-05):** project scope is **Module A only**. The Module B / C / D use-case and DFD sections below are retained as the **original design record from the four-module SRS phase** — they are **descoped and not implemented**, and are not upcoming work. Only the Module A sections and the mxGraph engine section describe the built system. See `DECISIONS.md` Decision 46.
 
 ## Use Case Diagrams
 
@@ -33,7 +35,9 @@ flowchart LR
     UC6 --> UC8
 ```
 
-### Module B — Cost Monitoring & Anomaly Detection
+### Module B — Cost Monitoring & Anomaly Detection — DESCOPED (2026-09-05)
+
+*Not implemented, not planned. Original four-module design record only.*
 ```mermaid
 flowchart LR
     Admin["Administrator"]
@@ -54,7 +58,9 @@ flowchart LR
     UC4 -. system-generated .-> UC7
 ```
 
-### Module C — Resource Optimization Engine
+### Module C — Resource Optimization Engine — DESCOPED (2026-09-05)
+
+*Not implemented, not planned. Original four-module design record only.*
 ```mermaid
 flowchart LR
     DevOps["DevOps / Administrator"]
@@ -75,7 +81,9 @@ flowchart LR
     UC2 --> UC5
 ```
 
-### Module D — Security Posture Scanner
+### Module D — Security Posture Scanner — DESCOPED (2026-09-05)
+
+*Not implemented, not planned. Original four-module design record only.*
 ```mermaid
 flowchart LR
     SecAdmin["Security Administrator"]
@@ -146,7 +154,9 @@ flowchart TD
     P7 -->|monthly cost rows & slider formulas| User
 ```
 
-## DFD — Module B: Cost Monitoring & Anomaly Detection
+## DFD — Module B: Cost Monitoring & Anomaly Detection — DESCOPED (2026-09-05)
+
+*Not implemented, not planned. Retained as the original four-module SRS design record. The Cost Explorer ingestion and TimescaleDB store shown below are not part of this project — see `DECISIONS.md` Decision 46.*
 
 ### Level 0 (Context Diagram)
 ```mermaid

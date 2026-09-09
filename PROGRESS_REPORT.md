@@ -9,6 +9,7 @@
 - **Industry Expert:** Mansi Solanki
 - **Student IDs:** D25DCE175, D25DCE170, D25DCE164
 - **Review Period:** Academic Year 2026 (Phase 2 Review)
+- **Scope:** **Module A — AI Architecture Advisor, only.** The Modules B (Cost Monitoring), C (Resource Optimization), and D (Security Scanner) originally scoped in W1 are **descoped as of 2026-09-05** and are not being pursued. All work described below, and all future improvements listed in Section 4, are within Module A.
 
 ---
 
@@ -16,6 +17,8 @@
 
 > **Goal Statement:**  
 > To analyze any GitHub repository or plain project idea, automatically suggest its required AWS cloud architecture, and generate an interactive draw.io deployment diagram, realistic cost estimate, and deployable CloudFormation template.
+
+Scope is limited to this single capability (Module A). Live AWS-account monitoring, resource-optimization scanning, and security posture scanning are outside the project's scope.
 
 ---
 
@@ -82,7 +85,7 @@ During the implementation of this phase, several technical challenges were addre
 
 ## 4. Future Improvements
 
-Subsequent phases will refine and expand upon the established foundation:
+Subsequent phases will refine and expand upon the established Module A foundation. All items below are Module A improvements; none of them reintroduce Modules B/C/D:
 
 - **Repository Analysis:** Enhance parsing depth for large enterprise monorepos and polyglot stacks, improving automatic detection of background workers, message queues, and implicit database drivers.
 - **Architecture Generation:** Expand rule-scoring algorithms and LLM prompting to support hybrid, multi-region, and multi-tier architectures with higher classification precision.
@@ -90,6 +93,11 @@ Subsequent phases will refine and expand upon the established foundation:
 - **Cost Estimation:** Deepen cost modeling by incorporating regional data transfer costs, managed NAT gateway rates, and AWS Free Tier discount thresholds into the interactive simulator.
 - **Architecture Comparison:** Deliver richer visual comparison diffs (visual highlighting of components added or removed between primary and alternate designs) alongside tabular cost variance breakdowns.
 - **CloudFormation & IaC Expansion:** Enhance generated CloudFormation templates with customizable CIDR blocks, KMS encryption configurations, and optional Terraform (`.tf`) syntax export.
+- **Deployment:** Host the application for real use rather than running it only as a local demo (see `.planning/PROJECT.md`, Decision #45).
+
+### Explicitly Not Planned
+
+Modules B (Cost Monitoring), C (Resource Optimization), and D (Security Scanner) — originally scoped in the W1 requirement gathering — are descoped as of 2026-09-05. Their supporting infrastructure (AWS Cost Explorer ingestion, TimescaleDB time-series storage, CIS-benchmark scanning, SES alerting) is therefore not part of the project and is not planned future work.
 
 ---
 
@@ -100,7 +108,7 @@ The current phase of the **AWS Architect** Senior Graduation Project achieved si
 - Contextual alternative architecture proposals with multi-dimensional trade-off comparisons.
 - One-click deployable AWS CloudFormation (CFT YAML) template generation.
 
-All features are supported by automated verification tests ensuring shape stability, diagram integrity, and fallback safety. The project continues on track toward delivering a robust, end-to-end cloud engineering tool that transforms source code and ideas into well-architected, cost-transparent AWS solutions.
+All features are supported by automated verification tests ensuring shape stability, diagram integrity, and fallback safety. The project scope has been deliberately narrowed to Module A so that the single core capability — turning source code or an idea into a well-architected, cost-transparent AWS design — is delivered to depth rather than four modules delivered shallowly.
 
 ---
 

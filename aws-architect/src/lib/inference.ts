@@ -18,6 +18,8 @@ import {
   ServicePlanSchema,
   SERVICE_IDS,
   SERVICE_CATEGORIES,
+  type Diagnostic,
+  type PipelineEngine,
   type ServicePlan,
   type ServiceId,
   type DiscoveredComponent,
@@ -181,7 +183,10 @@ export function mergeSingleServicePlan(
     combinedMappings = [...baseline.awsMappings];
   }
 
-  let finalMappings = deduplicateAwsMappings(combinedMappings);
+  // Clone before dedupe: the loops below rewrite componentId, and the mapping
+  // objects came from the caller's plans (and, via proposals[0], from the same
+  // arrays the caller still holds). Mutating them in place corrupted the input.
+  let finalMappings = deduplicateAwsMappings(combinedMappings.map((m) => ({ ...m })));
 
   // 2. Merge and Deduplicate Components
   const candidateComponents = [
@@ -490,7 +495,17 @@ export function mergeSingleServicePlan(
 
   const cappedPlan = applyGroundingCap(mergedPlan, effectiveGrounding);
   const parsed = ServicePlanSchema.safeParse(cappedPlan);
-  return parsed.success ? parsed.data : cappedPlan;
+  if (parsed.success) return parsed.data;
+
+  // Returning the unvalidated plan let invalid shapes reach diagram.ts and
+  // cost.ts, where they surfaced as unrelated crashes far from the cause. A
+  // merged plan that violates its own contract is a bug in this function, not a
+  // condition to paper over: throw at the point of failure. runInference does
+  // not call this today (see P3), so no user-facing path can hit it.
+  const detail = parsed.error.issues
+    .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+    .join("; ");
+  throw new Error(`merged ServicePlan failed schema validation: ${detail}`);
 }
 
 /**
@@ -537,12 +552,37 @@ export interface InferenceInput {
   signals: RepoSignals | null;
   description: string;
   profile?: ProjectProfile | null;
+  /** Overall request deadline, forwarded to the LLM call. */
+  signal?: AbortSignal;
 }
 
 export interface InferenceResult {
   plan: ServicePlan;
   plans: ServicePlan[];
   architectureModel: ArchitectureModel | null;
+  /**
+   * Which path produced `plan`. "rules-fallback" specifically means an LLM was
+   * configured and failed — the one case a user must be told about, and the one
+   * that used to be indistinguishable from a successful thin inference.
+   */
+  engine: PipelineEngine;
+  /** Machine-readable record of every failure and degradation along the way. */
+  diagnostics: Diagnostic[];
+}
+
+/**
+ * Separates the plan from its `proposals` array without aliasing.
+ *
+ * `{ ...plan }` is shallow: the copy and the original share `components`,
+ * `awsMappings`, `relationships`, and `deploymentModel` by reference. Since the
+ * plan then stores the copy inside its own `proposals[0]`, any later in-place
+ * mutation of a mapping (the merge layer does exactly that) wrote through to
+ * both. structuredClone severs it.
+ */
+function detachProposal(plan: ServicePlan): ServicePlan {
+  const copy = structuredClone(plan);
+  delete copy.proposals;
+  return copy;
 }
 
 /**
@@ -551,60 +591,78 @@ export interface InferenceResult {
  *   2. The model is validated and deterministically mapped to a ServicePlan.
  *   3. No LLM (or LLM failure) → deterministic rules baseline.
  *
- * Always returns a valid ServicePlan — never throws.
+ * Always returns a schema-valid ServicePlan — never throws, and never returns
+ * an unvalidated plan.
  */
 export async function runInference(input: InferenceInput): Promise<InferenceResult> {
   const { ruleInput, signals, description, profile } = input;
+  const diagnostics: Diagnostic[] = [];
 
   // Fallback: deterministic rule engine (no LLM configured, or LLM failed).
-  const baseline = () => runRuleEngine({ ...ruleInput, profile: profile ?? undefined });
+  const baseline = (engine: PipelineEngine): InferenceResult => {
+    const basePlan = runRuleEngine({ ...ruleInput, profile: profile ?? undefined });
+    const plans =
+      basePlan.proposals && basePlan.proposals.length > 0 ? basePlan.proposals : [basePlan];
+    return { plan: basePlan, plans, architectureModel: null, engine, diagnostics };
+  };
 
   // Central reasoning path requires an LLM provider.
-  if (!llmConfigured()) {
-    const basePlan = baseline();
-    const plans = basePlan.proposals && basePlan.proposals.length > 0 ? basePlan.proposals : [basePlan];
-    return { plan: basePlan, plans, architectureModel: null };
-  }
+  const llmAvailable = llmConfigured();
 
   // 1. LLM builds the architecture model of the whole repo/system.
-  const model = await analyzeArchitecture({
+  const llm = await analyzeArchitecture({
     signals,
     description,
     inputKind: ruleInput.inputKind,
     grounding: ruleInput.grounding,
     profile: profile ?? null,
+    signal: input.signal,
   });
+  diagnostics.push(...llm.diagnostics);
 
-  // 2. analyzeArchitecture already validated + normalized the model; on
-  //    failure (null) fall back to rules.
-  if (!model) {
-    const basePlan = baseline();
-    const plans = basePlan.proposals && basePlan.proposals.length > 0 ? basePlan.proposals : [basePlan];
-    return { plan: basePlan, plans, architectureModel: null };
+  // 2. On failure fall back to rules, but record WHICH kind of failure it was.
+  //    "rules" = nothing was configured, so rules are the intended answer.
+  //    "rules-fallback" = an LLM was configured and did not deliver.
+  if (!llm.model) {
+    if (llmAvailable) {
+      diagnostics.push({
+        stage: "inference",
+        severity: "warning",
+        code: "llm-fallback-to-rules",
+        message:
+          "The AI analysis was unavailable, so this plan came from keyword rules only. " +
+          "Treat the service list as a starting point rather than a reading of your project.",
+        detail: `reason: ${llm.error}`,
+      });
+    }
+    return baseline(llmAvailable ? "rules-fallback" : "rules");
   }
 
   // 3. Deterministic AWS service mapping from the model — the ONLY inference path.
-  const primaryPlan = mapArchitectureModelToServicePlan(model, {
+  const primaryPlan = mapArchitectureModelToServicePlan(llm.model, {
     inputKind: ruleInput.inputKind,
     grounding: ruleInput.grounding,
     truncated: ruleInput.truncated,
     parseErrors: ruleInput.parseErrors,
     workloadClassification: profile?.workloadClassification,
     evidenceRegister: profile?.evidenceRegister,
+    diagnostics,
   });
 
   const cappedPlan = applyGroundingCap(primaryPlan, ruleInput.grounding);
   const alternatePlan = buildAlternateProposal(cappedPlan, ruleInput);
-  const p1 = { ...cappedPlan };
-  delete p1.proposals;
-  const p2 = alternatePlan ? applyGroundingCap({ ...alternatePlan }, ruleInput.grounding) : null;
-  if (p2) delete p2.proposals;
+  const p1 = detachProposal(cappedPlan);
+  const p2 = alternatePlan
+    ? detachProposal(applyGroundingCap(alternatePlan, ruleInput.grounding))
+    : null;
   const plans = p2 ? [p1, p2] : [p1];
   cappedPlan.proposals = plans;
 
   return {
     plan: cappedPlan,
     plans,
-    architectureModel: model,
+    architectureModel: llm.model,
+    engine: "llm",
+    diagnostics,
   };
 }

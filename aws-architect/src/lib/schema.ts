@@ -340,3 +340,53 @@ export const ServicePlanSchema = z
 export type ServicePlan = z.infer<typeof ServicePlanSchema> & {
   proposals?: ServicePlan[];
 };
+
+// ---------------------------------------------------------------------------
+// Pipeline observability
+//
+// Which code path actually produced the plan the user is looking at. Before
+// this existed, an LLM outage and a confident inference were indistinguishable
+// in the response — the only signal was a console.warn on the server.
+//
+//   "llm"           — the LLM produced an ArchitectureModel and it was used.
+//   "rules"         — no LLM provider configured; the rules baseline is the
+//                     intended answer, not a degradation.
+//   "rules-fallback" — an LLM provider WAS configured but the LLM path failed
+//                     (network, schema mismatch, no evidence-backed
+//                     components) and we silently used rules instead. This is
+//                     the case that must always be visible.
+// ---------------------------------------------------------------------------
+export const PIPELINE_ENGINES = ["llm", "rules", "rules-fallback"] as const;
+export type PipelineEngine = (typeof PIPELINE_ENGINES)[number];
+
+export const DIAGNOSTIC_SEVERITIES = ["info", "warning", "error"] as const;
+export type DiagnosticSeverity = (typeof DIAGNOSTIC_SEVERITIES)[number];
+
+/**
+ * A machine-readable record of something that went wrong, or of a decision the
+ * user could not otherwise see. Unlike `warnings` (prose, user-facing), a
+ * diagnostic carries a stable `code` so tests and the UI can key on it.
+ *
+ * `detail` may contain provider names and zod issue text. It must never carry
+ * an API key, a request URL with credentials, or a raw stack trace — route.ts
+ * returns diagnostics to the browser.
+ */
+export const DiagnosticSchema = z.object({
+  /** Pipeline stage that produced this: "llm", "architecture", "inference", "analyze". */
+  stage: z.string().min(1).max(40),
+  severity: z.enum(DIAGNOSTIC_SEVERITIES),
+  /** Stable kebab-case identifier, e.g. "llm-call-failed". Safe to assert on. */
+  code: z.string().min(1).max(60),
+  /** One sentence, safe to show a user. */
+  message: z.string().min(1).max(400),
+  /** Optional technical detail: provider name, zod issues. Never secrets. */
+  detail: z.string().max(1_000).optional(),
+});
+export type Diagnostic = z.infer<typeof DiagnosticSchema>;
+
+/** Mutable collector threaded through the pipeline so each stage can report. */
+export type DiagnosticSink = Diagnostic[];
+
+export function pushDiagnostic(sink: DiagnosticSink | undefined, d: Diagnostic): void {
+  sink?.push(d);
+}

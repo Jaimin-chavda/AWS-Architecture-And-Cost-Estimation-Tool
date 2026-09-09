@@ -107,13 +107,69 @@ A webapp where a user submits a GitHub repo OR a plain project idea/description,
 <!-- GSD:conventions-start source:CONVENTIONS.md -->
 ## Conventions
 
-Conventions not yet established. Will populate as patterns emerge during development.
+### Test Runner
+`node --experimental-strip-types --test src/lib/__tests__/*.test.ts` from `aws-architect/`. Zero extra deps. `import type` required for type-only exports.
+
+### componentId Convention
+`svc-{serviceId.toLowerCase()}` for inferred generic components. Uniqueness enforced by `ServicePlanSchema` refine guard (auto-dedupes with warning, never hard-reject). Collision suffixes: `-storage` (S3), `-registry` (ECR), `-alb` (ALB), `-gateway` (APIGateway), `-scheduler` (EventBridge).
+
+### Detection: Additive Keyword Scoring (I-4)
+Use `add(serviceId, confidence, evidence, category?)` + `hasAny(text, keywords[])` pattern in ruleEngine.ts. Not one-off if-branches. Confidence escalation, category rank: `repository-evidence` > `deployment-requirement` > `inference` > `recommendation`.
+
+### Evidence Citation Invariant (commit 6286583)
+Every component/mapping MUST carry real evidence. `normalizeArchitectureModel()` drops empty-evidence components. Citations validated against `evidenceRegister` via `isEvidenceSupportingComponent()`. Description-grounded results capped to "low" via `applyGroundingCap()`.
+
+### Confidence Merge (I-10)
+Both agree: "high". LLM only: min("medium", llm). Rules only: "low". Description: all low.
+
+### Pipeline Flow
+```
+RepoSignals/description → LLM → ArchitectureModel → validateArchitectureModel()
+  → normalizeArchitectureModel() → mapArchitectureModelToServicePlan()
+  → mergeSingleServicePlan() (baseline + LLM, union-find dedup)
+  → applyGroundingCap() → ServicePlanSchema.safeParse()
+```
+
+### Code Layout
+`src/lib/schema.ts` (shared types, 155-entry catalog), `architecture.ts` (8-pattern enum, deterministic mapping), `ruleEngine.ts` (keyword detection), `inference.ts` (orchestration), `diagram.ts` (mxGraph XML), `cost.ts`/`prices.ts`, `cftExport.ts`, `patternAlternates.ts`, `llmClient.ts`, `repoFetcher.ts`, `repoAnalyzer.ts`.
+
+### Standing Risk — Closed Allowlists (I-22/I-23)
+`classifyFile()` (repoFetcher.ts) and `NPM_FRAMEWORK_MAP`/`SDK_METHOD_MAP` (repoAnalyzer.ts) are closed allowlists that silently drop unrecognized evidence. Debug "pipeline doesn't detect X" by checking these first.
+
+### References
+DECISIONS.md Implementation Log (I-1–I-23) records all bug/fix history — consult before inference/schema work.
 <!-- GSD:conventions-end -->
 
 <!-- GSD:architecture-start source:ARCHITECTURE.md -->
-## Architecture
+## Architecture — Current State
 
-Architecture not yet mapped. Follow existing patterns found in the codebase.
+### Pipeline
+```
+User input (repo URL | freeform description)
+  → POST /api/analyze → input normalization → evidence extraction (repoFetcher or empty)
+  → insufficient-signal gate (no manifests + README < 100 chars → advisory)
+  → inference: ruleEngine.ts (keyword scoring) + llmClient.ts (AI SDK generateObject)
+    → architecture.ts (validate + normalize + deterministic AWS mapping)
+    → inference.ts (merge baseline + LLM, union-find dedup, grounding cap, safeParse)
+  → diagram.ts (ServicePlan → mxGraph XML, Well-Architected layout, orthogonal routing)
+  → prices.ts / cost.ts (AWS Price List API, unit prices × quantity models → cost rows)
+  → cftExport.ts (optional CloudFormation YAML)
+  → response + client render (draw.io iframe, cost table, slider, downloads)
+```
+
+### Two-Enum Distinction
+**PATTERN_IDS** (architecture.ts): closed 8-value enum for appType classification — do NOT widen. **ServiceId catalog** (schema.ts): separate 155-entry open allowlist — safe to extend.
+
+### Evidence Invariant
+`normalizeArchitectureModel()` drops components with empty evidence. Citations validated against `evidenceRegister` via `isEvidenceSupportingComponent()`. Nothing emitted from prose alone when repo-grounded evidence expected.
+
+### Standing Risk — Closed Allowlists
+`classifyFile()` (repoFetcher.ts) and `NPM_FRAMEWORK_MAP`/`SDK_METHOD_MAP` (repoAnalyzer.ts) silently drop unrecognized evidence. Debug "missing detection" by checking these allowlists first.
+
+### Key Decisions (from DECISIONS.md)
+Decision 2: One ServicePlan contract drives diagram + cost. Decision 3: Rules-first, LLM-enhances. Decision 4: LLM never emits XML/prices. Decision 16: Single zod schema via generateObject. Decision 17: 155-service catalog + soft ceiling. Decision 19: Description results capped at "low".
+
+Consult DECISIONS.md Implementation Log (I-1–I-23) before inference/schema-layer work.
 <!-- GSD:architecture-end -->
 
 <!-- GSD:workflow-start source:GSD defaults -->

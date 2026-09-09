@@ -26,7 +26,7 @@ import { generateDiagramXml } from "@/lib/diagram";
 import { computeCostRows } from "@/lib/cost";
 import type { RuleInput } from "@/lib/ruleEngine";
 import type { ProjectProfile } from "@/lib/repoAnalyzer";
-import type { Grounding, ServicePlan } from "@/lib/schema";
+import type { Diagnostic, Grounding, ServicePlan } from "@/lib/schema";
 
 // ---------------------------------------------------------------------------
 // Request / Response types
@@ -49,6 +49,18 @@ interface AnalyzeRequestBody {
 const MAX_DESCRIPTION_LENGTH = 100_000; // chars
 const MAX_URL_LENGTH = 2_000; // chars
 const ALLOWED_GITHUB_HOSTS = ["github.com"]; // SSRF allowlist
+
+/**
+ * userCount scales every cost row linearly. It had a floor of 1 and no ceiling,
+ * so a caller could ask for 1e18 users and get a meaningless number rendered
+ * with the same authority as a real estimate.
+ */
+const MIN_USER_COUNT = 1;
+const MAX_USER_COUNT = 10_000_000;
+const DEFAULT_USER_COUNT = 10_000;
+
+/** Whole-request deadline. Past this, the LLM call is aborted and rules answer. */
+const REQUEST_DEADLINE_MS = 90_000;
 
 const ALLOWED_REGIONS = new Set([
   "us-east-1", "us-east-2", "us-west-1", "us-west-2",
@@ -95,6 +107,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
+  // User-facing prose (warnings) and machine-readable pipeline records
+  // (diagnostics) are collected separately: the UI shows the former, tests and
+  // the debug view key on the latter's stable `code`.
+  const warnings: string[] = [];
+  const diagnostics: Diagnostic[] = [];
+
   try {
 
   // ── Validate shape ───────────────────────────────────────────────────────
@@ -120,12 +138,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     typeof body.region === "string" && ALLOWED_REGIONS.has(body.region)
       ? body.region
       : "us-east-1";
-  const userCount =
-    typeof body.userCount === "number" &&
-    Number.isFinite(body.userCount) &&
-    body.userCount >= 1
+  const requestedUsers =
+    typeof body.userCount === "number" && Number.isFinite(body.userCount)
       ? Math.round(body.userCount)
-      : 10_000;
+      : DEFAULT_USER_COUNT;
+  const userCount = Math.min(Math.max(requestedUsers, MIN_USER_COUNT), MAX_USER_COUNT);
 
   // ── Validate value per kind (Decision 7) ─────────────────────────────────
   if (kind === "github_url") {
@@ -158,8 +175,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
   }
 
+  if (requestedUsers !== userCount) {
+    warnings.push(
+      `User count clamped to ${userCount.toLocaleString()} (allowed range ${MIN_USER_COUNT}–${MAX_USER_COUNT.toLocaleString()}).`
+    );
+  }
+
   // ── Stage 2: Evidence extraction (FLOW.md Stage 2) ───────────────────────
-  const warnings: string[] = [];
   let ruleInput: RuleInput;
   let signals = null;
   let grounding: Grounding;
@@ -204,6 +226,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // infrastructure) that replaces the raw file dump sent to the LLM.
     profile = analyzeProject(signals);
 
+    // Parse failures used to be collected by repoAnalyzer and then dropped on
+    // the floor, so a manifest we could not read looked identical to one that
+    // declared nothing.
+    const parseFailures = profile.parseFailures ?? [];
+    if (parseFailures.length > 0) {
+      warnings.push(
+        `${parseFailures.length} manifest file(s) could not be parsed — their dependencies were not analyzed.`
+      );
+      diagnostics.push({
+        stage: "analyze",
+        severity: "warning",
+        code: "manifest-parse-failed",
+        message: `${parseFailures.length} manifest file(s) failed to parse and contributed no dependency evidence.`,
+        detail: parseFailures.join("; ").slice(0, 1_000),
+      });
+    }
+
     ruleInput = signalsToRuleInput(signals, kind, grounding);
 
     if (signals.truncated) {
@@ -232,12 +271,34 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // ── Stage 3: Inference ────────────────────────────────────────────────────
   // Central reasoning path: LLM → ArchitectureModel → validation → deterministic
   // AWS service mapping. Rules baseline is only the no-LLM / LLM-failure fallback.
-  const { plan: servicePlan, plans: servicePlans, architectureModel } = await runInference({
+  // Whole-request deadline. Without one, a hung provider held the connection
+  // open for as long as the socket lasted; now the LLM call is aborted and the
+  // rules baseline answers instead.
+  const deadline = AbortSignal.timeout(REQUEST_DEADLINE_MS);
+
+  const {
+    plan: servicePlan,
+    plans: servicePlans,
+    architectureModel,
+    engine,
+    diagnostics: inferenceDiagnostics,
+  } = await runInference({
     ruleInput,
     signals,
     description,
     profile, // structured analysis from Stage 2b
+    signal: deadline,
   });
+
+  diagnostics.push(...inferenceDiagnostics);
+
+  // The one case the user must always be able to see: an LLM provider WAS
+  // configured, the LLM path failed, and rules quietly answered instead.
+  if (engine === "rules-fallback") {
+    warnings.push(
+      "AI analysis was unavailable for this request — the result comes from the deterministic rule engine and may be less specific."
+    );
+  }
 
   const allPlans = servicePlans && servicePlans.length > 0 ? servicePlans : [servicePlan];
 
@@ -298,16 +359,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     cost_rows: costRows,
     cost_rows_list: costRowsList,
     warnings,
+    // Which code path actually produced this plan, and every failure recorded
+    // along the way. Before these existed, an LLM outage and a confident
+    // inference were indistinguishable in the response.
+    engine,
+    diagnostics,
     // architecture_model is the LLM's structured understanding of the whole repo
     // (single source of truth for the derived service plan) — exposed for transparency.
     ...(architectureModel ? { architecture_model: architectureModel } : {}),
     // project_profile is included for transparency/debugging when repo analysis ran
     ...(profile ? { project_profile: profile } : {}),
   });
-  } catch (err: any) {
+  } catch (err) {
+    // The message stays server-side. Returning err.message leaked internal
+    // paths, provider errors, and upstream URLs to the browser.
     console.error("[analyze] Uncaught analysis error:", err);
     return NextResponse.json(
-      { error: err?.message || "Internal server error during analysis" },
+      { error: "Internal server error during analysis" },
       { status: 500 }
     );
   }

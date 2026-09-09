@@ -107,7 +107,7 @@ describe("Priority 1: Evidence Trustworthiness", () => {
       ],
     });
 
-    const model = validateArchitectureModel(raw, register);
+    const { model } = validateArchitectureModel(raw, register);
     assert.ok(model, "Model should validate successfully");
     assert.strictEqual(model!.components.length, 3);
   });
@@ -128,7 +128,7 @@ describe("Priority 1: Evidence Trustworthiness", () => {
       ],
     });
 
-    const model = validateArchitectureModel(raw, register);
+    const { model } = validateArchitectureModel(raw, register);
     assert.ok(model, "Valid model returned");
     // Only 'order' should survive; 'fn' and 'k8s' must be dropped!
     assert.strictEqual(model!.components.length, 1);
@@ -146,7 +146,7 @@ describe("Priority 1: Evidence Trustworthiness", () => {
       ],
     });
 
-    const model = validateArchitectureModel(raw, register);
+    const { model } = validateArchitectureModel(raw, register);
     assert.ok(model, "Valid model returned");
     assert.strictEqual(model!.components.length, 1);
     assert.strictEqual(model!.components[0].id, "order");
@@ -159,8 +159,9 @@ describe("Priority 1: Evidence Trustworthiness", () => {
       ],
     });
 
-    const model = validateArchitectureModel(raw, register);
-    assert.strictEqual(model, null, "Should return null to trigger rule engine fallback");
+    const result = validateArchitectureModel(raw, register);
+    assert.strictEqual(result.model, null, "Should return no model to trigger rule engine fallback");
+    assert.strictEqual(result.reason, "no-evidence");
   });
 });
 

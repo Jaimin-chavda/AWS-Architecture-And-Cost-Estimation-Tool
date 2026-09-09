@@ -752,7 +752,8 @@ describe("Stage 1 Generalization Evaluation on 12 Unseen Repositories", () => {
     };
 
     const validation = validateArchitectureModel(hallucinatedModel, profile.evidenceRegister);
-    assert.strictEqual(validation, null, "Model with fabricated evidence ID must be rejected");
+    assert.strictEqual(validation.model, null, "Model with fabricated evidence ID must be rejected");
+    assert.strictEqual(validation.reason, "no-evidence");
 
     // 2. Model claiming technology not present in cited evidence
     const validEv = validEvidenceIds[0];
@@ -775,6 +776,11 @@ describe("Stage 1 Generalization Evaluation on 12 Unseen Repositories", () => {
     };
 
     const mismatchValidation = validateArchitectureModel(mismatchedModel, profile.evidenceRegister);
-    assert.strictEqual(mismatchValidation, null, "Model claiming unsupported technology must be rejected");
+    assert.strictEqual(
+      mismatchValidation.model,
+      null,
+      "Model claiming unsupported technology must be rejected"
+    );
+    assert.strictEqual(mismatchValidation.reason, "no-evidence");
   });
 });
