@@ -661,13 +661,23 @@ export function mapParsedPackages(
       if (parts.length > 1 && mappingTable[parts[1]]) {
         match = mappingTable[parts[1]];
       } else {
+        const normPkg = pkg.name.toLowerCase();
         for (const [key, val] of Object.entries(mappingTable)) {
-          if (
-            pkg.name.toLowerCase().includes(key.toLowerCase()) ||
-            key.toLowerCase().includes(pkg.name.toLowerCase())
-          ) {
+          const normKey = key.toLowerCase();
+          if (normPkg === normKey) {
             match = val;
             break;
+          }
+        }
+        if (!match) {
+          for (const [key, val] of Object.entries(mappingTable)) {
+            const normKey = key.toLowerCase();
+            if (normKey.length < 4) continue;
+            const tokenRe = new RegExp(`(^|[/_.-])${normKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[/_.-])`);
+            if (tokenRe.test(normPkg)) {
+              match = val;
+              break;
+            }
           }
         }
       }
@@ -1641,9 +1651,9 @@ export function classifyWorkload(
   });
 
   // 1. ML Training vs ML Inference
-  const hasMlLib = /tensorflow|keras|pytorch|torch|scikit-learn|cnn|plantvillage|onnx|transformers|huggingface/.test(allTech) ||
+  const hasMlLib = /tensorflow|keras|pytorch|torch|scikit-learn|\bcnn\b|plantvillage|onnx|transformers|huggingface/.test(allTech) ||
                    /cnn|convolutional|plantvillage|dataset from kaggle|model\.fit|train\.py/.test(readme);
-  const hasWebServer = /express|fastapi|flask|django|spring boot|rails|next\.js|nuxt|nestjs|gin|echo|fiber|bentoml|triton|asp\.net|aspnet|webapi|dotnet|laravel|symfony|actix|axum|rocket/.test(allTech);
+  const hasWebServer = /express|fastapi|flask|django|spring boot|rails|next\.js|nuxt|nestjs|\bgin\b|\becho\b|\bfiber\b|bentoml|triton|asp\.net|aspnet|webapi|dotnet|laravel|symfony|actix|axum|rocket/.test(allTech);
   const hasTrainingScript = /train\.py|single training script|training job|epochs|batch_size|model\.fit\(/.test(readme) ||
                             (signals.keyFiles || []).some((f) => /(?:train|model_training)\.py/i.test(f.path)) ||
                             (signals.fileTree || []).some((f) => /(?:train|model_training)\.py/i.test(f));
@@ -1662,7 +1672,7 @@ export function classifyWorkload(
   }
 
   // 2. Microservices
-  const hasK8s = /kubernetes|k8s|helm/.test(allTech);
+  const hasK8s = /kubernetes|\bk8s\b|\bhelm\b/.test(allTech);
   const multiModulePom =
     (signals.keyFiles || []).filter((f) => f.path.endsWith("pom.xml")).length > 1 ||
     (signals.manifests || []).filter((m) => m.path.endsWith("pom.xml")).length > 1 ||

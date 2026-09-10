@@ -66,6 +66,13 @@ function hasAny(text: string, keywords: string[]): boolean {
   return keywords.some((kw) => lower.includes(kw.toLowerCase()));
 }
 
+function hasWord(text: string, words: string[]): boolean {
+  return words.some((w) => {
+    const esc = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`\\b${esc}\\b`, "i").test(text);
+  });
+}
+
 function profileHasFramework(profile: ProjectProfile, ...names: string[]): boolean {
   const lower = names.map((n) => n.toLowerCase());
   return profile.frameworks.some((f) => lower.some((n) => f.name.toLowerCase().includes(n)));
@@ -168,11 +175,11 @@ function detectServices(
   }
 
   const dockerfileEv = infraEvidence(profile, "dockerfile") || infraEvidence(profile, "docker");
-  if (dockerfileEv || hasDocker || hasAny(combined, ["fargate", " ecs ", "ecr"])) {
+  if (dockerfileEv || hasDocker || hasWord(combined, ["fargate", "ecs", "ecr"])) {
     const fargateEv = awsEvidence(profile, "fargate");
     if (fargateEv || hasAny(combined, ["fargate", "aws_ecs_task_definition", "aws::ecs::taskdefinition"])) {
       add("Fargate", "high", fargateEv ? `ECS Fargate SDK usage — ${fargateEv}` : "Fargate reference in repository files");
-    } else if (awsEvidence(profile, "ecs") || hasAny(combined, [" ecs ", "elastic container service", "aws_ecs_cluster", "aws::ecs::cluster"])) {
+    } else if (awsEvidence(profile, "ecs") || hasAny(combined, ["elastic container service", "aws_ecs_cluster", "aws::ecs::cluster"]) || hasWord(combined, ["ecs"])) {
       add("ECS", "high", awsEvidence(profile, "ecs") ? `ECS SDK usage — ${awsEvidence(profile, "ecs")}` : "ECS reference in repository files");
     } else if (dockerfileEv || hasDocker) {
       add("ECS", "medium", "Dockerfile/container config present → ECS as standard container host on AWS");
@@ -181,16 +188,16 @@ function detectServices(
 
   const ec2Ev = awsEvidence(profile, "ec2");
   if (ec2Ev) add("EC2", "high", `EC2 SDK client imported — ${ec2Ev}`);
-  else if (hasAny(combined, ["ec2 instance", "elastic compute cloud", "aws_instance", "aws::ec2::instance", "t3.", "t2.micro", "t3.micro", "ami-"])) {
+  else if (hasAny(combined, ["ec2 instance", "elastic compute cloud", "aws_instance", "aws::ec2::instance"]) || hasWord(combined, ["ami"]) || /t2\.micro|t3\.micro|t3\.small|t3\.medium/i.test(combined)) {
     add("EC2", "high", "EC2 instance reference in repository files");
   }
 
   const k8sEv = infraEvidence(profile, "kubernetes");
-  if (k8sEv || hasAny(combined, ["eks", "kubernetes", "k8s", "kubectl", "aws_eks_cluster", "aws::eks::cluster"])) {
+  if (k8sEv || hasAny(combined, ["kubernetes", "k8s", "kubectl", "aws_eks_cluster", "aws::eks::cluster"]) || hasWord(combined, ["eks"])) {
     add("EKS", "high", k8sEv ? `Kubernetes manifests detected — ${k8sEv}` : "EKS/Kubernetes reference in repository files");
   }
 
-  if (hasAny(combined, [" ecr ", "elastic container registry", "ecr.aws", "aws_ecr_repository", "aws::ecr::repository"])) {
+  if (hasAny(combined, ["elastic container registry", "ecr.aws", "aws_ecr_repository", "aws::ecr::repository"]) || hasWord(combined, ["ecr"])) {
     add("ECR", "high", "ECR reference detected");
   } else if ((detected.some((s) => s.serviceId === "ECS" || s.serviceId === "EKS")) && (dockerfileEv || k8sEv || infraEvidence(profile, "kubernetes") || infraEvidence(profile, "github actions") || infraEvidence(profile, "codebuild"))) {
     add("ECR", "medium", "Container deployment on AWS (ECS/EKS) → ECR for container image storage");
@@ -199,7 +206,7 @@ function detectServices(
   // --- Storage ---
   const s3Ev = awsEvidence(profile, "s3");
   if (s3Ev) add("S3", "high", `AWS S3 SDK client imported — ${s3Ev}`);
-  else if (hasAny(combined, ["s3 bucket", "aws s3", " s3 ", "s3.amazonaws", "s3://", "aws_s3_bucket", "aws::s3::bucket"])) {
+  else if (hasAny(combined, ["s3 bucket", "aws s3", "s3.amazonaws", "s3://", "aws_s3_bucket", "aws::s3::bucket"]) || hasWord(combined, ["s3"])) {
     add("S3", "high", "S3 bucket reference in repository files");
   }
 
@@ -258,17 +265,17 @@ function detectServices(
     add("APIGateway", "high", "API Gateway reference in repository files", "repository-evidence");
   }
 
-  if (hasAny(combined, ["cloudfront", "cdn", "distribution", "aws_cloudfront_distribution", "aws::cloudfront::distribution"])) {
+  if (hasAny(combined, ["cloudfront", "aws_cloudfront_distribution", "aws::cloudfront::distribution"]) || hasWord(combined, ["cdn"])) {
     add("CloudFront", "high", "CloudFront/CDN reference in repository files");
   }
 
-  if (hasAny(combined, ["alb", "application load balancer", "load balancer", "elb", "aws_lb", "aws::elasticloadbalancingv2::loadbalancer", "kind: ingress", "ingress.yaml", "ingress.yml"])) {
+  if (hasAny(combined, ["application load balancer", "load balancer", "aws_lb", "aws::elasticloadbalancingv2::loadbalancer", "kind: ingress", "ingress.yaml", "ingress.yml"]) || hasWord(combined, ["alb", "elb"])) {
     add("ALB", "medium", "Load balancer / Ingress reference in repository files");
   } else if (profile && profileHasInfra(profile, "docker") && !hasAny(combined, ["serverless", "lambda"])) {
     add("ALB", "low", "Containerised app pattern — ALB typically fronts ECS services");
   }
 
-  if (hasAny(combined, ["route 53", "route53", "dns", "hosted zone", "aws_route53_zone", "aws::route53::hostedzone"])) {
+  if (hasAny(combined, ["route 53", "route53", "hosted zone", "aws_route53_zone", "aws::route53::hostedzone"]) || hasWord(combined, ["dns"])) {
     add("Route53", "medium", "Route53/DNS reference in repository files");
   }
 
@@ -280,7 +287,7 @@ function detectServices(
 
   const sqsEv = awsEvidence(profile, "sqs");
   if (sqsEv) add("SQS", "high", `SQS SDK client imported — ${sqsEv}`);
-  else if (hasAny(combined, [" sqs ", "simple queue", "aws sqs", "aws_sqs_queue", "aws::sqs::queue"])) {
+  else if (hasAny(combined, ["simple queue", "aws sqs", "aws_sqs_queue", "aws::sqs::queue"]) || hasWord(combined, ["sqs"])) {
     add("SQS", "high", "SQS reference in repository files");
   } else if (profile && (profileHasFramework(profile, "celery") || profileHasFramework(profile, "bull"))) {
     const workerEv = profile.frameworks.find((f) => /celery|bull/i.test(f.name));
@@ -293,7 +300,7 @@ function detectServices(
 
   const snsEv = awsEvidence(profile, "sns");
   if (snsEv) add("SNS", "high", `SNS SDK client imported — ${snsEv}`);
-  else if (hasAny(combined, [" sns ", "simple notification", "aws sns", "aws_sns_topic", "aws::sns::topic"])) {
+  else if (hasAny(combined, ["simple notification", "aws sns", "aws_sns_topic", "aws::sns::topic"]) || hasWord(combined, ["sns"])) {
     add("SNS", "high", "SNS reference in repository files");
   }
 
@@ -333,7 +340,7 @@ function detectServices(
     if (!detected.some((s) => s.serviceId === "S3")) {
       add("S3", "medium", "Model weights and serialized artifact storage → S3");
     }
-  } else if (profile?.workloadClassification?.type === "ml-training" || hasAny(combined, ["cnn", "tensorflow", "pytorch", "keras", "model training", "train.py"])) {
+  } else if (profile?.workloadClassification?.type === "ml-training" || hasAny(combined, ["tensorflow", "pytorch", "keras", "model training", "training job", "train.py"]) || hasWord(combined, ["cnn"])) {
     add("SageMaker", "high", "Machine learning model training detected → Amazon SageMaker");
     if (!detected.some((s) => s.serviceId === "S3")) {
       add("S3", "medium", "Dataset and model artifact storage → S3");
@@ -359,13 +366,13 @@ function detectServices(
 
   const glueEv = awsEvidence(profile, "glue");
   if (glueEv) add("Glue", "high", `AWS Glue client imported — ${glueEv}`);
-  else if (hasAny(combined, ["glue", "aws glue", "glue job", "glue etl", "aws_glue", "aws::glue::job"])) {
+  else if (hasAny(combined, ["aws glue", "glue job", "glue etl", "aws_glue", "aws::glue::job"]) || hasWord(combined, ["glue"])) {
     add("Glue", "high", "AWS Glue ETL service reference detected in repository files");
   }
 
   const emrEv = awsEvidence(profile, "emr");
   if (emrEv) add("EMR", "high", `AWS EMR client imported — ${emrEv}`);
-  else if (hasAny(combined, ["elastic mapreduce", "aws::emr", "aws_emr_cluster"]) || (hasAny(combined, ["emr", "pyspark"]) && !hasDocker)) {
+  else if (hasAny(combined, ["elastic mapreduce", "aws::emr", "aws_emr_cluster", "pyspark"]) || hasWord(combined, ["emr"])) {
     add("EMR", "high", "Amazon EMR cluster reference detected in repository files");
   }
 
@@ -379,7 +386,7 @@ function detectServices(
   // --- Security & Encryption ---
   const kmsEv = awsEvidence(profile, "kms");
   if (kmsEv) add("KMS", "high", `AWS KMS client imported — ${kmsEv}`);
-  else if (hasAny(combined, ["kms", "aws-kms", "aws_kms_key", "aws::kms::key", "kms:encrypt", "kms:decrypt"])) {
+  else if (hasAny(combined, ["aws-kms", "aws_kms_key", "aws::kms::key", "kms:encrypt", "kms:decrypt"]) || hasWord(combined, ["kms"])) {
     add("KMS", "high", "AWS Key Management Service (KMS) reference detected");
   }
 
@@ -480,7 +487,7 @@ function detectServices(
               add("ALB", "medium", `${dcEv} → Ingress load balancer recommendation`, "recommendation");
             }
             if (!detected.some((s) => s.serviceId === "ECS") && !detected.some((s) => s.serviceId === "Lambda")) {
-              add("ECS", "medium", `${dcEv} → container host inference`, "inference");
+              add("ECS", "low", `${dcEv} → possible container host, no container evidence`, "inference");
             }
           }
           break;
@@ -670,7 +677,7 @@ export function buildServicePlan(
       awsMappings: [{ componentId: "fallback", serviceId: "S3", confidence: "low", evidence: "fallback", fromPattern: false }],
       detectedPattern: "generic",
       metadata: { grounding: input.grounding, truncated: input.truncated, parseErrors: [...input.parseErrors, "rule-engine-validation-failed"] },
-      warnings: [],
+      warnings: ["Rule engine output failed validation — showing minimal S3 placeholder, not an inference."],
     };
     return floor;
   }

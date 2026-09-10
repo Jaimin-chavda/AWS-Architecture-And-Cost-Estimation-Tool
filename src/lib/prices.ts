@@ -58,7 +58,7 @@
  * ---------------------------------------------------------------------------
  */
 
-import { PricingClient, GetProductsCommand } from "@aws-sdk/client-pricing";
+import type { PricingClient } from "@aws-sdk/client-pricing";
 
 // ---------------------------------------------------------------------------
 // Configuration & Modes
@@ -295,10 +295,13 @@ let activePricingClient: PricingClient | null = null;
 /**
  * Lazily returns a PricingClient configured for the AWS Price List API.
  * The Pricing endpoint is located in us-east-1 or ap-south-1 (default us-east-1).
+ * Dynamic import keeps SDK out of client bundle (prices.ts reached via cost.ts
+ * from CostCalculator client component).
  */
-export function getPricingClient(): PricingClient {
+export async function getPricingClient(): Promise<PricingClient> {
   if (!activePricingClient) {
-    activePricingClient = new PricingClient({
+    const { PricingClient: PricingClientCtor } = await import("@aws-sdk/client-pricing");
+    activePricingClient = new PricingClientCtor({
       region: process.env.AWS_PRICING_REGION || "us-east-1",
     });
   }
@@ -376,7 +379,8 @@ export async function fetchSdkPrice(
   region: string,
   customClient?: PricingClient
 ): Promise<number | null> {
-  const client = customClient ?? getPricingClient();
+  const { GetProductsCommand } = await import("@aws-sdk/client-pricing");
+  const client = customClient ?? (await getPricingClient());
   const location = REGION_LOCATION[region];
   const regionPrefix = REGION_USAGE_PREFIX[region] ?? "";
   const candidateUsageType = `${regionPrefix}${usageTypePrefix}`;

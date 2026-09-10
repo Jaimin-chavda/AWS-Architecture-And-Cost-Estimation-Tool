@@ -8,11 +8,9 @@
  * deterministically, in architecture.ts::mapArchitectureModelToServicePlan().
  *
  * Provider chain — tried IN ORDER until one returns a model. This is failover,
- * not precedence: a configured-but-dead DEEPSEEK_API_KEY no longer prevents
- * Google and Groq from being attempted.
- *   1. DEEPSEEK_API_KEY  → deepseek-v4-flash  (@ai-sdk/deepseek)
- *   2. GOOGLE_API_KEY    → gemini-2.5-flash   (@ai-sdk/google)
- *   3. GROQ_API_KEY      → llama-3.3-70b      (@ai-sdk/groq)
+ * not precedence.
+ *   1. GOOGLE_API_KEY       → gemini-3.7-flash              (@ai-sdk/google)
+ *   2. OPENROUTER_API_KEY   → openrouter/free                 (@openrouter/ai-sdk-provider)
  *
  * Failure is never silent. analyzeArchitecture returns a discriminated
  * LlmArchitectureResult carrying the reason and per-provider diagnostics, so
@@ -22,9 +20,8 @@
 
 import { generateObject } from "ai";
 import type { LanguageModel } from "ai";
-import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { createGroq } from "@ai-sdk/groq";
+import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 
 import {
   ArchitectureModelSchema,
@@ -40,17 +37,9 @@ import type { ProjectProfile } from "./repoAnalyzer.ts";
 // Provider selection
 // ---------------------------------------------------------------------------
 
-/**
- * Model IDs. Pinned to one verified value each — the Google entry previously
- * disagreed with this file's own header comment and with CLAUDE.md
- * ("gemini-3.5-flash" in code, "gemini-2.5-flash" in docs). gemini-2.5-flash is
- * the id the stack research verified as having a real free tier, so that is the
- * one kept; the header comment above now matches.
- */
 const MODEL_IDS = {
-  deepseek: "deepseek-v4-flash",
-  google: "gemini-3.6-flash",
-  groq: "llama-3.3-70b-versatile",
+  google: "gemini-3.7-flash",
+  openrouter: "openrouter/free",
 } as const;
 
 interface ProviderConfig {
@@ -75,14 +64,6 @@ interface ProviderConfig {
 function resolveProviders(): ProviderConfig[] {
   const providers: ProviderConfig[] = [];
 
-  if (process.env.DEEPSEEK_API_KEY) {
-    const client = createDeepSeek({ apiKey: process.env.DEEPSEEK_API_KEY });
-    providers.push({
-      name: "deepseek",
-      model: MODEL_IDS.deepseek,
-      getModel: () => client(MODEL_IDS.deepseek),
-    });
-  }
   if (process.env.GOOGLE_API_KEY) {
     const client = createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY });
     providers.push({
@@ -91,12 +72,12 @@ function resolveProviders(): ProviderConfig[] {
       getModel: () => client(MODEL_IDS.google),
     });
   }
-  if (process.env.GROQ_API_KEY) {
-    const client = createGroq({ apiKey: process.env.GROQ_API_KEY });
+  if (process.env.OPENROUTER_API_KEY) {
+    const client = createOpenRouter({ apiKey: process.env.OPENROUTER_API_KEY });
     providers.push({
-      name: "groq",
-      model: MODEL_IDS.groq,
-      getModel: () => client(MODEL_IDS.groq),
+      name: "openrouter",
+      model: MODEL_IDS.openrouter,
+      getModel: () => client.chat(MODEL_IDS.openrouter),
     });
   }
 

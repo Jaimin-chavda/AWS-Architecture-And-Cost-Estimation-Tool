@@ -379,8 +379,8 @@ export function extractSdkEvidence(keyFiles: KeyFile[]): SdkEvidence[] {
       add(file.path, m[0], "DynamoDB");
     }
 
-    // WebSocket / socket server bindings
-    const wsMatches = content.matchAll(/(?:WebSocketServer|socket\.io|new\s+WebSocket\(|ws\.on\()/gi);
+    // WebSocket server bindings (explicit server only — bare ws.on() is too generic)
+    const wsMatches = content.matchAll(/(?:WebSocketServer|socket\.io|new\s+WebSocket\()/gi);
     for (const m of wsMatches) {
       add(file.path, m[0], "APIGateway");
     }
@@ -403,20 +403,20 @@ export function extractSdkEvidence(keyFiles: KeyFile[]): SdkEvidence[] {
       add(file.path, m[0], "OpenSearch");
     }
 
-    // Email / SMTP
-    const emailMatches = content.matchAll(/(?:nodemailer|spring-boot-starter-mail|sendgrid|mailgun|smtplib|maildev)/gi);
+    // Email / SMTP (production senders only — maildev/mailhog are local dev tools)
+    const emailMatches = content.matchAll(/(?:nodemailer|spring-boot-starter-mail|sendgrid|mailgun|smtplib)/gi);
     for (const m of emailMatches) {
       add(file.path, m[0], "SES");
     }
 
-    // Object storage / File upload
-    const uploadMatches = content.matchAll(/(?:express-fileupload|multer|formidable|boto3\.client\(['"]s3['"]\)|@aws-sdk\/client-s3)/gi);
+    // Object storage (explicit AWS SDK only — multer/formidable are local disk uploads)
+    const uploadMatches = content.matchAll(/(?:boto3\.client\(['"]s3['"]\)|@aws-sdk\/client-s3)/gi);
     for (const m of uploadMatches) {
       add(file.path, m[0], "S3");
     }
 
-    // Machine Learning / Training
-    const mlMatches = content.matchAll(/(?:tensorflow|keras|torch\.nn|PlantVillage|model\.fit\(|ImageDataGenerator)/gi);
+    // Machine Learning (framework imports only — model.fit() alone is local training)
+    const mlMatches = content.matchAll(/(?:tensorflow|keras|torch\.nn|PlantVillage)/gi);
     for (const m of mlMatches) {
       add(file.path, m[0], "SageMaker");
     }

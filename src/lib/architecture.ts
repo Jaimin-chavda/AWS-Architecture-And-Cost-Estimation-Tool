@@ -137,12 +137,12 @@ export function isMappingCompatible(technology: string, serviceId: ServiceId): b
   }
 
   // 7. Kubernetes / Helm manifests must NOT map to Lambda or Lightsail
-  if (/kubernetes|k8s|helm/.test(t)) {
+  if (/kubernetes|k8s/.test(t) || /\bhelm\b/.test(t)) {
     if (serviceId === "Lambda" || serviceId === "Lightsail") return false;
   }
 
   // 8. ML training scripts / CNN / PyTorch model must NOT map to Lambda or static S3
-  if (/cnn|training|pytorch|tensorflow|keras/.test(t)) {
+  if (/\bcnn\b|training|pytorch|tensorflow|keras/.test(t)) {
     if (serviceId === "Lambda") return false;
   }
 
@@ -182,7 +182,7 @@ export function isEvidenceSupportingComponent(
   // Type-based and semantic capability checks:
   // Container: Dockerfile, docker-compose, Jib supports Docker, container, backend, microservices, ECS
   if (recPath.includes("dockerfile") || recDetail.includes("jib") || recDetail.includes("docker") || recTech === "docker") {
-    if (/docker|container|fargate|ecs|backend|api|worker|service|spring|node|express|fastapi|django|app/.test(t) || compType === "backend" || compType === "worker") {
+    if (/docker|container|fargate|ecs|backend|api|worker|service|microservice/.test(t) || compType === "worker") {
       if (/lambda|serverless/.test(t)) return false;
       return true;
     }
@@ -248,7 +248,7 @@ export function isEvidenceSupportingComponent(
     }
   }
 
-  // Web framework supports backend/api/frontend
+  // Web framework record supports a component only when tech names same family
   if (
     recDetail.includes("spring-boot") ||
     recDetail.includes("spring-web") ||
@@ -260,12 +260,14 @@ export function isEvidenceSupportingComponent(
     recDetail.includes("react") ||
     recDetail.includes("vue")
   ) {
-    if (compType === "backend" || compType === "api" || compType === "frontend") {
+    const family = ["spring", "express", "fastapi", "django", "flask", "next", "react", "vue", "node", "backend", "api", "frontend", "service"];
+    if (family.some((f) => t.includes(f))) {
       if (/lambda|serverless/.test(t) && !recDetail.includes("lambda") && !recDetail.includes("serverless")) {
         return false;
       }
       return true;
     }
+    return false;
   }
 
   // Machine Learning
@@ -518,14 +520,14 @@ function mapComponentToAws(
 
     case "backend":
     case "worker":
-      if (context?.workloadClassification?.type === "ml-training" || /cnn|training|tensorflow|pytorch|keras|deep learning|machine learning/.test(tech)) {
+      if (context?.workloadClassification?.type === "ml-training" || /\bcnn\b|training|tensorflow|pytorch|keras|deep learning|machine learning/.test(tech)) {
         mappings.push({ componentId: c.id, serviceId: "SageMaker", confidence: "high", evidence: `${ev} → Amazon SageMaker (ML training)`, fromPattern: false, category: "repository-evidence" });
       } else if (/serverless|lambda/.test(tech)) {
         mappings.push(
           { componentId: c.id, serviceId: "Lambda", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" },
           { componentId: `${c.id}-gateway`, serviceId: "APIGateway", confidence: "medium", evidence: `${ev} → HTTP entry`, fromPattern: false, category: "deployment-requirement" }
         );
-      } else if (/kubernetes|k8s|helm/.test(tech)) {
+      } else if (/kubernetes|k8s/.test(tech) || /\bhelm\b/.test(tech)) {
         mappings.push(
           { componentId: c.id, serviceId: "EKS", confidence: "high", evidence: `${ev} → Amazon EKS`, fromPattern: false, category: "repository-evidence" },
           { componentId: `${c.id}-registry`, serviceId: "ECR", confidence: "medium", evidence: `${ev} → container image registry`, fromPattern: false, category: "deployment-requirement" }
@@ -538,7 +540,7 @@ function mapComponentToAws(
       } else if (/ec2|virtual machine|vm|instance/.test(tech)) {
         mappings.push({ componentId: c.id, serviceId: "EC2", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
       } else {
-        mappings.push({ componentId: c.id, serviceId: "ECS", confidence: "medium", evidence: `${ev} (Fargate container host)`, fromPattern: false, category: "inference" });
+        mappings.push({ componentId: c.id, serviceId: "ECS", confidence: "low", evidence: `${ev} (possible container host, no container evidence)`, fromPattern: false, category: "inference" });
       }
       break;
 
@@ -550,7 +552,7 @@ function mapComponentToAws(
         );
       } else {
         mappings.push(
-          { componentId: c.id, serviceId: "ECS", confidence: "medium", evidence: ev, fromPattern: false, category: "inference" },
+          { componentId: c.id, serviceId: "ECS", confidence: "low", evidence: `${ev} (possible container host, no container evidence)`, fromPattern: false, category: "inference" },
           { componentId: `${c.id}-scheduler`, serviceId: "EventBridge", confidence: "medium", evidence: `${ev} → schedule trigger`, fromPattern: false, category: "deployment-requirement" }
         );
       }
@@ -566,7 +568,7 @@ function mapComponentToAws(
           { componentId: `${c.id}-compute`, serviceId: "Lambda", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" },
           { componentId: c.id, serviceId: "APIGateway", confidence: "medium", evidence: `${ev} → Serverless HTTP entry`, fromPattern: false, category: "deployment-requirement" }
         );
-      } else if (/kubernetes|k8s|helm/.test(tech)) {
+      } else if (/kubernetes|k8s/.test(tech) || /\bhelm\b/.test(tech)) {
         mappings.push(
           { componentId: c.id, serviceId: "EKS", confidence: "high", evidence: `${ev} → Amazon EKS`, fromPattern: false, category: "repository-evidence" },
           { componentId: `${c.id}-registry`, serviceId: "ECR", confidence: "medium", evidence: `${ev} → container image registry`, fromPattern: false, category: "deployment-requirement" },
@@ -579,10 +581,10 @@ function mapComponentToAws(
           { componentId: `${c.id}-alb`, serviceId: "ALB", confidence: "medium", evidence: `${ev} → Ingress load balancer`, fromPattern: false, category: "recommendation" }
         );
       } else {
-        // Framework API alone (Express, FastAPI, Flask, Spring Boot, etc.) does NOT prove API Gateway.
-        // Ingress recommended as ALB, compute inferred as managed container host.
+        // Framework API alone (Express, FastAPI, Flask, Spring Boot, etc.) does NOT prove compute.
+        // Ingress recommended as ALB, host guessed low-confidence.
         mappings.push(
-          { componentId: c.id, serviceId: "ECS", confidence: "medium", evidence: `${ev} (managed container compute)`, fromPattern: false, category: "inference" },
+          { componentId: c.id, serviceId: "ECS", confidence: "low", evidence: `${ev} (possible container host, no container evidence)`, fromPattern: false, category: "inference" },
           { componentId: `${c.id}-alb`, serviceId: "ALB", confidence: "medium", evidence: `${ev} → Application Load Balancer recommendation`, fromPattern: false, category: "recommendation" }
         );
       }
@@ -632,8 +634,10 @@ function mapListTechnologies(model: ArchitectureModel, alreadyMapped: AwsService
   if (/mongo/.test(listText)) add("DocumentDB", "medium", "MongoDB listed in model");
   if (/redis|memcached|valkey/.test(listText)) add("ElastiCache", "medium", "Redis/cache listed in model");
   if (/aurora/.test(listText)) add("Aurora", "medium", "Aurora listed in model");
-  if (/(postgres|postgresql|mysql|mariadb|sql)/.test(listText) && !hasService("RDS") && !hasService("Aurora")) {
-    add("RDS", "medium", "relational database listed in model");
+  if (/(postgres|postgresql|mysql|mariadb)/.test(listText) || /\bsql\b/.test(listText)) {
+    if (!hasService("RDS") && !hasService("Aurora")) {
+      add("RDS", "medium", "relational database listed in model");
+    }
   }
   if (/kafka|confluent/.test(listText) && !hasService("MSK")) {
     add("MSK", "medium", "Kafka event streaming listed in model");
@@ -641,14 +645,14 @@ function mapListTechnologies(model: ArchitectureModel, alreadyMapped: AwsService
   if (/(opensearch|elasticsearch)/.test(listText) && !hasService("OpenSearch")) {
     add("OpenSearch", "medium", "OpenSearch/Elasticsearch listed in model");
   }
-  if (/(kubernetes|k8s|helm)/.test(listText) && !hasService("EKS")) {
-    add("EKS", "medium", "Kubernetes listed in model");
+  if (/(kubernetes|k8s)/.test(listText) || /\bhelm\b/.test(listText)) {
+    if (!hasService("EKS")) add("EKS", "medium", "Kubernetes listed in model");
   }
   if (/(sagemaker|tensorflow|pytorch|scikit|huggingface|transformers|cnn)/.test(listText) && !hasService("SageMaker")) {
     add("SageMaker", "medium", "ML framework/model training listed in model");
   }
-  if (/(s3|bucket|object storage)/.test(listText) && !hasService("S3")) {
-    add("S3", "medium", "object storage referenced in model");
+  if (/(bucket|object storage)/.test(listText) || /\bs3\b/.test(listText)) {
+    if (!hasService("S3")) add("S3", "medium", "object storage referenced in model");
   }
 
   return mappings.filter((m) => isMappingCompatible(listText, m.serviceId));
@@ -691,7 +695,6 @@ function applyPatternBaselines(
     }
     add("S3", "medium", "S3 bucket for training datasets, checkpoints, and model weights", "recommendation");
     add("CloudWatch", "medium", "CloudWatch logging and metrics for training jobs", "recommendation");
-    add("CloudFormation", "low", "CloudFormation infrastructure definition", "recommendation");
     return mappings;
   }
 
@@ -702,7 +705,6 @@ function applyPatternBaselines(
     add("ALB", "medium", "Application Load Balancer for routing API requests to model endpoints", "recommendation");
     add("S3", "medium", "S3 bucket for serialized model weights and artifacts", "recommendation");
     add("CloudWatch", "medium", "CloudWatch logging and metrics for inference endpoint", "recommendation");
-    add("CloudFormation", "low", "CloudFormation infrastructure definition", "recommendation");
     return mappings;
   }
 
@@ -711,13 +713,23 @@ function applyPatternBaselines(
     add("CloudFront", "medium", "CloudFront CDN edge distribution", "recommendation");
     add("S3", "medium", "S3 static asset storage & hosting", "recommendation");
     add("CloudWatch", "low", "CloudWatch metrics for CloudFront", "recommendation");
-    add("CloudFormation", "low", "CloudFormation infrastructure definition", "recommendation");
     return mappings;
   }
 
   // Standard web / API / microservices blueprint:
-  // 1. Edge & DNS Ingress
-  add("Route53", "medium", "Route 53 DNS routing for web domain", "recommendation");
+  // Baselines only fire on real signals. No unconditional enterprise padding.
+  const hasPublicEdge =
+    alreadyMapped.some((m) => m.serviceId === "CloudFront" || m.serviceId === "ALB" || m.serviceId === "APIGateway") ||
+    model.components.some((c) => c.type === "frontend" || c.type === "api");
+  const hasBackend =
+    alreadyMapped.some((m) => m.serviceId === "ECS" || m.serviceId === "Lambda" || m.serviceId === "EKS" || m.serviceId === "EC2" || m.serviceId === "Fargate") ||
+    model.components.some((c) => c.type === "backend" || c.type === "api" || c.type === "worker");
+  const hasCompute = COMPUTE_SERVICES.some((s) => hasService(s));
+
+  // 1. Edge & DNS Ingress — only when public edge proven
+  if (hasPublicEdge) {
+    add("Route53", "medium", "Route 53 DNS routing for public web endpoint", "recommendation");
+  }
   if (model.components.some((c) => c.type === "frontend" || /react|vue|angular|svelte|next|static/i.test(c.technology))) {
     add("CloudFront", "medium", "CloudFront CDN edge distribution", "recommendation");
     add("S3", "medium", "S3 static asset storage & hosting", "recommendation");
@@ -731,10 +743,13 @@ function applyPatternBaselines(
     add("ECS", "medium", "ECS Fargate managed container host", "inference");
   }
 
-  // 3. Observability, Security & IaC
-  add("CloudWatch", "medium", "CloudWatch logging, alarms, and performance metrics", "recommendation");
-  add("SecretsManager", "medium", "Secrets Manager for environment variables and cryptographic keys", "recommendation");
-  add("CloudFormation", "low", "CloudFormation / CDK infrastructure definition", "recommendation");
+  // 3. Observability & Security — only with compute to observe / secrets to hold
+  if (hasCompute) {
+    add("CloudWatch", "medium", "CloudWatch logging, alarms, and performance metrics", "recommendation");
+  }
+  if (hasBackend) {
+    add("SecretsManager", "medium", "Secrets Manager for environment variables and cryptographic keys", "recommendation");
+  }
 
   return mappings;
 }
