@@ -256,6 +256,18 @@ export const AwsServiceMappingSchema = z.object({
 export type AwsServiceMapping = z.infer<typeof AwsServiceMappingSchema>;
 
 // ---------------------------------------------------------------------------
+// Terminal states — explicit outcome when no standard architecture applies.
+// ---------------------------------------------------------------------------
+export const TERMINAL_STATES = [
+  "OK",
+  "INSUFFICIENT_SIGNAL",
+  "LIBRARY_REPO",
+  "IAC_ONLY",
+  "MONOREPO_OK",
+] as const;
+export type TerminalState = (typeof TERMINAL_STATES)[number];
+
+// ---------------------------------------------------------------------------
 // Root ServicePlan (new design)
 // ---------------------------------------------------------------------------
 export const ServicePlanSchema = z
@@ -268,6 +280,8 @@ export const ServicePlanSchema = z
     awsMappings: z.array(AwsServiceMappingSchema),
     /** Pattern detection for UI label only — never constrains output */
     detectedPattern: z.string().optional(),
+    /** Explicit terminal outcome; non-OK states explain intentional minimal output. */
+    terminalState: z.enum(TERMINAL_STATES).default("OK"),
     proposalTitle: z.string().optional(),
     tradeOffDimension: z.string().optional(),
     tradeOffDescription: z.string().optional(),
@@ -275,6 +289,8 @@ export const ServicePlanSchema = z
       grounding: z.enum(GROUNDING_VALUES),
       truncated: z.boolean(),
       parseErrors: z.array(z.string()),
+      /** Resolved relational engine for RDS cost-line labelling. */
+      dbEngine: z.enum(["postgres", "mysql", "none"]).optional(),
     }),
     warnings: z.array(z.string()).default([]),
     proposals: z.array(z.any()).optional(),

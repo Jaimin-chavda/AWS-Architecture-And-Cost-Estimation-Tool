@@ -21,7 +21,11 @@
 import type { ServicePlan, AwsServiceMapping } from "./schema.ts";
 import { getUnitPrice, getPriceSourceMode } from "./prices.ts";
 import type { PriceSourceMode } from "./prices.ts";
-import { SERVICE_DEFAULTS, BASE_USER_COUNT } from "./SERVICE_DEFAULTS.ts";
+import { getServiceDefaults, BASE_USER_COUNT } from "./SERVICE_DEFAULTS.ts";
+import type { RdsEngineLabel } from "./SERVICE_DEFAULTS.ts";
+
+/** Cognito User Pools free tier: first 50k MAU free. */
+const COGNITO_FREE_TIER_MAU = 50_000;
 
 // ---------------------------------------------------------------------------
 // Output types
@@ -76,10 +80,18 @@ export async function computeCostRows(
   const unpricedRows: UnpricedRow[] = [];
 
   const userScaleFactor = Math.max(userCount, 1) / BASE_USER_COUNT;
+  const dbEngine = (plan.metadata?.dbEngine ?? "none") as RdsEngineLabel;
+
+  // ECS/Fargate defence in depth: Fix 1 folds Fargate into ECS upstream, but
+  // if both survive into the final plan, price only the richer ECS row.
+  const mappings = plan.awsMappings.filter(
+    (m, _, arr) =>
+      m.serviceId !== "Fargate" || !arr.some((o) => o.serviceId === "ECS")
+  );
 
   // Fetch prices for all services in parallel
-  const pricePromises = plan.awsMappings.map(async (mapping) => {
-    const defaults = SERVICE_DEFAULTS[mapping.serviceId];
+  const pricePromises = mappings.map(async (mapping) => {
+    const defaults = getServiceDefaults(mapping.serviceId, dbEngine);
 
     if (!defaults) {
       unpricedRows.push({
@@ -99,13 +111,18 @@ export async function computeCostRows(
     );
 
     const scaledQuantity = defaults.baseQuantity * userScaleFactor;
-    const monthlyUsd = price * scaledQuantity;
+    // Cognito bills only MAU past the 50k free tier.
+    const billableQuantity =
+      mapping.serviceId === "Cognito"
+        ? Math.max(scaledQuantity - COGNITO_FREE_TIER_MAU, 0)
+        : scaledQuantity;
+    const monthlyUsd = price * billableQuantity;
 
     const row: CostRow = {
       serviceId: mapping.serviceId,
       componentId: mapping.componentId,
       unitLabel: defaults.unitLabel,
-      quantity: scaledQuantity,
+      quantity: billableQuantity,
       unitPrice: price,
       monthlyUsd,
       priceSource: source,

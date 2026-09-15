@@ -469,6 +469,10 @@ function mapComponentToAws(
         mappings.push({ componentId: c.id, serviceId: "ElastiCache", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
       } else if (/aurora/.test(tech)) {
         mappings.push({ componentId: c.id, serviceId: "Aurora", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
+      } else if (/postgres|postgresql/.test(tech)) {
+        mappings.push({ componentId: c.id, serviceId: "RDS", confidence: "high", evidence: `${ev} → RDS (PostgreSQL)`, fromPattern: false, category: "repository-evidence" });
+      } else if (/mysql|mariadb/.test(tech)) {
+        mappings.push({ componentId: c.id, serviceId: "RDS", confidence: "high", evidence: `${ev} → RDS (MySQL)`, fromPattern: false, category: "repository-evidence" });
       } else {
         mappings.push({ componentId: c.id, serviceId: "RDS", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
       }

@@ -98,6 +98,165 @@ export interface DetectedTech {
   confidence: "high" | "medium" | "low";
 }
 
+/** Terraform resource type → canonical AWS service label. */
+export const TF_RESOURCE_MAP: Record<string, string> = {
+  aws_eks_cluster: "EKS",
+  aws_eks_node_group: "EC2",
+  aws_instance: "EC2",
+  aws_db_instance: "RDS",
+  aws_rds_cluster: "Aurora",
+  aws_vpc: "VPC",
+  aws_subnet: "VPC",
+  aws_internet_gateway: "VPC",
+  aws_nat_gateway: "NATGateway",
+  aws_iam_role: "IAM",
+  aws_iam_policy: "IAM",
+  aws_cloudwatch_log_group: "CloudWatch",
+  aws_s3_bucket: "S3",
+  aws_dynamodb_table: "DynamoDB",
+  aws_sqs_queue: "SQS",
+  aws_sns_topic: "SNS",
+  aws_lambda_function: "Lambda",
+  aws_ecs_cluster: "ECS",
+  aws_ecs_service: "ECS",
+  aws_ecr_repository: "ECR",
+  aws_elasticache_cluster: "ElastiCache",
+  aws_api_gateway_rest_api: "APIGateway",
+  aws_lb: "ALB",
+  aws_msk_cluster: "MSK",
+  aws_opensearch_domain: "OpenSearch",
+  aws_cognito_user_pool: "Cognito",
+  aws_kms_key: "KMS",
+  aws_secretsmanager_secret: "SecretsManager",
+  aws_cloudwatch_event_rule: "EventBridge",
+  aws_sfn_state_machine: "StepFunctions",
+};
+
+/** Terraform registry module name fragment → canonical AWS service label. */
+export const TF_MODULE_MAP: Record<string, string> = {
+  "terraform-aws-modules/vpc": "VPC",
+  "terraform-aws-modules/eks": "EKS",
+  "terraform-aws-modules/rds": "RDS",
+  "terraform-aws-modules/iam": "IAM",
+  "terraform-aws-modules/s3": "S3",
+  "terraform-aws-modules/ec2": "EC2",
+};
+
+/**
+ * Pure-library check: no entry points, no root-level container/IaC config,
+ * and a manifest indicating a library (deno.json with exports, package.json
+ * with lib entry and no start/dev script).
+ */
+export function detectLibraryRepo(
+  files: Array<{ path: string; content: string }>,
+  entryPoints: string[]
+): boolean {
+  if (entryPoints.length > 0) return false;
+  const hasRootContainer = files.some((f) => {
+    if (f.path.includes("/")) return false;
+    return (
+      /(?:^|\/)dockerfile(\.[\w.-]+)?$/i.test(f.path) ||
+      /docker-compose(\.[\w.-]+)?\.(ya?ml)$/i.test(f.path) ||
+      /^(template|sam)\.(ya?ml)$/i.test(f.path) ||
+      /^serverless(\.[^.]*)?\.(ya?ml)$/i.test(f.path) ||
+      /\.tf$/i.test(f.path)
+    );
+  });
+  if (hasRootContainer) return false;
+
+  // Lambda / function sources mean deployable units, not a library.
+  const hasFunctionSources = files.some(
+    (f) =>
+      /(?:^|\/)(?:handler|lambda_function|lambda)\.(?:js|ts|mjs|cjs|py|go|java)$/i.test(f.path) ||
+      (typeof f.content === "string" && /exports\.handler|def lambda_handler/i.test(f.content))
+  );
+  if (hasFunctionSources) return false;
+
+  for (const f of files) {
+    const base = f.path.split("/").pop() ?? f.path;
+    if (/^deno\.jsonc?$/i.test(base)) {
+      try {
+        const parsed = JSON.parse(f.content) as Record<string, unknown>;
+        if (parsed.exports !== undefined) return true;
+      } catch {
+        return true;
+      }
+    }
+    if (base === "package.json") {
+      try {
+        const parsed = JSON.parse(f.content) as {
+          main?: string; module?: string; exports?: unknown; bin?: unknown;
+          scripts?: Record<string, string>;
+        };
+        // Build-tooling mains (gulp/grunt/webpack) are not library entries.
+        const main = parsed.main ?? "";
+        const isToolingMain = /gulp|grunt|webpack|rollup|esbuild/i.test(main);
+        const isLibEntry =
+          !isToolingMain && Boolean(parsed.main ?? parsed.module ?? parsed.exports);
+        const scripts = parsed.scripts ?? {};
+        const hasServeScript = Object.entries(scripts).some(
+          ([k, v]) => /^(start|dev|serve)$/.test(k) || /node\s+server|next\s+start/i.test(v)
+        );
+        if (isLibEntry && !hasServeScript && parsed.bin === undefined) return true;
+      } catch {
+        // unparseable — not library evidence
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Walks every .tf file, extracts `resource "aws_X" "name"` blocks and
+ * `source = "terraform-aws-modules/..."` strings, and returns one
+ * infrastructure entry per distinct service.
+ */
+export function extractTerraformResources(
+  files: Array<{ path: string; content: string | null }>
+): DetectedTech[] {
+  const found: DetectedTech[] = [];
+  const seen = new Set<string>();
+  for (const file of files) {
+    if (!file.path.endsWith(".tf") || !file.content) continue;
+    const resRe = /resource\s+"(aws_[a-zA-Z0-9_]+)"\s+"([^"]+)"/g;
+    let m: RegExpExecArray | null;
+    while ((m = resRe.exec(file.content)) !== null) {
+      const svc = TF_RESOURCE_MAP[m[1]];
+      if (!svc || seen.has(svc)) continue;
+      seen.add(svc);
+      found.push({
+        name: `Terraform resource (${svc})`,
+        evidence: `${file.path} → resource "${m[1]}" "${m[2]}"`,
+        confidence: "high",
+      });
+    }
+    const modRe = /source\s*=\s*"([^"]*terraform-aws-modules\/[^"]*)"/g;
+    while ((m = modRe.exec(file.content)) !== null) {
+      const src = m[1].toLowerCase();
+      for (const [frag, svc] of Object.entries(TF_MODULE_MAP)) {
+        if (src.includes(frag) && !seen.has(svc)) {
+          seen.add(svc);
+          found.push({
+            name: `Terraform resource (${svc})`,
+            evidence: `${file.path} → module "${m[1]}"`,
+            confidence: "high",
+          });
+        }
+      }
+      // EKS blueprints manage EC2 node groups even with no aws_instance block.
+      if (/terraform-aws-modules\/eks\//.test(src) && !seen.has("EC2")) {
+        seen.add("EC2");
+        found.push({
+          name: "Terraform resource (EC2)",
+          evidence: `${file.path} → eks_managed_node_groups (EC2 workers)`,
+          confidence: "high",
+        });
+      }
+    }
+  }
+  return found;
+}
+
 export interface ProjectProfile {
   /** Primary programming languages detected */
   languages: DetectedTech[];
@@ -115,6 +274,13 @@ export interface ProjectProfile {
   deploymentHints: DetectedTech[];
   /** File paths where structured manifest parsing failed */
   parseFailures?: string[];
+  /**
+   * True when the repo is IaC-only (.tf files with no application code).
+   * Suppresses inferring application-tier services not declared as resources.
+   */
+  isIacOnly?: boolean;
+  /** True when the repo is a pure library/framework, not a deployable app. */
+  isLibraryOrFramework?: boolean;
   /**
    * Structurally distinct running processes/data-tiers discovered from
    * docker-compose services, serverless functions, IaC resources, or
@@ -257,6 +423,12 @@ export const PYTHON_PACKAGE_MAP: Record<string, { label: string; category: "fram
 // Maps Go module path fragment → label
 export const GO_MODULE_MAP: Record<string, { label: string; category: "framework" | "database" | "runtime" }> = {
   "gin-gonic/gin": { label: "Gin", category: "framework" },
+  "gorm.io/gorm": { label: "GORM ORM", category: "framework" },
+  "gorm.io/driver/postgres": { label: "PostgreSQL", category: "database" },
+  "gorm.io/driver/mysql": { label: "MySQL", category: "database" },
+  "gorm.io/driver/sqlite": { label: "SQLite", category: "database" },
+  "mattn/go-sqlite3": { label: "SQLite", category: "database" },
+  "modernc.org/sqlite": { label: "SQLite", category: "database" },
   "labstack/echo": { label: "Echo", category: "framework" },
   "gofiber/fiber": { label: "Fiber", category: "framework" },
   "gorilla/mux": { label: "Gorilla Mux", category: "framework" },
@@ -395,7 +567,35 @@ export const DOTNET_PACKAGE_MAP: Record<string, { label: string; category: "fram
 // Language detection from file extensions in the tree
 // ---------------------------------------------------------------------------
 
+export const ELIXIR_PACKAGE_MAP: Record<string, { label: string; category: "framework" | "database" | "aws" }> = {
+  phoenix: { label: "Phoenix", category: "framework" },
+  plug: { label: "Plug", category: "framework" },
+  ecto: { label: "Ecto ORM", category: "database" },
+  ecto_sql: { label: "Ecto ORM", category: "database" },
+  postgrex: { label: "PostgreSQL", category: "database" },
+  redix: { label: "Redis", category: "database" },
+  broadway: { label: "Broadway (pipeline)", category: "framework" },
+  ex_aws: { label: "AWS SDK (Elixir)", category: "aws" },
+  aws_elixir: { label: "AWS SDK (Elixir)", category: "aws" },
+};
+
+export function parseMixExs(content: string): ParsedPackage[] {
+  const packages: ParsedPackage[] = [];
+  const lines = content.split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (line.startsWith("#")) continue;
+    const match = line.match(/\{:\s*([a-zA-Z0-9_]+)\s*,/);
+    if (match) {
+      packages.push({ name: match[1].toLowerCase() });
+    }
+  }
+  return packages;
+}
+
 export const LANG_FROM_MANIFEST: Array<{ file: RegExp; lang: string }> = [
+  { file: /^deno\.jsonc?$/, lang: "Deno/TypeScript" },
+  { file: /^mix\.exs$/, lang: "Elixir" },
   { file: /^package\.json$/, lang: "Node.js/TypeScript" },
   { file: /^requirements\.txt$|^pyproject\.toml$|^setup\.py$/, lang: "Python" },
   { file: /^go\.mod$/, lang: "Go" },
@@ -417,13 +617,15 @@ export interface InfraSignal {
 }
 
 export const INFRA_FILE_SIGNALS: InfraSignal[] = [
+  { pattern: /(?:^|\/)deno\.jsonc?$/i, label: "Deno runtime config", confidence: "high" },
   { pattern: /(?:^|\/)Dockerfile(\.[\w.-]+)?$/i, label: "Docker (Dockerfile)", confidence: "high" },
   { pattern: /(?:^|\/)docker-compose(\.[\w.-]+)?\.(ya?ml)$/i, label: "Docker Compose", confidence: "high" },
   { pattern: /(?:^|\/)serverless(\.[\w.-]+)?\.(ya?ml)$/i, label: "Serverless Framework", confidence: "high" },
   { pattern: /(?:^|\/)(?:template|sam)\.(ya?ml)$/i, label: "AWS SAM (template.yaml)", confidence: "high" },
   { pattern: /^(?:terraform|infra|\.infra)\/.*\.tf$|^.*\.tf$/i, label: "Terraform", confidence: "high" },
   { pattern: /^\.github\/workflows\/.+\.(ya?ml)$/i, label: "GitHub Actions CI/CD", confidence: "medium" },
-  { pattern: /^(?:kubernetes|k8s|helm)\//i, label: "Kubernetes manifests", confidence: "high" },
+  { pattern: /(?:^|\/)(?:k8s|kubernetes(?:-manifests)?|helm(?:-chart)?|deploy|manifests)\//i, label: "Kubernetes manifests", confidence: "high" },
+  { pattern: /(?:^|\/)Chart\.ya?ml$/i, label: "Kubernetes manifests", confidence: "high" },
   { pattern: /^vercel\.json$/i, label: "Vercel deployment config", confidence: "high" },
   { pattern: /^netlify\.toml$/i, label: "Netlify deployment config", confidence: "high" },
   { pattern: /^amplify\.ya?ml$|^amplify\//i, label: "AWS Amplify config", confidence: "high" },
@@ -1396,6 +1598,34 @@ export function analyzeProject(signals: RepoSignals): ProjectProfile {
         for (const a of result.awsUsage) addUnique(awsUsage, a, seenAwsUsage);
       }
 
+      // schema.prisma (Prisma datasource provider names the engine)
+      if (fileName === "schema.prisma") {
+        const provider = file.content.match(/provider\s*=\s*"([^"]+)"/)?.[1]?.toLowerCase();
+        if (provider === "postgresql" || provider === "postgres") {
+          addUnique(databases, { name: "PostgreSQL", evidence: `${file.path} → datasource provider`, confidence: "high" }, seenDatabases);
+        } else if (provider === "mysql") {
+          addUnique(databases, { name: "MySQL", evidence: `${file.path} → datasource provider`, confidence: "high" }, seenDatabases);
+        } else if (provider === "mongodb") {
+          addUnique(databases, { name: "MongoDB", evidence: `${file.path} → datasource provider`, confidence: "high" }, seenDatabases);
+        } else if (provider === "sqlserver") {
+          addUnique(databases, { name: "SQL Server", evidence: `${file.path} → datasource provider`, confidence: "high" }, seenDatabases);
+        }
+        // sqlite/cockroachdb providers: no AWS mapping (SQLite never maps to RDS).
+      }
+
+      // mix.exs (Elixir)
+      if (fileName === "mix.exs") {
+        const pkgs = parseMixExs(file.content);
+        const result = mapParsedPackages(pkgs, file.path, ELIXIR_PACKAGE_MAP);
+        for (const f of result.frameworks) addUnique(frameworks, f, seenFrameworks);
+        for (const d of result.databases) addUnique(databases, d, seenDatabases);
+        for (const a of result.awsUsage) addUnique(awsUsage, a, seenAwsUsage);
+        if (!seenLangs.has("Elixir")) {
+          seenLangs.add("Elixir");
+          languages.push({ name: "Elixir", evidence: file.path, confidence: "high" });
+        }
+      }
+
       // *.csproj (Fix 6)
       if (/\.csproj$/i.test(fileName)) {
         const pkgs = parseCsProj(file.content);
@@ -1494,6 +1724,28 @@ export function analyzeProject(signals: RepoSignals): ProjectProfile {
     }
   }
 
+  // ── Terraform Resource Discovery ─────────────────────────────
+  const tfResources = extractTerraformResources(
+    allFiles.filter((f): f is { path: string; content: string } => typeof f.content === "string")
+  );
+  for (const t of tfResources) {
+    if (!seenInfra.has(t.name)) {
+      seenInfra.add(t.name);
+      infrastructure.push(t);
+    }
+  }
+  const hasTfFiles = allFiles.some((f) => f.path.endsWith(".tf"));
+  const isIacOnly =
+    hasTfFiles &&
+    languages.length === 0 &&
+    frameworks.length === 0 &&
+    entryPoints.length === 0;
+
+  const isLibraryOrFramework = detectLibraryRepo(
+    allFiles.filter((f): f is { path: string; content: string } => typeof f.content === "string"),
+    entryPoints
+  );
+
   // ── Workload Classification (Priority 4) ────────────────────
   const workloadClassification = classifyWorkload({
     languages,
@@ -1589,6 +1841,8 @@ export function analyzeProject(signals: RepoSignals): ProjectProfile {
     awsUsage,
     deploymentHints,
     parseFailures,
+    isIacOnly,
+    isLibraryOrFramework,
     discoveredComponents,
     evidenceRegister,
     workloadClassification,

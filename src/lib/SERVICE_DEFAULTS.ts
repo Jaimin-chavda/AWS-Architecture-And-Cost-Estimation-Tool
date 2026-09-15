@@ -53,7 +53,7 @@ export const SERVICE_DEFAULTS: Record<string, ServiceDefault> = {
   },
   ECS: {
     unitLabel: "vCPU-hours/mo (Fargate pricing)",
-    baseQuantity: 1440, // 2 tasks × 720 h
+    baseQuantity: 720, // 2 tasks × 0.5 vCPU × 720 h = 720 vCPU-hours
     serviceCode: "AmazonECS",
     usageTypePrefix: "Fargate-vCPU-Hours:perCPU",
     annotation: "2 Fargate tasks × 0.5 vCPU × 720 h; source: Fargate pricing page",
@@ -67,7 +67,7 @@ export const SERVICE_DEFAULTS: Record<string, ServiceDefault> = {
   },
   Fargate: {
     unitLabel: "vCPU-hours/mo",
-    baseQuantity: 1440, // 2 tasks × 720 h
+    baseQuantity: 720, // 2 tasks × 0.5 vCPU × 720 h = 720 vCPU-hours
     serviceCode: "AmazonECS",
     usageTypePrefix: "Fargate-vCPU-Hours:perCPU",
     annotation: "2 Fargate tasks × 0.5 vCPU × 720 h; source: Fargate pricing page",
@@ -177,7 +177,7 @@ export const SERVICE_DEFAULTS: Record<string, ServiceDefault> = {
     annotation: "5M REST API calls; source: API Gateway pricing page",
   },
   ALB: {
-    unitLabel: "LCU-hours/mo",
+    unitLabel: "ALB-hours/mo",
     baseQuantity: 720,
     serviceCode: "AWSElasticLoadBalancing",
     usageTypePrefix: "LoadBalancerUsage",
@@ -244,7 +244,7 @@ export const SERVICE_DEFAULTS: Record<string, ServiceDefault> = {
 
   // ── Auth / Identity ──────────────────────────────────────────────────────
   Cognito: {
-    unitLabel: "MAU (Monthly Active Users)",
+    unitLabel: "billable MAU past free tier",
     baseQuantity: 10_000,
     serviceCode: "AmazonCognito",
     usageTypePrefix: "CognitoUserPool",
@@ -258,6 +258,13 @@ export const SERVICE_DEFAULTS: Record<string, ServiceDefault> = {
     serviceCode: "AmazonCloudWatch",
     usageTypePrefix: "MetricMonitorUsage",
     annotation: "10 custom metrics + 5 GB log ingestion; source: CloudWatch pricing page",
+  },
+  CloudWatchLogs: {
+    unitLabel: "GB ingested/mo",
+    baseQuantity: 5, // 5 GB log ingestion
+    serviceCode: "AmazonCloudWatch",
+    usageTypePrefix: "DataProcessing-Bytes",
+    annotation: "5 GB log ingestion; source: CloudWatch Logs pricing page",
   },
   CodePipeline: {
     unitLabel: "active pipelines/mo",
@@ -346,3 +353,25 @@ export const SERVICE_DEFAULTS: Record<string, ServiceDefault> = {
 
 /** Base user count for the above quantities (used for scaling on the client). */
 export const BASE_USER_COUNT = 10_000;
+
+export type RdsEngineLabel = "postgres" | "mysql" | "none";
+
+/**
+ * Returns the pricing baseline for a service, labelling the RDS line with
+ * the detected engine instead of hardcoding MySQL.
+ */
+export function getServiceDefaults(
+  serviceId: string,
+  dbEngine: RdsEngineLabel = "none"
+): ServiceDefault | undefined {
+  const base = SERVICE_DEFAULTS[serviceId];
+  if (!base) return undefined;
+  if (serviceId === "RDS" && dbEngine === "postgres") {
+    return {
+      ...base,
+      unitLabel: "instance-hours/mo (db.t3.micro, PostgreSQL)",
+      annotation: "1 db.t3.micro PostgreSQL instance × 720 h; source: RDS pricing page",
+    };
+  }
+  return base;
+}

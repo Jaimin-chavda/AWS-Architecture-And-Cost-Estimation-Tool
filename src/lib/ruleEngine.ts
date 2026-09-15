@@ -6,7 +6,8 @@
  * Patterns only used as sanity-check in final mapping (architecture.ts).
  */
 
-import { ServicePlanSchema } from "./schema.ts";
+import { ServicePlanSchema, SERVICE_IDS } from "./schema.ts";
+import { isWorkspaceRootPath } from "./repoFetcher.ts";
 import type {
   ServicePlan,
   ServiceId,
@@ -73,6 +74,458 @@ function hasWord(text: string, words: string[]): boolean {
   });
 }
 
+/** Splits "### path\\ncontent" sections back into per-file blocks. */
+function splitByFile(combined: string): Array<{ path: string; content: string }> {
+  const sections: Array<{ path: string; content: string }> = [];
+  const lines = combined.split("\n");
+  let curPath: string | null = null;
+  let curLines: string[] = [];
+  const flush = () => {
+    if (curPath !== null) sections.push({ path: curPath, content: curLines.join("\n") });
+  };
+  for (const line of lines) {
+    const m = line.match(/^### (.+)$/);
+    if (m) {
+      flush();
+      curPath = m[1].trim();
+      curLines = [];
+    } else if (curPath !== null) {
+      curLines.push(line);
+    }
+  }
+  flush();
+  return sections;
+}
+
+function isReadmePath(path: string): boolean {
+  const base = path.split("/").pop() ?? path;
+  return /^readme(\.\w+)?$/i.test(base);
+}
+
+/**
+ * Combined text minus README sections and minus "### path" header lines.
+ * Headers duplicate fileNames (covered by fileHas); leaving them in lets
+ * directory names (e.g. apigateway/main.go) fake keyword hits.
+ */
+function codeOnlyText(combined: string): string {
+  const sections = splitByFile(combined);
+  if (sections.length === 0) return combined;
+  const kept = sections.filter((s) => !isReadmePath(s.path));
+  const head = combined.split(/^### /m)[0] ?? "";
+  return [head, ...kept.map((s) => s.content)].join("\n");
+}
+
+/** Primary IaC/serverless templates whose Resources/functions blocks rule. */
+function hasPrimaryIacTemplates(fileNames: string[]): boolean {
+  return fileNames.some((f) => {
+    const base = f.split("/").pop() ?? f;
+    return (
+      /^(template|sam)\.(ya?ml)$/i.test(base) ||
+      /^serverless(\.[^.]*)?\.(ya?ml)$/i.test(base) ||
+      /^cdk\.json$/i.test(base) ||
+      /\.tf$/i.test(f)
+    );
+  });
+}
+
+/**
+ * Compute exclusivity: exactly one service from the compute hierarchy wins.
+ * Ordered by specificity — serverless first, then orchestrators, then hosts.
+ */
+const COMPUTE_HIERARCHY: ServiceId[] = [
+  "Lambda", "EKS", "ECS", "Fargate", "AppRunner", "ElasticBeanstalk",
+  "EC2", "Lightsail", "Batch", "SageMaker",
+];
+
+function k8sWeight(fileNames: string[]): number {
+  let w = 0;
+  for (const f of fileNames) {
+    const lower = f.toLowerCase();
+    if (/(?:^|\/)(?:k8s|kubernetes(?:-manifests)?|helm(?:-chart)?|deploy|manifests)\//.test(lower)) w++;
+    else if (/chart\.yaml$/i.test(f)) w++;
+    else if (/(?:^|\/)(?:ingress|deployment|service|statefulset|daemonset|configmap)\.ya?ml$/i.test(lower)) w++;
+    else if (/\.github\/workflows\/.+\.(ya?ml)$/i.test(lower)) w += 0;
+  }
+  return w;
+}
+
+function containerWeight(fileNames: string[]): number {
+  let w = 0;
+  for (const f of fileNames) {
+    const lower = f.toLowerCase();
+    if (/(?:^|\/)dockerfile(\.[\w.-]+)?$/i.test(f)) w++;
+    else if (/docker-compose(\.[\w.-]+)?\.(ya?ml)$/i.test(lower)) w++;
+    else if (/\.tf$/i.test(lower)) w++;
+  }
+  return w;
+}
+
+/**
+ * Resolves compute exclusivity in place: drops every compute sibling of the
+ * winner from `detected`. Never promotes a service that was not detected.
+ */
+function resolveComputeExclusivity(
+  detected: DetectedService[],
+  fileNames: string[],
+  protectedIds: Set<ServiceId> = new Set()
+): void {
+  // Fargate is a launch type of ECS — fold in, do not double-count.
+  const hasEcs = detected.some((d) => d.serviceId === "ECS");
+  if (hasEcs) {
+    for (let i = detected.length - 1; i >= 0; i--) {
+      if (detected[i].serviceId === "Fargate") detected.splice(i, 1);
+    }
+  }
+
+  const compute = detected.filter((d) =>
+    (COMPUTE_HIERARCHY as string[]).includes(d.serviceId)
+  );
+  if (compute.length <= 1) return;
+
+  const rankOf = (d: DetectedService): [number, number, number] => [
+    COMPUTE_HIERARCHY.indexOf(d.serviceId),
+    CONFIDENCE_RANK[d.confidence],
+    CATEGORY_RANK[d.category ?? "inference"],
+  ];
+
+  let winner: DetectedService;
+  const lambdaHigh = compute.find(
+    (d) =>
+      d.serviceId === "Lambda" &&
+      d.confidence === "high" &&
+      d.category === "repository-evidence"
+  );
+  if (lambdaHigh) {
+    winner = lambdaHigh;
+  } else {
+    const kw = k8sWeight(fileNames);
+    const cw = containerWeight(fileNames);
+    const eks = compute.find((d) => d.serviceId === "EKS");
+    const ecs = compute.find((d) => d.serviceId === "ECS");
+    const hasCompose = fileNames.some((f) =>
+      /docker-compose(\.[\w.-]+)?\.(ya?ml)$/i.test(f)
+    );
+    if (eks && kw >= 2 && (!hasCompose || kw >= 3)) {
+      winner = eks;
+    } else if (ecs && cw > 0 && (kw === 0 || (hasCompose && kw < 3))) {
+      winner = ecs;
+    } else {
+      winner = [...compute].sort((a, b) => {
+        const [ai, ac, ag] = rankOf(a);
+        const [bi, bc, bg] = rankOf(b);
+        return ai - bi || bg - ag || bc - ac;
+      })[0];
+    }
+  }
+
+  const losers = new Set(
+    compute.filter((d) => d !== winner).map((d) => d.serviceId)
+  );
+  // IaC-declared compute pairs (e.g. EKS + EC2 node groups) survive together.
+  for (const kept of protectedIds) losers.delete(kept);
+  for (let i = detected.length - 1; i >= 0; i--) {
+    if (losers.has(detected[i].serviceId)) detected.splice(i, 1);
+  }
+}
+
+/**
+ * Backend web frameworks: a source-only repo using one of these with no
+ * compute detected gets the default web/backend archetype (ECS + ALB).
+ * Frontend-only frameworks are excluded — they fall through to the
+ * static-hosting branch instead.
+ */
+const BACKEND_FRAMEWORKS = [
+  "Express", "Fastify", "Koa", "NestJS", "Hono",
+  "Django", "Flask", "FastAPI", "Starlette", "Gunicorn", "Uvicorn",
+  "Spring Boot", "Spring WebFlux", "Quarkus", "Micronaut",
+  "Rails", "Sinatra", "Laravel", "Symfony",
+  "Gin", "Echo", "Fiber", "Chi", "Gorilla Mux",
+  "Axum", "Actix", "Rocket", "ASP.NET",
+];
+
+function profileHasBackendFramework(profile: ProjectProfile | undefined): boolean {
+  if (!profile) return false;
+  return profile.frameworks.some((f) =>
+    BACKEND_FRAMEWORKS.some((b) => f.name.toLowerCase().includes(b.toLowerCase()))
+  );
+}
+
+/** Frontend-only frameworks: static-hosting archetype, never a backend host. */
+const FRONTEND_ONLY_FRAMEWORKS = [
+  "React", "Vue", "Svelte", "SolidJS", "Angular", "Astro", "Gatsby", "Hugo", "Jekyll",
+];
+
+function profileHasFrontendOnlyFramework(profile: ProjectProfile | undefined): boolean {
+  if (!profile) return false;
+  return profile.frameworks.some((f) =>
+    FRONTEND_ONLY_FRAMEWORKS.some((b) => f.name.toLowerCase().includes(b.toLowerCase()))
+  );
+}
+
+function profileHasAnyDatabase(profile: ProjectProfile | undefined): boolean {
+  return Boolean(profile && profile.databases.length > 0);
+}
+
+export type RdsEngine = "postgres" | "mysql" | "none";
+
+/**
+ * Resolves the relational engine from code evidence. A connection-string
+ * scheme wins outright; Spring Boot + MySQL-specific artifacts wins MySQL
+ * when both drivers are present; otherwise Postgres is the default.
+ */
+export function detectRdsEngine(
+  combined: string,
+  profile?: ProjectProfile
+): RdsEngine {
+  if (/postgres(ql)?:\/\//i.test(combined)) return "postgres";
+  if (/mysqldb|mysql|mariadb:\/\//i.test(combined)) return "mysql";
+
+  const postgresEv = dbEvidence(profile, "postgresql") || dbEvidence(profile, "postgres");
+  const mysqlEv = dbEvidence(profile, "mysql") || dbEvidence(profile, "mariadb");
+  const textHasPostgres = Boolean(postgresEv) || /postgres|postgresql/i.test(combined);
+  const textHasMysql = Boolean(mysqlEv) || /mysql|mariadb/i.test(combined);
+
+  if (textHasPostgres && textHasMysql) {
+    const springMysql =
+      /spring/i.test(combined) &&
+      (/mysql-connector|mysql:mysql/i.test(combined) ||
+        (/spring\.datasource\.url/i.test(combined) && /mysql/i.test(combined)) ||
+        Boolean(mysqlEv));
+    return springMysql ? "mysql" : "postgres";
+  }
+  if (textHasMysql) return "mysql";
+  if (textHasPostgres) return "postgres";
+  // No driver string, but a corroborated ORM framework implies a relational
+  // store — default to PostgreSQL (MySQL needs MySQL-specific evidence).
+  if (familyOrmCorroborated(combined, profile, [])) return "postgres";
+  return "none";
+}
+
+interface NegativeRule {
+  /** Stable reason recorded when the rule fires. */
+  reason: string;
+  when: (ctx: {
+    combined: string;
+    fileNames: string[];
+    profile?: ProjectProfile;
+  }) => boolean;
+  forbid: ServiceId[];
+}
+
+/** Baseline "Do Not Infer" cases: splice forbidden IDs out of detected. */
+const NEGATIVE_RULES: NegativeRule[] = [
+  {
+    reason: "serverless-first repo: no persistent-server services beyond IaC",
+    when: ({ combined, fileNames }) => {
+      const hasServerless =
+        fileNames.some((f) => {
+          const base = f.split("/").pop() ?? f;
+          return (
+            /^serverless(\.[^.]*)?\.(ya?ml)$/i.test(base) ||
+            /^(template|sam)\.(ya?ml)$/i.test(base)
+          );
+        }) || /AWS::Lambda::Function/i.test(combined);
+      const hasContainerIac =
+        /aws_ecs|aws_eks|AWS::ECS|AWS::EKS/i.test(combined) ||
+        fileNames.some((f) => /(?:^|\/)(?:k8s|kubernetes(?:-manifests)?|helm(?:-chart)?|deploy|manifests)\//i.test(f));
+      return hasServerless && !hasContainerIac;
+    },
+    forbid: ["ECS", "EKS", "EC2", "RDS", "ElastiCache"],
+  },
+  {
+    reason: "ML training pipeline: no serving ingress",
+    when: ({ profile }) =>
+      profile?.workloadClassification?.primaryWorkload === "ml-training" ||
+      profile?.workloadClassification?.type === "ml-training",
+    forbid: ["ALB", "CloudFront", "Route53", "APIGateway"],
+  },
+  {
+    reason: "admin/monitoring stack: no app tiers",
+    when: ({ profile }) =>
+      profile?.workloadClassification?.primaryWorkload === "admin-monitoring-tool" ||
+      profile?.workloadClassification?.type === "admin-monitoring-tool",
+    forbid: ["CloudFront", "ALB", "APIGateway", "RDS", "DynamoDB", "OpenSearch"],
+  },
+  {
+    reason: "pure library: no deployable runtime",
+    when: ({ profile, fileNames }) => {
+      if (!profile) return false;
+      if (profile.isLibraryOrFramework) return true;
+      if (profile.entryPoints.length > 0) return false;
+      if (profileHasBackendFramework(profile) || profileHasFrontendOnlyFramework(profile)) return false;
+      // Container / orchestrator / IaC config means a deployable exists.
+      if (
+        fileNames.some((f) =>
+          /(?:^|\/)dockerfile(\.[\w.-]+)?$/i.test(f) ||
+          /docker-compose(\.[\w.-]+)?\.(ya?ml)$/i.test(f) ||
+          /(?:^|\/)(?:k8s|kubernetes(?:-manifests)?|helm(?:-chart)?|deploy|manifests)\//i.test(f) ||
+          /chart\.yaml$/i.test(f) ||
+          /\.(tf)$/i.test(f) ||
+          /^(template|sam)\.(ya?ml)$/i.test(f.split("/").pop() ?? f) ||
+          /^serverless(\.[^.]*)?\.(ya?ml)$/i.test(f.split("/").pop() ?? f)
+        )
+      ) {
+        return false;
+      }
+      const comps = profile.discoveredComponents ?? [];
+      return comps.every((c) => (c.type as string) === "other" || (c.type as string) === "object-storage" || (c.type as string) === "storage");
+    },
+    forbid: ["ECS", "EKS", "Lambda", "ALB", "APIGateway", "RDS"],
+  },
+];
+
+function applyNegativeRules(
+  detected: DetectedService[],
+  ctx: { combined: string; fileNames: string[]; profile?: ProjectProfile }
+): void {
+  // Manifest-confirmed libraries map to an empty service set, full stop.
+  if (ctx.profile?.isLibraryOrFramework) {
+    detected.length = 0;
+    return;
+  }
+  for (const rule of NEGATIVE_RULES) {
+    if (!rule.when(ctx)) continue;
+    const banned = new Set<string>(rule.forbid);
+    for (let i = detected.length - 1; i >= 0; i--) {
+      if (banned.has(detected[i].serviceId)) detected.splice(i, 1);
+    }
+  }
+}
+
+/** Primary language families for ORM corroboration (cross-language ORM mentions do not count). */
+function primaryLanguageFamilies(profile?: ProjectProfile): Set<string> {
+  const fams = new Set<string>();
+  if (!profile) return fams;
+  for (const l of profile.languages) {
+    const n = l.name.toLowerCase();
+    if (/python/.test(n)) fams.add("python");
+    else if (/node|typescript|javascript/.test(n)) fams.add("js");
+    else if (/java|jvm/.test(n)) fams.add("java");
+    else if (/\bgo\b/.test(n)) fams.add("go");
+    else if (/ruby/.test(n)) fams.add("ruby");
+    else if (/c#|dotnet|net/.test(n)) fams.add("dotnet");
+    else if (/php/.test(n)) fams.add("php");
+  }
+  return fams;
+}
+
+const FAMILY_ORMS: Record<string, RegExp[]> = {
+  python: [/sqlalchemy/i, /django\.db/i, /\bdjango\b.*orm/i, /django/i],
+  js: [/prisma/i, /typeorm/i, /sequelize/i, /\bknex\b/i],
+  java: [/hibernate/i, /spring[\s_-]*data/i, /\bjpa\b/i],
+  go: [/gorm/i, /sqlx/i],
+  ruby: [/activerecord/i, /active_record/i],
+  dotnet: [/entityframework/i, /efcore/i, /entity framework/i],
+  php: [/eloquent/i, /doctrine/i],
+};
+
+function dirOfEvidence(evidence: string | null): string | null {
+  if (!evidence) return null;
+  const path = evidence.split(" → ")[0] ?? evidence;
+  const idx = path.lastIndexOf("/");
+  return idx >= 0 ? path.slice(0, idx) : "(root)";
+}
+
+function driverEvidenceDirs(profile?: ProjectProfile): string[] {
+  if (!profile) return [];
+  const dirs: string[] = [];
+  for (const d of profile.databases) {
+    if (/postgres|mysql|mariadb/i.test(d.name)) {
+      dirs.push(dirOfEvidence(d.evidence));
+    }
+  }
+  return dirs;
+}
+
+/**
+ * Same-family ORM corroboration. A cross-language ORM mention does not count,
+ * and the ORM must share a top-level directory with a relational driver —
+ * except when no driver string exists at all, in which case a corroborated
+ * full-stack ORM framework (Django/Rails/Laravel/Spring-Data-style) implies a
+ * relational store on its own.
+ */
+function familyOrmCorroborated(
+  combined: string,
+  profile?: ProjectProfile,
+  driverDirs: string[] = []
+): boolean {
+  const fams = primaryLanguageFamilies(profile);
+  const ormMatched =
+    fams.size === 0
+      ? Object.values(FAMILY_ORMS).some((res) => res.some((re) => re.test(combined)))
+      : [...fams].some((fam) => (FAMILY_ORMS[fam] ?? []).some((re) => re.test(combined)));
+  if (!ormMatched) {
+    if (profile) {
+      const fw = profile.frameworks.map((f) => f.name.toLowerCase()).join(" ");
+      if (/django|rails|laravel|spring data|spring boot/.test(fw)) return true;
+    }
+    return false;
+  }
+  // ORM matched: co-locate with a driver, or no driver anywhere (implied store).
+  if (driverDirs.length === 0 && !/postgres|mysql|mariadb/i.test(combined)) return true;
+  const ormDirs = new Set<string>();
+  if (profile) {
+    for (const f of [...profile.frameworks, ...profile.databases]) {
+      if (Object.values(FAMILY_ORMS).some((res) => res.some((re) => re.test(f.name)))) {
+        ormDirs.add(dirOfEvidence(f.evidence));
+      }
+    }
+  }
+  if (ormDirs.size === 0) {
+    // ORM seen only in raw text: accept only when the driver is equally
+    // unlocated (both bare mentions, same file blob).
+    return driverDirs.length === 0;
+  }
+  return driverDirs.some((d) => ormDirs.has(d));
+}
+
+/**
+ * Corroboration gate: true when a DB connection URL, a same-family ORM, a
+ * migrations directory, a database discoveredComponent, or a compose DB
+ * service block is present.
+ */
+export function isDbCorroborated(
+  combined: string,
+  profile?: ProjectProfile,
+  fileNames: string[] = []
+): boolean {
+  if (/(?:postgres|postgresql|mysql|mariadb):\/\/|DATABASE_URL|DB_HOST|DB_PASSWORD|POSTGRES_USER|MYSQL_DATABASE|RDS_ENDPOINT/i.test(combined)) {
+    return true;
+  }
+  if (familyOrmCorroborated(combined, profile, driverEvidenceDirs(profile))) return true;
+  if (fileNames.some((f) => /(?:^|\/)migrations?\/|db\/migrate|alembic|flyway|liquibase/i.test(f))) {
+    return true;
+  }
+  if (profile?.discoveredComponents?.some((c) => c.type === "database")) {
+    return true;
+  }
+  if (/image:\s*(postgres|mysql|mariadb)/i.test(combined)) {
+    return true;
+  }
+  return false;
+}
+
+/** Service-specific IaC resource tokens for corroborating SDK-only matches. */
+const IAC_TOKENS: Record<string, RegExp> = {
+  Lambda: /aws::lambda|aws_lambda|serverless::function|aws::serverless::function/i,
+  S3: /aws::s3|aws_s3|s3::bucket/i,
+  DynamoDB: /dynamo|aws::dynamodb/i,
+  APIGateway: /apigateway|httpapi|aws_api_gateway|aws::apigateway/i,
+  SQS: /sqs|aws::sqs/i,
+  SNS: /sns|aws::sns/i,
+  EventBridge: /eventbridge|aws::events|aws_cloudwatch_event/i,
+  Kinesis: /kinesis|aws::kinesis/i,
+  Cognito: /cognito|aws::cognito/i,
+  RDS: /aws::rds|aws_db_instance|aws_rds/i,
+  Aurora: /aws_rds_cluster|aurora/i,
+  StepFunctions: /step.?function|aws::stepfunctions/i,
+};
+
+function iacCorroborated(serviceId: string, codeText: string): boolean {
+  const re = IAC_TOKENS[serviceId];
+  return re ? re.test(codeText) : true;
+}
+
 function profileHasFramework(profile: ProjectProfile, ...names: string[]): boolean {
   const lower = names.map((n) => n.toLowerCase());
   return profile.frameworks.some((f) => lower.some((n) => f.name.toLowerCase().includes(n)));
@@ -121,7 +574,11 @@ function detectServices(
   profile?: ProjectProfile
 ): DetectedService[] {
   const detected: DetectedService[] = [];
-  const lower = combined.toLowerCase();
+  // Bare-keyword service patterns run against non-README code text only.
+  // The head (description, if any) is preserved; README sections are cut.
+  combined = codeOnlyText(combined);
+  const code = combined;
+  const lower = code.toLowerCase();
   const fileHas = (re: RegExp) => fileNames.some((f) => re.test(f));
 
   const hasDocker = Boolean(
@@ -168,7 +625,9 @@ function detectServices(
 
   // --- Compute ---
   const lambdaEv = awsEvidence(profile, "lambda");
-  const hasLambdaHandler = hasAny(combined, ["aws lambda", "lambda function", "handler.js", "handler.ts", "handler.py", "aws-lambda", "lambda_function.py"]);
+  const hasLambdaHandler =
+    hasAny(combined, ["aws lambda", "lambda function", "handler.js", "handler.ts", "handler.py", "aws-lambda", "lambda_function.py", "exports.handler", "lambda_handler"]) ||
+    fileNames.some((f) => /(?:^|\/)(?:handler|lambda_function|lambda)\.(?:js|ts|mjs|cjs|py|go|java)$/i.test(f));
   if (lambdaEv) add("Lambda", "high", `AWS SDK Lambda client imported — ${lambdaEv}`);
   else if (hasLambdaHandler || hasAny(combined, ["aws::lambda::function", "aws::serverless::function", "aws_lambda_function"])) {
     add("Lambda", "high", "Lambda handler or function definition in repository files");
@@ -218,31 +677,41 @@ function detectServices(
   }
 
   // --- Database (RDS / Aurora / ElastiCache) ---
+  // Engine resolution + corroboration gate: a driver string alone never earns
+  // RDS without corroboration, and the evidence names the engine explicitly.
   const rdsSdkEv = awsEvidence(profile, "rds");
-  const postgresEv = dbEvidence(profile, "postgresql") || dbEvidence(profile, "postgres");
-  const mysqlEv = dbEvidence(profile, "mysql") || dbEvidence(profile, "mariadb");
-  const auroraEv = awsEvidence(profile, "aurora") || (hasAny(combined, ["aurora"]) ? "aurora reference detected" : null);
+  const auroraEv = awsEvidence(profile, "aurora") || (
+    /engine\s*=\s*["']aurora/i.test(combined) ||
+    /aws_rds_cluster/i.test(combined) ||
+    /rds-data|data\s*api/i.test(combined) ||
+    /@aws-sdk\/client-rds/i.test(combined) ||
+    /boto3\.client\(\s*["']rds["']/i.test(combined)
+      ? "Aurora engine declaration or RDS Data API reference detected"
+      : null
+  );
+
+  const dbEngine = detectRdsEngine(combined, profile);
+  const dbCorroborated = isDbCorroborated(combined, profile, fileNames);
 
   if (auroraEv) {
     add("Aurora", "high", typeof auroraEv === "string" ? auroraEv : "Aurora reference in repository files");
   } else if (rdsSdkEv || hasAny(combined, ["aws::rds::dbinstance", "aws_db_instance"])) {
     add("RDS", "high", rdsSdkEv ? `RDS SDK client imported — ${rdsSdkEv}` : "Explicit RDS declaration in IaC/config");
-  } else if (postgresEv || mysqlEv || hasAny(combined, ["mysql", "postgres", "postgresql", "mariadb", "sql server", "sqlserver", "mssql"])) {
-    const weakLabel = postgresEv ? `PostgreSQL (${postgresEv})` : mysqlEv ? `MySQL/MariaDB (${mysqlEv})` : "Relational database";
-    const hasOrm = hasAny(combined, [
-      "prisma", "typeorm", "sequelize", "sqlalchemy", "knex", "hibernate",
-      "django.db", "diesel", "gorm", "sqlx", "entityframework", "efcore",
-      "activerecord", "active_record", "eloquent", "spring-data", "rails"
-    ]);
-    if (hasDbConnectionString || hasOrm) {
-      const corroboration = hasDbConnectionString
-        ? "corroborated by database connection configuration"
-        : "corroborated by relational ORM configuration";
-      add("RDS", "medium", `${weakLabel} dependency detected — ${corroboration} → RDS`);
-    } else if (!hasDocker) {
-      add("RDS", "low", `${weakLabel} reference detected without connection configuration — suggested RDS`);
-    }
+  } else if (dbEngine !== "none" && dbCorroborated) {
+    const label = dbEngine === "postgres" ? "RDS (PostgreSQL)" : "RDS (MySQL)";
+    add("RDS", "medium", `${label} dependency detected — corroborated by connection/ORM/migration evidence → RDS`);
+  } else if (dbEngine !== "none" && hasDocker && !hasDbConnectionString && k8sWeight(fileNames) === 0) {
+    const label = dbEngine === "postgres" ? "RDS (PostgreSQL)" : "RDS (MySQL)";
+    add("RDS", "low", `${label} driver seen without corroboration — suggested RDS`);
   }
+
+  // SQL Server preserves the pre-existing RDS mapping when corroborated
+  // (family ORM / connection config). The engine label stays unset.
+  if (dbEngine === "none" && /sqlserver|mssql/i.test(combined) && dbCorroborated) {
+    add("RDS", "medium", "Relational database (SQL Server) detected — corroborated by ORM/configuration → RDS");
+  }
+  // NOTE: SQLite never maps to RDS (no path allows it). MongoDB →
+  // DocumentDB stays as-is in the discoveredComponents switch below.
 
   // ElastiCache / Redis
   const elastiCacheSdkEv = awsEvidence(profile, "elasticache");
@@ -275,7 +744,7 @@ function detectServices(
     add("ALB", "low", "Containerised app pattern — ALB typically fronts ECS services");
   }
 
-  if (hasAny(combined, ["route 53", "route53", "hosted zone", "aws_route53_zone", "aws::route53::hostedzone"]) || hasWord(combined, ["dns"])) {
+  if (/route\s?53|hosted zone|aws_route53/i.test(combined)) {
     add("Route53", "medium", "Route53/DNS reference in repository files");
   }
 
@@ -360,7 +829,7 @@ function detectServices(
   // --- Analytics & ETL ---
   const athenaEv = awsEvidence(profile, "athena");
   if (athenaEv) add("Athena", "high", `AWS Athena client imported — ${athenaEv}`);
-  else if (hasAny(combined, ["athena", "aws-athena", "aws::athena", "aws_athena"])) {
+  else if (/aws_athena|aws::athena|@aws-sdk\/client-athena/i.test(combined) || /boto3\.client\(\s*["']athena["']/i.test(combined)) {
     add("Athena", "high", "Amazon Athena serverless analytics query engine reference detected");
   }
 
@@ -381,6 +850,8 @@ function detectServices(
   if (sfnEv) add("StepFunctions", "high", `AWS Step Functions client imported — ${sfnEv}`);
   else if (hasAny(combined, ["step functions", "stepfunctions", "aws-stepfunctions", "aws::stepfunctions", "states:::"])) {
     add("StepFunctions", "high", "AWS Step Functions state machine workflow reference detected");
+  } else if (/parallelresult|startexecution|sendtasksuccess|statemachine/i.test(combined)) {
+    add("StepFunctions", "medium", "Step Functions execution pattern in code (Parallel result / state machine API)");
   }
 
   // --- Security & Encryption ---
@@ -529,12 +1000,155 @@ function detectServices(
     }
   }
 
+  // --- Terraform resource promotion ---
+  // `.tf` resource blocks are ground truth: promote each declared service at
+  // high confidence, and gate weak keyword-based ECS/EKS guesses off when real
+  // resources were found.
+  const tfDeclared = new Set<ServiceId>();
+  if (profile?.infrastructure) {
+    for (const infra of profile.infrastructure) {
+      const m = infra.name.match(/^Terraform resource \(([A-Za-z0-9]+)\)$/);
+      if (!m) continue;
+      const svc = m[1] as ServiceId;
+      if (!(SERVICE_IDS as readonly string[]).includes(svc)) continue;
+      tfDeclared.add(svc);
+      const existing = detected.find((d) => d.serviceId === svc);
+      if (!existing) {
+        detected.push({
+          serviceId: svc,
+          confidence: "high",
+          evidence: infra.evidence.slice(0, 200),
+          category: "repository-evidence",
+        });
+      } else if (!/\.tf\b/i.test(existing.evidence)) {
+        // Prefer ground-truth .tf evidence over an earlier keyword guess.
+        existing.evidence = infra.evidence.slice(0, 200);
+        existing.confidence = "high";
+        existing.category = "repository-evidence";
+      }
+    }
+  }
+  if (tfDeclared.size > 0) {
+    for (let i = detected.length - 1; i >= 0; i--) {
+      const d = detected[i];
+      if (
+        d.serviceId === "ECS" &&
+        /Dockerfile\/container config present → ECS as standard container host/i.test(d.evidence)
+      ) {
+        detected.splice(i, 1);
+      } else if (
+        d.serviceId === "EKS" &&
+        d.evidence === "EKS/Kubernetes reference in repository files" &&
+        !tfDeclared.has("EKS")
+      ) {
+        detected.splice(i, 1);
+      }
+    }
+    // IaC-only repos: suppress application-tier services not declared as
+    // .tf resources (their evidence never references a .tf file). Ingress
+    // (ALB/APIGateway) from bare "elb"/"api" words in tags is noise here too.
+    if (profile?.isIacOnly) {
+      const appTier: ServiceId[] = ["RDS", "S3", "ElastiCache", "Lambda", "ECS", "ALB", "APIGateway"];
+      for (let i = detected.length - 1; i >= 0; i--) {
+        const d = detected[i];
+        if (appTier.includes(d.serviceId) && !/\.tf\b/i.test(d.evidence)) {
+          detected.splice(i, 1);
+        }
+      }
+    }
+  }
+
+  // --- IaC-primary repos: SDK-grep matches need resource-block corroboration ---
+  // When template.yaml/sam.yaml/serverless.yml/cdk.json/*.tf exist, their
+  // Resources/functions blocks rule. Raw SDK-grep matches without an IaC
+  // resource token for that service are dropped from the primary plan.
+  if (hasPrimaryIacTemplates(fileNames)) {
+    for (let i = detected.length - 1; i >= 0; i--) {
+      const d = detected[i];
+      const sdkOnly = /SDK (client imported|usage)/i.test(d.evidence);
+      if (sdkOnly && !iacCorroborated(d.serviceId, code)) {
+        detected.splice(i, 1);
+      }
+    }
+  }
+
+  // --- Default web/backend archetype for source-only repos ---
+  // A backend framework with no compute detected implies a containerised web
+  // service on AWS. Runs before exclusivity resolves so ECS enters the
+  // candidate set normally.
+  if (
+    profileHasBackendFramework(profile) &&
+    !detected.some((s) =>
+      (COMPUTE_HIERARCHY as string[]).includes(s.serviceId)
+    )
+  ) {
+    add("ECS", "medium", "Backend web framework with no container config → ECS as default host", "inference");
+    if (!detected.some((s) => s.serviceId === "ALB")) {
+      add("ALB", "medium", "Backend web framework ingress → ALB", "recommendation");
+    }
+  }
+
+  // --- Static-hosting archetype for frontend-only repos ---
+  // A frontend-only framework with no backend framework, no database, and no
+  // compute implies static hosting. A frontend/client subdirectory package.json
+  // is sufficient corroboration even when a sibling backend exists elsewhere.
+  if (
+    profileHasFrontendOnlyFramework(profile) &&
+    !profileHasBackendFramework(profile) &&
+    !profileHasAnyDatabase(profile) &&
+    !detected.some((s) => (COMPUTE_HIERARCHY as string[]).includes(s.serviceId))
+  ) {
+    if (!detected.some((s) => s.serviceId === "S3")) {
+      add("S3", "medium", "Frontend-only framework with no backend → S3 static hosting", "inference");
+    }
+    if (!detected.some((s) => s.serviceId === "CloudFront")) {
+      add("CloudFront", "medium", "Frontend-only framework with no backend → CloudFront CDN", "recommendation");
+    }
+  }
+
+  // Blockchain dapps deploy as static frontends: chain tooling means no
+  // managed backends. (No ManagedBlockchain service exists in the catalog.)
+  if (/solidity|hardhat|foundry|ethers\.js|web3\.js|truffle/i.test(combined)) {
+    const banned: ServiceId[] = [
+      "ECS", "EKS", "Fargate", "Lambda", "EC2", "ALB", "APIGateway",
+      "RDS", "Aurora", "DynamoDB", "DocumentDB", "ElastiCache", "Neptune",
+      "CloudWatch",
+    ];
+    for (let i = detected.length - 1; i >= 0; i--) {
+      if (
+        banned.includes(detected[i].serviceId) ||
+        (detected[i].serviceId as string) === "ManagedBlockchain"
+      ) {
+        detected.splice(i, 1);
+      }
+    }
+    if (!detected.some((s) => s.serviceId === "S3")) {
+      add("S3", "medium", "Blockchain dapp frontend → S3 static hosting", "inference");
+    }
+    if (!detected.some((s) => s.serviceId === "CloudFront")) {
+      add("CloudFront", "medium", "Blockchain dapp frontend → CloudFront CDN", "recommendation");
+    }
+  }
+
   // --- Observability (gated behind active compute) ---
+  // IaC-only repos earn CloudWatch only from an actual log-group declaration.
   const COMPUTE_SERVICES: ServiceId[] = ["Lambda", "ECS", "EC2", "Fargate", "EKS", "Batch", "Lightsail", "SageMaker"];
   const hasActiveCompute = detected.some((s) => COMPUTE_SERVICES.includes(s.serviceId));
-  if (hasActiveCompute && !detected.some((s) => s.serviceId === "CloudWatch")) {
+  const iacCloudWatchOk =
+    !profile?.isIacOnly ||
+    /aws_cloudwatch_log_group|enabled_cluster_log_types/i.test(combined) ||
+    tfDeclared.has("CloudWatch");
+  if (hasActiveCompute && iacCloudWatchOk && !detected.some((s) => s.serviceId === "CloudWatch")) {
     add("CloudWatch", "medium", "CloudWatch monitoring for active compute services", "recommendation");
   }
+
+  // --- Compute exclusivity (exactly one compute service wins) ---
+  // IaC-declared services (Fix 7 promotion) are protected: co-declared pairs
+  // such as EKS + EC2 node groups survive together.
+  resolveComputeExclusivity(detected, fileNames, tfDeclared);
+
+  // --- Negative "Do Not Infer" rules (run last, immediately before return) ---
+  applyNegativeRules(detected, { combined: code, fileNames, profile });
 
   return detected;
 }
@@ -651,6 +1265,40 @@ export function buildServicePlan(
   }));
   const awsMappings = deduplicateAwsMappings(rawAwsMappings);
 
+  const dbEngine = detectRdsEngine(
+    [input.description, input.fileContent].join("\n"),
+    input.profile
+  );
+
+  // --- Terminal state: distinguish "correctly minimal" from "parse failure" ---
+  const noCompute = !planServices.some((s) =>
+    (COMPUTE_HIERARCHY as string[]).includes(s.serviceId)
+  );
+  const hasAppFramework =
+    profileHasBackendFramework(input.profile) ||
+    profileHasFrontendOnlyFramework(input.profile);
+  let terminalState: "OK" | "INSUFFICIENT_SIGNAL" | "LIBRARY_REPO" | "IAC_ONLY" | "MONOREPO_OK" = "OK";
+  if (input.profile?.isIacOnly) {
+    terminalState = "IAC_ONLY";
+  } else if (input.profile?.isLibraryOrFramework) {
+    terminalState = "LIBRARY_REPO";
+  } else if (planServices.length === 0 || (noCompute && !hasAppFramework)) {
+    const infraCount = input.profile?.infrastructure.length ?? 0;
+    const fwCount = input.profile?.frameworks.length ?? 0;
+    terminalState = infraCount > 0 && fwCount === 0 ? "IAC_ONLY" : "LIBRARY_REPO";
+  } else {
+    const backendCount = components.filter((c) =>
+      ["backend", "api"].includes(c.type)
+    ).length;
+    const topDirs = new Set(
+      input.fileNames.filter((f) => f.includes("/")).map((f) => f.split("/")[0])
+    );
+    const hasWorkspaceRoot = input.fileNames.some((f) => isWorkspaceRootPath(f));
+    if (backendCount >= 2 && topDirs.size >= 2 && hasWorkspaceRoot) {
+      terminalState = "MONOREPO_OK";
+    }
+  }
+
   const plan = {
     inputKind: input.inputKind,
     components,
@@ -658,10 +1306,12 @@ export function buildServicePlan(
     deploymentModel,
     awsMappings,
     detectedPattern: classifyPattern(services),
+    terminalState,
     metadata: {
       grounding: input.grounding,
       truncated: input.truncated,
       parseErrors: input.parseErrors,
+      dbEngine,
     },
     warnings: [],
   };
@@ -676,6 +1326,7 @@ export function buildServicePlan(
       deploymentModel: [],
       awsMappings: [{ componentId: "fallback", serviceId: "S3", confidence: "low", evidence: "fallback", fromPattern: false }],
       detectedPattern: "generic",
+      terminalState: "LIBRARY_REPO",
       metadata: { grounding: input.grounding, truncated: input.truncated, parseErrors: [...input.parseErrors, "rule-engine-validation-failed"] },
       warnings: ["Rule engine output failed validation — showing minimal S3 placeholder, not an inference."],
     };

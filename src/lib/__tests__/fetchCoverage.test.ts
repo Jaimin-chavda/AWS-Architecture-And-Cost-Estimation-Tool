@@ -21,13 +21,14 @@ import {
 describe("Fix 4 — fetchCoverage: repoFetcher covers repoAnalyzer patterns", () => {
   // Representative sample filenames for each pattern
   const samplePaths: Record<string, string[]> = {
+    "Deno runtime config": ["deno.json", "deno.jsonc"],
     "Docker (Dockerfile)": ["Dockerfile", "docker/Dockerfile", "build/Dockerfile"],
     "Docker Compose": ["docker-compose.yml", "docker-compose.yaml", "docker-compose.dev.yml"],
     "Serverless Framework": ["serverless.yml", "serverless.yaml", "services/serverless.yml"],
     "AWS SAM (template.yaml)": ["template.yaml", "sam.yaml"],
     "Terraform": ["main.tf", "terraform/main.tf", "infra/vpc.tf"],
     "GitHub Actions CI/CD": [".github/workflows/ci.yml", ".github/workflows/deploy.yaml"],
-    "Kubernetes manifests": ["k8s/deployment.yaml", "kubernetes/service.yml", "helm/values.yaml"],
+    "Kubernetes manifests": ["k8s/deployment.yaml", "kubernetes/service.yml", "helm/values.yaml", "helm-chart/Chart.yaml", "kubernetes-manifests/adservice.yaml"],
     "Vercel deployment config": ["vercel.json"],
     "Netlify deployment config": ["netlify.toml"],
     "AWS Amplify config": ["amplify.yml", "amplify.yaml", "amplify/backend.ts"],
@@ -43,25 +44,41 @@ describe("Fix 4 — fetchCoverage: repoFetcher covers repoAnalyzer patterns", ()
   };
 
   it("covers all INFRA_FILE_SIGNALS pattern branches", () => {
+    // Multiple signals may share a label (e.g. Kubernetes manifests by
+    // directory and by Chart.yaml). Each sample must match at least one
+    // same-label signal, and each signal at least one sample.
+    const byLabel = new Map<string, typeof INFRA_FILE_SIGNALS>();
     for (const signal of INFRA_FILE_SIGNALS) {
-      const paths = samplePaths[signal.label];
+      const list = byLabel.get(signal.label) ?? [];
+      list.push(signal);
+      byLabel.set(signal.label, list);
+    }
+    for (const [label, signals] of byLabel) {
+      const paths = samplePaths[label];
       assert.ok(
         paths && paths.length > 0,
-        `Missing sample path definition for infra signal: "${signal.label}"`
+        `Missing sample path definition for infra signal: "${label}"`
       );
 
       for (const samplePath of paths) {
-        // Assert repoAnalyzer recognizes it
+        // Assert repoAnalyzer recognizes it via some same-label signal
         assert.ok(
-          signal.pattern.test(samplePath),
-          `repoAnalyzer pattern for "${signal.label}" does not match sample path "${samplePath}"`
+          signals.some((s) => s.pattern.test(samplePath)),
+          `repoAnalyzer patterns for "${label}" do not match sample path "${samplePath}"`
         );
 
         // Assert repoFetcher classifies / fetches it
         const classified = classifyFile(samplePath);
         assert.ok(
           classified !== null,
-          `repoFetcher allowlist gap: does not fetch "${samplePath}" recognized by "${signal.label}"`
+          `repoFetcher allowlist gap: does not fetch "${samplePath}" recognized by "${label}"`
+        );
+      }
+
+      for (const signal of signals) {
+        assert.ok(
+          paths.some((p) => signal.pattern.test(p)),
+          `repoAnalyzer infra pattern ${signal.pattern} ("${label}") matches no sample path`
         );
       }
     }
@@ -92,6 +109,9 @@ describe("Fix 4 — fetchCoverage: repoFetcher covers repoAnalyzer patterns", ()
 
   it("covers all LANG_FROM_MANIFEST pattern branches including monorepo manifests", () => {
     const manifestSamples = [
+      "deno.json",
+      "deno.jsonc",
+      "mix.exs",
       "package.json",
       "requirements.txt",
       "pyproject.toml",

@@ -154,8 +154,9 @@ export const FALLBACK_PRICES: Record<string, number> = {
   DocumentDB: 0.033,    // db.t3.medium $/hr
   CloudFront: 0.0085,   // $/GB egress (US)
   APIGateway: 3.50,     // $/million REST calls
-  ALB: 0.008,           // $/LCU-hr
+  ALB: 0.0225,         // base $/ALB-hr (was LCU-only rate)
   Route53: 0.50,        // $/hosted zone/mo (already monthly)
+  CloudWatchLogs: 0.50, // $/GB ingested
   VPC: 0.01,            // $/endpoint-hr
   NATGateway: 0.045,    // $/hr
   SQS: 0.40,            // $/million requests (Standard)
@@ -476,6 +477,25 @@ export interface PriceLookupResult {
  *
  * Results are cached in-memory for 24 hours keyed by mode, region, and serviceId.
  */
+/**
+ * Per-service upper bounds for live unit prices. A live value above the cap
+ * is a mismatched product, not a real price — fall through to fallback.
+ */
+export const LIVE_PRICE_CAPS: Record<string, number> = {
+  S3: 1.0,
+  Cognito: 0.05,
+  ALB: 0.1,
+  RDS: 1.0,
+  ECS: 1.0,
+  Fargate: 1.0,
+  EC2: 1.0,
+  Lambda: 0.001,
+  CloudWatch: 5.0,
+  CloudWatchLogs: 5.0,
+  ECR: 1.0,
+  DynamoDB: 0.01,
+};
+
 export async function getUnitPrice(
   serviceId: string,
   serviceCode: string | null,
@@ -500,8 +520,15 @@ export async function getUnitPrice(
         : await fetchBulkPrice(serviceCode, usageTypePrefix, region);
 
     if (livePrice !== null && livePrice > 0) {
-      cacheSet(key, livePrice, "live");
-      return { price: livePrice, source: "live" };
+      const cap = LIVE_PRICE_CAPS[serviceId];
+      if (cap !== undefined && livePrice > cap) {
+        console.warn(
+          `[prices] live price $${livePrice} for ${serviceId} exceeds sanity cap $${cap} — using fallback`
+        );
+      } else {
+        cacheSet(key, livePrice, "live");
+        return { price: livePrice, source: "live" };
+      }
     }
   }
 

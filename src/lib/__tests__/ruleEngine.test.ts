@@ -275,19 +275,20 @@ describe("runRuleEngine — pattern classification (detectedPattern for UI label
 });
 
 describe("Fix 5 — Two-tier signals & CloudWatch gating", () => {
-  it("(a) Docker-only repo → RDS/ElastiCache do NOT appear in services, only suggested (low confidence)", () => {
+  it("(a) Docker-only repo → RDS only as low-confidence suggestion, ElastiCache absent", () => {
     const plan = runRuleEngine(makeInput({
       fileNames: ["Dockerfile"],
       fileContent: "FROM node:22\nCOPY . .\nCMD ['node', 'index.js']\n// mentioning postgres and redis in comments only",
     }));
     const ids = serviceIds(plan);
-    assert.ok(!ids.includes("RDS"), "RDS must not appear in services[] for Docker-only repo without DB connection/infra");
+    // Uncorroborated driver + Dockerfile → low-confidence RDS suggestion (Fix 3c.4).
+    const rdsMapping = plan.awsMappings.find(m => m.serviceId === "RDS");
+    assert.ok(rdsMapping, "RDS low-confidence suggestion expected for uncorroborated driver + Dockerfile");
+    assert.strictEqual(rdsMapping.confidence, "low", "Uncorroborated RDS must stay low confidence");
     assert.ok(!ids.includes("ElastiCache"), "ElastiCache must not appear in services[] for Docker-only repo");
 
     // Check low confidence mappings exist
-    const rdsMapping = plan.awsMappings.find(m => m.serviceId === "RDS");
     const ecMapping = plan.awsMappings.find(m => m.serviceId === "ElastiCache");
-    if (rdsMapping) assert.strictEqual(rdsMapping.confidence, "low", "RDS should be low confidence");
     if (ecMapping) assert.strictEqual(ecMapping.confidence, "low", "ElastiCache should be low confidence");
   });
 
@@ -345,12 +346,85 @@ describe("runRuleEngine — service detection", () => {
     assert.ok(serviceIds(plan).includes("EKS"), "Expected EKS from k8s signal");
   });
 
-  it("detects Aurora (not RDS) when aurora keyword present", () => {
+  it("detects Aurora (not RDS) when aurora engine declared", () => {
     const plan = runRuleEngine(makeInput({
-      fileContent: "aurora mysql cluster endpoint",
+      fileContent: 'resource "aws_rds_cluster" "x" {\n  engine = "aurora-mysql"\n}',
     }));
     assert.ok(serviceIds(plan).includes("Aurora"), "Expected Aurora");
     assert.ok(!serviceIds(plan).includes("RDS"), "Should not have both Aurora and RDS");
+  });
+
+  it("does not infer Aurora from bare prose mention", () => {
+    const plan = runRuleEngine(makeInput({
+      fileContent: "aurora mysql cluster endpoint",
+    }));
+    assert.ok(!serviceIds(plan).includes("Aurora"), "Bare word must not trigger Aurora");
+  });
+});
+
+describe("Fix 10 — terminal states", () => {
+  it("empty input resolves to LIBRARY_REPO", () => {
+    const plan = runRuleEngine(makeInput());
+    assert.strictEqual(plan.terminalState, "LIBRARY_REPO");
+  });
+
+  it("IaC-only profile resolves to IAC_ONLY", () => {
+    const plan = runRuleEngine(makeInput({
+      inputKind: "github_url",
+      grounding: "repoFiles",
+      fileNames: ["main.tf"],
+      fileContent: '### main.tf\nresource "aws_eks_cluster" "x" {}',
+      profile: {
+        languages: [], frameworks: [], databases: [], infrastructure: [
+          { name: "Terraform resource (EKS)", evidence: "main.tf", confidence: "high" },
+        ],
+        entryPoints: [], awsUsage: [], deploymentHints: [],
+        isIacOnly: true,
+        discoveredComponents: [],
+        summary: "",
+      },
+    }));
+    assert.strictEqual(plan.terminalState, "IAC_ONLY");
+    assert.ok(serviceIds(plan).includes("EKS"));
+  });
+
+  it("backend framework repo resolves to OK", () => {
+    const plan = runRuleEngine(makeInput({
+      fileNames: ["go.mod"],
+      fileContent: "module x\nrequire github.com/gin-gonic/gin v1.9.1",
+      profile: {
+        languages: [{ name: "Go", evidence: "go.mod", confidence: "high" }],
+        frameworks: [{ name: "Gin", evidence: "go.mod", confidence: "high" }],
+        databases: [], infrastructure: [],
+        entryPoints: [], awsUsage: [], deploymentHints: [],
+        discoveredComponents: [],
+        summary: "",
+      },
+    }));
+    assert.strictEqual(plan.terminalState, "OK");
+    assert.ok(serviceIds(plan).includes("ECS"));
+  });
+
+  it("multi-directory multi-backend repo resolves to MONOREPO_OK", () => {
+    const plan = runRuleEngine(makeInput({
+      inputKind: "github_url",
+      grounding: "repoFiles",
+      fileNames: ["pnpm-workspace.yaml", "svc-a/Dockerfile", "svc-b/Dockerfile"],
+      fileContent: "FROM node:22",
+      profile: {
+        languages: [{ name: "Node.js/TypeScript", evidence: "package.json", confidence: "high" }],
+        frameworks: [{ name: "Express.js", evidence: "package.json", confidence: "high" }],
+        databases: [],
+        infrastructure: [{ name: "Docker (Dockerfile)", evidence: "svc-a/Dockerfile", confidence: "high" }],
+        entryPoints: [], awsUsage: [], deploymentHints: [],
+        discoveredComponents: [
+          { id: "dc-a", name: "a", type: "backend", technology: "custom", evidence: ["svc-a/Dockerfile"], confidence: "high", source: "docker-compose" },
+          { id: "dc-b", name: "b", type: "backend", technology: "custom", evidence: ["svc-b/Dockerfile"], confidence: "high", source: "docker-compose" },
+        ],
+        summary: "",
+      },
+    }));
+    assert.strictEqual(plan.terminalState, "MONOREPO_OK");
   });
 });
 

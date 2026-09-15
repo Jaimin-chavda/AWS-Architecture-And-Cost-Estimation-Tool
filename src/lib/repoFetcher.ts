@@ -72,6 +72,7 @@ const MANIFEST_PATTERNS = [
   /^pyproject\.toml$/,
   /^Pipfile$/,
   /^go\.mod$/,
+  /^go\.work$/,
   /^cargo\.toml$/i,
   /^gemfile$/i,
   /^composer\.json$/,
@@ -81,11 +82,29 @@ const MANIFEST_PATTERNS = [
   /^[\w.-]+\.fsproj$/,
   /^mix\.exs$/,
   /^Package\.swift$/,
+  /^schema\.prisma$/,
+  /^deno\.jsonc?$/,
+  /^turbo\.jsonc?$/,
+  /^nx\.json$/,
+  /^lerna\.json$/,
+  /^rush\.json$/,
+  /^pnpm-workspace\.ya?ml$/,
 ];
 
 // Monorepo nested manifests pattern for backwards compatibility
 const NESTED_MANIFEST_PATTERNS = [
-  /^(?:packages|apps|modules|services|libs)\/[^/]+\/(?:package\.json|pom\.xml|build\.gradle(\.kts)?|Cargo\.toml|pyproject\.toml|requirements\.txt|go\.mod)$/i,
+  /^(?:packages|apps|modules|services|libs|internal|cmd)\/[^/]+\/(?:package\.json|pom\.xml|build\.gradle(\.kts)?|Cargo\.toml|pyproject\.toml|requirements\.txt|go\.mod|mix\.exs|deno\.jsonc?)$/i,
+];
+
+// Workspace-root indicators: always fetched so monorepo layout is visible.
+const WORKSPACE_ROOT_PATTERNS = [
+  /^pnpm-workspace\.ya?ml$/,
+  /^turbo\.jsonc?$/,
+  /^nx\.json$/,
+  /^lerna\.json$/,
+  /^rush\.json$/,
+  /^go\.work$/,
+  /^cargo\.toml$/i,
 ];
 
 const CONTAINER_CI_PATTERNS = [
@@ -109,9 +128,10 @@ const CONTAINER_CI_PATTERNS = [
   /^template\.ya?ml$/i,
   /^sam\.ya?ml$/i,
   /^.*\.template\.ya?ml$/i,
-  /(?:^|\/)(?:k8s|kubernetes|helm|deploy)\/.*\.(ya?ml|json)$/i,
+  /(?:^|\/)(?:k8s|kubernetes(?:-manifests)?|helm(?:-chart)?|deploy|manifests)\/.*\.(ya?ml|json)$/i,
   /(?:^|\/)(?:ingress|deployment|service|k8s|kubernetes|statefulset|daemonset|configmap)\.ya?ml$/i,
   /(?:^|\/)Chart\.ya?ml$/i,
+  /(?:^|\/)values\.ya?ml$/i,
 ];
 
 const SOURCE_HIGH_PRIORITY_PATTERNS = [
@@ -153,6 +173,13 @@ export function classifyFile(
   for (const re of README_PATTERNS) {
     if (re.test(name) && depth === 0) {
       return { kind: "readme", priority: 0, score: 100 };
+    }
+  }
+
+  // Workspace-root files always win a fetch slot so monorepo layout is visible.
+  for (const re of WORKSPACE_ROOT_PATTERNS) {
+    if (re.test(name) && depth === 0) {
+      return { kind: "manifest", priority: 1, score: 92 };
     }
   }
 
@@ -425,6 +452,118 @@ export function extractSdkEvidence(keyFiles: KeyFile[]): SdkEvidence[] {
   return evidence;
 }
 
+export interface FileCandidate {
+  path: string;
+  kind: KeyFileKind;
+  priority: number;
+  score: number;
+}
+
+function isWorkspaceRootFile(path: string): boolean {
+  if (path.includes("/")) return false;
+  const name = path;
+  return WORKSPACE_ROOT_PATTERNS.some((re) => re.test(name));
+}
+
+/** True for workspace-root indicator paths (any depth check is root-only). */
+export function isWorkspaceRootPath(path: string): boolean {
+  return isWorkspaceRootFile(path);
+}
+
+/**
+ * Workspace-aware file selection: priority files first (README,
+ * workspace-root, root manifests, all container/CI/IaC), then breadth-first
+ * round-robin across top-level directories so polyglot monorepos surface
+ * every service directory.
+ */
+export function selectWorkspaceAware(
+  candidates: FileCandidate[],
+  cap: number = 60
+): FileCandidate[] {
+  const sorted = [...candidates].sort((a, b) =>
+    a.score !== b.score ? b.score - a.score : a.path.length - b.path.length
+  );
+
+  const selected: FileCandidate[] = [];
+  const taken = new Set<string>();
+  const take = (c: FileCandidate) => {
+    if (taken.has(c.path) || selected.length >= cap) return;
+    taken.add(c.path);
+    selected.push(c);
+  };
+
+  // Pass 1: README + workspace-root + root manifests + all container/CI/IaC.
+  for (const c of sorted) {
+    const depth = c.path.split("/").length - 1;
+    if (
+      c.kind === "readme" ||
+      isWorkspaceRootFile(c.path) ||
+      (c.kind === "manifest" && depth === 0) ||
+      c.kind === "container_ci"
+    ) {
+      take(c);
+    }
+  }
+
+  // Pass 2: round-robin one manifest per top-level directory per round.
+  const byDir = new Map<string, FileCandidate[]>();
+  for (const c of sorted) {
+    if (taken.has(c.path)) continue;
+    if (c.kind !== "manifest") continue;
+    const top = c.path.includes("/") ? c.path.split("/")[0] : "(root)";
+    const list = byDir.get(top) ?? [];
+    list.push(c);
+    byDir.set(top, list);
+  }
+  let progress = true;
+  while (progress && selected.length < cap) {
+    progress = false;
+    for (const list of byDir.values()) {
+      const next = list.shift();
+      if (next) {
+        take(next);
+        progress = true;
+      }
+      if (selected.length >= cap) break;
+    }
+  }
+
+  // Pass 3: remaining candidates by score until budget is exhausted.
+  for (const c of sorted) {
+    if (selected.length >= cap) break;
+    take(c);
+  }
+
+  return selected;
+}
+
+/**
+ * Minimal pnpm-workspace.yaml parser: extracts package glob directories so
+ * workspace member manifests become accepted fetch targets dynamically.
+ */
+export function parsePnpmWorkspace(content: string): string[] {
+  const dirs: string[] = [];
+  const lines = content.split(/\r?\n/);
+  let inPackages = false;
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (/^packages\s*:/.test(line)) {
+      inPackages = true;
+      continue;
+    }
+    if (inPackages) {
+      const item = line.match(/^-\s+['"]?([^'"\s]+)['"]?/);
+      if (item) {
+        dirs.push(item[1].replace(/\/\*+$/, "").replace(/^\.\//, ""));
+      } else if (/^\w[\w-]*\s*:/.test(line)) {
+        inPackages = false;
+      }
+    }
+  }
+  return dirs;
+}
+
 // ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
@@ -489,8 +628,7 @@ export async function fetchRepoSignals(
   }
 
   // 3. Classify and relevance-sort files (Fix 3)
-  type Candidate = { path: string; kind: KeyFileKind; priority: number; score: number };
-  const candidates: Candidate[] = [];
+  const candidates: FileCandidate[] = [];
   for (const path of treePaths) {
     const c = classifyFile(path);
     if (c) candidates.push({ path, ...c });
@@ -501,9 +639,12 @@ export async function fetchRepoSignals(
     const PROBE_LIST = [
       "README.md", "Readme.md", "readme.md", "README.rst",
       "package.json", "requirements.txt", "pyproject.toml",
-      "go.mod", "Cargo.toml", "Dockerfile", "docker-compose.yml",
+      "go.mod", "go.work", "Cargo.toml", "Dockerfile", "docker-compose.yml",
       "docker-compose.yaml", "serverless.yml", "pom.xml",
-      "build.gradle", "Gemfile", "composer.json",
+      "build.gradle", "Gemfile", "composer.json", "mix.exs",
+      "deno.json", "deno.jsonc", "schema.prisma",
+      "main.tf", "variables.tf", "outputs.tf", "versions.tf",
+      "turbo.json", "nx.json", "pnpm-workspace.yaml",
       "index.js", "index.ts", "app.js", "app.ts", "server.js", "server.ts", "main.py"
     ];
     for (const f of PROBE_LIST) {
@@ -512,14 +653,14 @@ export async function fetchRepoSignals(
     }
   }
 
-  // Sort by relevance score desc, with shorter path length as tiebreaker
-  candidates.sort((a, b) =>
-    a.score !== b.score
-      ? b.score - a.score
-      : a.path.length - b.path.length
-  );
-
-  const selected = candidates.slice(0, 35);
+  // Workspace-aware selection (breadth-first across top-level directories).
+  // Priority files always win a slot: README, workspace-root files, root
+  // manifests, and all container/CI/IaC files. Remaining budget is dealt
+  // round-robin, one manifest per top-level directory per round, so every
+  // service directory contributes at least one manifest instead of losing to
+  // shallow noise under a depth penalty.
+  const MAX_SELECTED_FILES = 60;
+  const selected = selectWorkspaceAware(candidates, MAX_SELECTED_FILES);
 
   // 4. Fetch each selected file without payload limits
   const keyFiles: KeyFile[] = [];
@@ -529,17 +670,12 @@ export async function fetchRepoSignals(
     for (const candidate of selected) {
       let raw: string | null = null;
       let sizeBytes = 0;
-      const fileTruncated = false;
 
       try {
-        const rawRes = await ghFetch(
-          `${GITHUB_API}/repos/${owner}/${repo}/contents/${candidate.path}`,
-          githubToken
-        );
-        // Request raw content
+        // raw.githubusercontent first (not rate-limited); fall back to the
+        // /contents API (base64) only on a raw miss.
         const rawController = new AbortController();
         const rawTimer = setTimeout(() => rawController.abort(), FETCH_TIMEOUT_MS);
-        let rawContent: string;
         try {
           let rawFetch = await fetch(
             `https://raw.githubusercontent.com/${owner}/${repo}/${defaultBranch}/${candidate.path}`,
@@ -567,19 +703,26 @@ export async function fetchRepoSignals(
           }
           clearTimeout(rawTimer);
           if (!rawFetch.ok) throw new Error(`HTTP ${rawFetch.status}`);
-          rawContent = await rawFetch.text();
+          const rawContent = await rawFetch.text();
           sizeBytes = Buffer.byteLength(rawContent, "utf8");
           raw = rawContent;
         } catch {
           clearTimeout(rawTimer);
-          // Try the JSON contents API as fallback (returns base64)
-          if (rawRes.ok) {
-            const data = (await rawRes.json()) as { content?: string; size?: number };
-            sizeBytes = data.size ?? 0;
-            if (data.content) {
-              const decoded = Buffer.from(data.content.replace(/\n/g, ""), "base64").toString("utf8");
-              raw = decoded;
+          // Fallback: JSON contents API (returns base64, counts against rate limit)
+          try {
+            const rawRes = await ghFetch(
+              `${GITHUB_API}/repos/${owner}/${repo}/contents/${candidate.path}`,
+              githubToken
+            );
+            if (rawRes.ok) {
+              const data = (await rawRes.json()) as { content?: string; size?: number };
+              sizeBytes = data.size ?? 0;
+              if (data.content) {
+                raw = Buffer.from(data.content.replace(/\n/g, ""), "base64").toString("utf8");
+              }
             }
+          } catch {
+            // fall through to the null-content handling below
           }
         }
       } catch {
@@ -665,10 +808,16 @@ export function signalsToRuleInput(
   inputKind: "github_url" | "description",
   grounding: Grounding
 ): import("./ruleEngine.ts").RuleInput {
+  // README prose is excluded from the rule-engine keyword scanner (path-level
+  // signals in fileNames stay). README intent still reaches the LLM path via
+  // the profile summary / buildArchitecturePrompt.
   const fileContent = signals.keyFiles
+    .filter((f) => f.kind !== "readme")
     .map((f) => (f.content ? `### ${f.path}\n${f.content}` : `### ${f.path} (parse error)`))
     .join("\n\n");
-  const fileNames = signals.keyFiles.map((f) => f.path.split("/").pop() ?? f.path);
+  // Full paths, not basenames — directory-based logic (monorepo grouping,
+  // frontend-dir detection, k8s-folder detection) needs them.
+  const fileNames = signals.keyFiles.map((f) => f.path);
 
   return {
     description: "",

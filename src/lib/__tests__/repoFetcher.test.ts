@@ -92,14 +92,14 @@ describe("signalsToRuleInput", () => {
     assert.ok(input.fileContent.includes("FROM node:22"));
   });
 
-  it("extracts file basenames into fileNames", () => {
+  it("passes full file paths into fileNames", () => {
     const signals = makeSignals({
       keyFiles: [
         { path: ".github/workflows/ci.yml", kind: "container_ci", content: "name: CI", sizeBytes: 8, truncated: false },
       ],
     });
     const input = signalsToRuleInput(signals, "github_url", "repo");
-    assert.ok(input.fileNames.includes("ci.yml"));
+    assert.ok(input.fileNames.includes(".github/workflows/ci.yml"));
   });
 
   it("handles null content files as filename-only signal placeholder", () => {

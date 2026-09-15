@@ -594,6 +594,26 @@ function detachProposal(plan: ServicePlan): ServicePlan {
  * Always returns a schema-valid ServicePlan — never throws, and never returns
  * an unvalidated plan.
  */
+/**
+ * Records an informational diagnostic when the plan carries a non-OK terminal
+ * state, so downstream code can tell "correctly minimal" from "parse failure".
+ */
+function pushTerminalStateDiagnostic(
+  plan: ServicePlan,
+  diagnostics: Diagnostic[]
+): void {
+  const state = plan.terminalState ?? "OK";
+  if (state === "OK") return;
+  diagnostics.push({
+    stage: "inference",
+    severity: "info",
+    code: `terminal-state-${state.toLowerCase().replace(/_/g, "-")}`,
+    message:
+      `No deployable compute/framework combination was detected (terminal state ${state}); ` +
+      "the minimal diagram and service list are intentional, not a parse failure.",
+  });
+}
+
 export async function runInference(input: InferenceInput): Promise<InferenceResult> {
   const { ruleInput, signals, description, profile } = input;
   const diagnostics: Diagnostic[] = [];
@@ -601,6 +621,7 @@ export async function runInference(input: InferenceInput): Promise<InferenceResu
   // Fallback: deterministic rule engine (no LLM configured, or LLM failed).
   const baseline = (engine: PipelineEngine): InferenceResult => {
     const basePlan = runRuleEngine({ ...ruleInput, profile: profile ?? undefined });
+    pushTerminalStateDiagnostic(basePlan, diagnostics);
     const plans =
       basePlan.proposals && basePlan.proposals.length > 0 ? basePlan.proposals : [basePlan];
     return { plan: basePlan, plans, architectureModel: null, engine, diagnostics };
@@ -657,6 +678,7 @@ export async function runInference(input: InferenceInput): Promise<InferenceResu
     : null;
   const plans = p2 ? [p1, p2] : [p1];
   cappedPlan.proposals = plans;
+  pushTerminalStateDiagnostic(cappedPlan, diagnostics);
 
   return {
     plan: cappedPlan,

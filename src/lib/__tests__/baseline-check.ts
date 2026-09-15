@@ -443,9 +443,119 @@ async function runMerged(
  * alone; otherwise a missing key is a hard failure, not a silent fallback.
  */
 const RULES_ONLY_MODE = process.argv.includes("--rules-only");
+const V2_MODE = process.argv.includes("--v2");
+
+// ---------------------------------------------------------------------------
+// V2 fixtures — derived from testing_baseline_v2.md (12 benchmark repos).
+// Invariants per repo: compute exclusivity, DB engine label, do-not-infer,
+// provenance completeness, terminal state.
+// ---------------------------------------------------------------------------
+
+interface V2Fixture {
+  name: string;
+  url: string;
+  expected: ServiceId[];
+  doNotInfer: ServiceId[];
+  /** Expected engine substring in the RDS mapping evidence ("(PostgreSQL)" / "(MySQL)"), or null. */
+  expectedDbEngine: string | null;
+  expectedTerminalState: string;
+}
+
+const V2_FIXTURES: readonly V2Fixture[] = [
+  { name: "example-voting-app", url: "https://github.com/dockersamples/example-voting-app", expected: ["ECS", "RDS"], doNotInfer: ["EKS", "Lambda", "EC2", "Fargate"], expectedDbEngine: "(PostgreSQL)", expectedTerminalState: "OK" },
+  { name: "microservices-demo", url: "https://github.com/GoogleCloudPlatform/microservices-demo", expected: ["EKS"], doNotInfer: ["ECS", "RDS", "Lambda", "EC2", "Fargate"], expectedDbEngine: null, expectedTerminalState: "OK" },
+  { name: "spring-petclinic", url: "https://github.com/spring-projects/spring-petclinic", expected: ["ECS", "RDS"], doNotInfer: ["EKS", "Lambda", "EC2"], expectedDbEngine: "(MySQL)", expectedTerminalState: "OK" },
+  { name: "realworld-node-express", url: "https://github.com/gothinkster/node-express-realworld-example-app", expected: ["ECS", "ALB", "RDS"], doNotInfer: ["EKS", "Lambda", "EC2"], expectedDbEngine: "(PostgreSQL)", expectedTerminalState: "OK" },
+  { name: "realworld-django", url: "https://github.com/gothinkster/django-realworld-example-app", expected: ["ECS", "ALB", "RDS"], doNotInfer: ["EKS", "Lambda", "EC2"], expectedDbEngine: "(PostgreSQL)", expectedTerminalState: "OK" },
+  { name: "realworld-golang", url: "https://github.com/gothinkster/golang-gin-realworld-example-app", expected: ["ECS", "ALB", "RDS"], doNotInfer: ["EKS", "Lambda", "EC2"], expectedDbEngine: "(PostgreSQL)", expectedTerminalState: "OK" },
+  { name: "terraform-eks", url: "https://github.com/hashicorp/learn-terraform-provision-eks-cluster", expected: ["EKS", "EC2", "VPC", "IAM"], doNotInfer: ["ECS", "Lambda", "RDS"], expectedDbEngine: null, expectedTerminalState: "IAC_ONLY" },
+  { name: "aws-serverless-workshops", url: "https://github.com/aws-samples/aws-serverless-workshops", expected: ["Lambda", "S3", "DynamoDB", "StepFunctions"], doNotInfer: ["ECS", "EKS", "EC2", "RDS", "Aurora", "Athena", "SageMaker"], expectedDbEngine: null, expectedTerminalState: "OK" },
+  { name: "supabase", url: "https://github.com/supabase/supabase", expected: ["RDS", "S3", "ALB"], doNotInfer: ["EKS", "Lambda"], expectedDbEngine: null, expectedTerminalState: "MONOREPO_OK" },
+  { name: "oak", url: "https://github.com/oakserver/oak", expected: [], doNotInfer: ["ECS", "EKS", "Lambda", "ALB", "APIGateway", "RDS"], expectedDbEngine: null, expectedTerminalState: "LIBRARY_REPO" },
+  { name: "go-kit-examples", url: "https://github.com/go-kit/examples", expected: ["ECS", "ALB"], doNotInfer: ["EKS", "Lambda", "EC2"], expectedDbEngine: null, expectedTerminalState: "OK" },
+  { name: "decentralized-voting-system", url: "https://github.com/Jaimin-chavda/Decentralized-Voting-System", expected: ["S3", "CloudFront"], doNotInfer: ["ECS", "EKS", "Lambda", "RDS", "DynamoDB"], expectedDbEngine: null, expectedTerminalState: "OK" },
+];
+
+const COMPUTE_EXCLUSIVITY_SET: ServiceId[] = ["ECS", "EKS", "Lambda", "EC2", "Fargate"];
+
+async function runV2(githubToken?: string): Promise<void> {
+  let pass = 0;
+  let fail = 0;
+  for (const fx of V2_FIXTURES) {
+    console.log(`=== ${fx.name} ===`);
+    let plan: ServicePlan;
+    try {
+      const { plan: p } = await runRulesOnly(fx.url, githubToken);
+      plan = p;
+    } catch (err) {
+      console.log(`  Status : FAIL (fetch/rules error: ${(err as Error).message})`);
+      fail++;
+      continue;
+    }
+    const ids = planServiceIds(plan);
+    const problems: string[] = [];
+
+    // 1. Compute exclusivity (EKS + EC2 node-group pair is IaC-declared, allowed)
+    const computeFound = COMPUTE_EXCLUSIVITY_SET.filter((s) => ids.has(s));
+    const eksEc2PairOnly =
+      computeFound.length === 2 && computeFound.includes("EKS") && computeFound.includes("EC2");
+    if (computeFound.length > 1 && !eksEc2PairOnly) {
+      problems.push(`compute exclusivity: ${computeFound.join(", ")}`);
+    }
+
+    // 2. Expected services
+    for (const exp of fx.expected) {
+      if (!ids.has(exp)) problems.push(`missing expected: ${exp}`);
+    }
+
+    // 3. Do Not Infer
+    for (const ban of fx.doNotInfer) {
+      if (ids.has(ban)) problems.push(`do-not-infer violation: ${ban}`);
+    }
+
+    // 4. Database engine label
+    if (fx.expectedDbEngine) {
+      const rds = plan.awsMappings.find((m) => m.serviceId === "RDS");
+      if (!rds) problems.push("missing RDS for engine-label check");
+      else if (!rds.evidence.includes(fx.expectedDbEngine)) {
+        problems.push(`RDS evidence missing engine label ${fx.expectedDbEngine}: "${rds.evidence}"`);
+      }
+    }
+
+    // 5. Provenance completeness
+    for (const m of plan.awsMappings) {
+      if (!m.category || !m.evidence) problems.push(`provenance gap: ${m.serviceId}`);
+    }
+
+    // 6. Terminal state
+    const actualTerminal = (plan as ServicePlan).terminalState ?? "OK";
+    if (actualTerminal !== fx.expectedTerminalState) {
+      problems.push(`terminal state: expected ${fx.expectedTerminalState}, got ${actualTerminal}`);
+    }
+
+    console.log(`  Services: [${fmtIds(sortedIds(ids))}] terminal=${actualTerminal}`);
+    if (problems.length > 0) {
+      for (const p of problems) console.log(`    - ${p}`);
+      console.log("  Status : FAIL");
+      fail++;
+    } else {
+      console.log("  Status : PASS");
+      pass++;
+    }
+    console.log();
+  }
+  console.log("=".repeat(72));
+  console.log(`${pass}/${V2_FIXTURES.length} v2 repos passing`);
+  console.log("=".repeat(72));
+  if (fail > 0) process.exit(1);
+}
 
 async function main(): Promise<void> {
   const githubToken = process.env.GITHUB_TOKEN;
+  if (V2_MODE) {
+    await runV2(githubToken);
+    return;
+  }
   const llmPresent = llmConfigured();
 
   console.log("=".repeat(72));
