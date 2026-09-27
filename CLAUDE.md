@@ -7,6 +7,9 @@ AI architecture advisor: repo URL or freeform description → validated
 
 1. **Evidence extraction** — `src/lib/repoFetcher.ts`, `src/lib/repoAnalyzer.ts`.
    GitHub REST (README + allowlisted key files), never a full clone.
+   `selectWorkspaceAware` reserves half the 60-file budget for service
+   manifests (two-segment round-robin buckets under monorepo container
+   dirs) so IaC/CI files cannot starve them (Decision 53).
 2. **Inference** — `src/lib/inference.ts` (`runInference`):
    - LLM configured and successful → `llmClient.ts` builds an
      `ArchitectureModel` (real tech names, every component cites real
@@ -34,12 +37,12 @@ AI architecture advisor: repo URL or freeform description → validated
 - Evidence mandate: every component/mapping carries a real evidence string.
   `normalizeArchitectureModel` drops evidence-free components.
   `applyPatternBaselines` emits no unconditional injections (Decision 52).
-- Source of truth docs: `DECISIONS.md` (decisions #1–52, log I-1–I-25),
+- Source of truth docs: `DECISIONS.md` (decisions #1–53, log I-1–I-25),
   `FLOW.md` (pipeline), `testing baseline.md` (live evaluation spec).
 
 ## Commands
 
-- `npm test` — full unit suite (currently 274/274).
+- `npm test` — full unit suite (currently 278/278).
 - `npm run test:baseline -- --rules-only` — 8-repo rules diagnostic.
 - Merged-column diagnostic requires an LLM key; without one the script
   hard-fails by design rather than silently re-measuring rules.

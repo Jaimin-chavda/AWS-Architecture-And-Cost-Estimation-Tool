@@ -93,8 +93,40 @@ const MANIFEST_PATTERNS = [
 
 // Monorepo nested manifests pattern for backwards compatibility
 const NESTED_MANIFEST_PATTERNS = [
-  /^(?:packages|apps|modules|services|libs|internal|cmd)\/[^/]+\/(?:package\.json|pom\.xml|build\.gradle(\.kts)?|Cargo\.toml|pyproject\.toml|requirements\.txt|go\.mod|mix\.exs|deno\.jsonc?)$/i,
+  /^(?:packages|apps|modules|services|libs|internal|cmd|src)\/[^/]+\/(?:package\.json|pom\.xml|build\.gradle(\.kts)?|Cargo\.toml|pyproject\.toml|requirements\.txt|go\.mod|mix\.exs|deno\.jsonc?)$/i,
 ];
+
+/**
+ * Top-level directories that contain service subdirectories (not services
+ * themselves). Derived from NESTED_MANIFEST_PATTERNS so the container-dir
+ * convention lives in exactly one place — extend the pattern above, never
+ * this set, when a new monorepo layout appears.
+ */
+const MONOREPO_CONTAINER_DIRS: Set<string> = (() => {
+  const dirs = new Set<string>();
+  for (const re of NESTED_MANIFEST_PATTERNS) {
+    const m = re.source.match(/\(\?:([a-z|]+)\)/i);
+    if (m) for (const d of m[1].split("|")) dirs.add(d.toLowerCase());
+  }
+  return dirs;
+})();
+
+/**
+ * Round-robin bucket for Pass 2 of selectWorkspaceAware. Manifests under a
+ * monorepo container dir (src/cartservice/…) bucket by the first TWO
+ * segments so each service competes on its own; genuinely flat top-level
+ * dirs (terraform/, helm-chart/) keep the single-segment bucket.
+ */
+function roundRobinBucket(path: string): string {
+  const segs = path.split("/");
+  if (
+    segs.length >= 3 &&
+    MONOREPO_CONTAINER_DIRS.has(segs[0].toLowerCase())
+  ) {
+    return `${segs[0]}/${segs[1]}`;
+  }
+  return segs.length > 1 ? segs[0] : "(root)";
+}
 
 // Workspace-root indicators: always fetched so monorepo layout is visible.
 const WORKSPACE_ROOT_PATTERNS = [
@@ -473,8 +505,8 @@ export function isWorkspaceRootPath(path: string): boolean {
 /**
  * Workspace-aware file selection: priority files first (README,
  * workspace-root, root manifests, all container/CI/IaC), then breadth-first
- * round-robin across top-level directories so polyglot monorepos surface
- * every service directory.
+ * round-robin across directory buckets so polyglot monorepos surface
+ * every service directory (monorepo containers bucket two segments deep).
  */
 export function selectWorkspaceAware(
   candidates: FileCandidate[],
@@ -492,39 +524,61 @@ export function selectWorkspaceAware(
     selected.push(c);
   };
 
-  // Pass 1: README + workspace-root + root manifests + all container/CI/IaC.
+  // Pass 1a: README + workspace-root first (small fixed count, never contested).
   for (const c of sorted) {
-    const depth = c.path.split("/").length - 1;
-    if (
-      c.kind === "readme" ||
-      isWorkspaceRootFile(c.path) ||
-      (c.kind === "manifest" && depth === 0) ||
-      c.kind === "container_ci"
-    ) {
+    if (c.kind === "readme" || isWorkspaceRootFile(c.path)) {
       take(c);
     }
   }
 
-  // Pass 2: round-robin one manifest per top-level directory per round.
+  // Pass 1b: manifests up to a reserved share of the budget, root manifests
+  // first, then round-robin across buckets (two-segment under container
+  // dirs). Guarantees service manifests survive repos with heavy IaC/CI.
+  const MANIFEST_RESERVE = Math.max(1, Math.floor(cap / 2));
+  let manifestTaken = 0;
+  const takeManifest = (c: FileCandidate) => {
+    if (manifestTaken >= MANIFEST_RESERVE || selected.length >= cap) return;
+    const before = selected.length;
+    take(c);
+    if (selected.length > before) manifestTaken++;
+  };
+  for (const c of sorted) {
+    if (manifestTaken >= MANIFEST_RESERVE) break;
+    if (taken.has(c.path)) continue;
+    const depth = c.path.split("/").length - 1;
+    if (c.kind === "manifest" && depth === 0) {
+      takeManifest(c);
+    }
+  }
   const byDir = new Map<string, FileCandidate[]>();
   for (const c of sorted) {
     if (taken.has(c.path)) continue;
     if (c.kind !== "manifest") continue;
-    const top = c.path.includes("/") ? c.path.split("/")[0] : "(root)";
-    const list = byDir.get(top) ?? [];
+    const bucket = roundRobinBucket(c.path);
+    const list = byDir.get(bucket) ?? [];
     list.push(c);
-    byDir.set(top, list);
+    byDir.set(bucket, list);
   }
   let progress = true;
-  while (progress && selected.length < cap) {
+  while (progress && selected.length < cap && manifestTaken < MANIFEST_RESERVE) {
     progress = false;
     for (const list of byDir.values()) {
       const next = list.shift();
       if (next) {
-        take(next);
+        takeManifest(next);
         progress = true;
       }
-      if (selected.length >= cap) break;
+      if (selected.length >= cap || manifestTaken >= MANIFEST_RESERVE) break;
+    }
+  }
+
+  // Pass 1c: container_ci fills whatever budget remains after the manifest
+  // reserve — still valued signal, never uncapped.
+  for (const c of sorted) {
+    if (selected.length >= cap) break;
+    if (taken.has(c.path)) continue;
+    if (c.kind === "container_ci") {
+      take(c);
     }
   }
 

@@ -206,6 +206,28 @@ gem 'aws-sdk-s3'
     assert.ok(mapped.awsUsage.some((a) => a.name === "AWS SDK (SQS)"));
   });
 
+  it("maps .NET wrapper/sibling package variants (cartservice shape)", () => {
+    const content = `
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Caching.StackExchangeRedis" Version="10.0.11" />
+    <PackageReference Include="Npgsql" Version="10.0.3" />
+    <PackageReference Include="Google.Cloud.Spanner.Data" Version="5.12.0" />
+    <PackageReference Include="MongoDB.Driver" Version="3.0.0" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.0" />
+  </ItemGroup>
+</Project>
+`;
+    const pkgs = parseCsProj(content);
+    const mapped = mapParsedPackages(pkgs, "cartservice.csproj", DOTNET_PACKAGE_MAP);
+    const dbNames = mapped.databases.map((d) => d.name);
+    assert.ok(dbNames.includes("Redis"), `wrapper must map to Redis; got ${dbNames.join(", ")}`);
+    assert.ok(dbNames.includes("PostgreSQL"), `bare Npgsql must map; got ${dbNames.join(", ")}`);
+    assert.ok(dbNames.includes("Cloud Spanner"), `Spanner must surface; got ${dbNames.join(", ")}`);
+    assert.ok(dbNames.includes("MongoDB"), `MongoDB.Driver must map; got ${dbNames.join(", ")}`);
+    assert.ok(dbNames.includes("SQL Server"), `SqlClient must map; got ${dbNames.join(", ")}`);
+  });
+
   it("analyzeProject logs parseFailures on corrupted manifest without throwing", () => {
     const signals: RepoSignals = {
       repoName: "test/corrupt-app",

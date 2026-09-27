@@ -8,8 +8,8 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { isInsufficientSignal, signalsToRuleInput } from "../repoFetcher.ts";
-import type { RepoSignals } from "../repoFetcher.ts";
+import { isInsufficientSignal, signalsToRuleInput, selectWorkspaceAware } from "../repoFetcher.ts";
+import type { RepoSignals, FileCandidate } from "../repoFetcher.ts";
 
 // ---------------------------------------------------------------------------
 // Fixture helper
@@ -210,5 +210,90 @@ cron.schedule("0 0 * * *", () => {
     assert.ok(services.has("DynamoDB"), "Should detect DynamoDB");
     assert.ok(services.has("EventBridge"), "Should detect EventBridge from cron");
     assert.ok(services.has("APIGateway"), "Should detect APIGateway from WebSocket");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Monorepo service-blindness (microservices-demo shape: src/<service>/)
+// ---------------------------------------------------------------------------
+
+describe("selectWorkspaceAware monorepo buckets", () => {
+  it("selects at least one manifest per src/<service> within a small cap", () => {
+    const services = [
+      "cartservice", "frontend", "productcatalogservice", "paymentservice",
+      "shippingservice", "checkoutservice", "currencyservice", "adservice",
+      "emailservice", "recommendationservice",
+    ];
+    const cand = (path: string, score: number): FileCandidate => ({
+      path, kind: "manifest", priority: 1, score,
+    });
+    const input: FileCandidate[] = [];
+    // 2 manifests per service, middling scores — top-level dirs outscore them.
+    for (const svc of services) {
+      input.push(cand(`src/${svc}/src/${svc}.csproj`, 55));
+      input.push(cand(`src/${svc}/go.mod`, 50));
+    }
+    input.push(cand("terraform/main.tf", 90));
+    input.push(cand("helm-chart/Chart.yaml", 90));
+    input.push(cand("docs/guide.md", 90));
+    input.push(cand(".github/workflows/ci.yml", 90));
+
+    const selected = selectWorkspaceAware(input, 15);
+    const paths = new Set(selected.map((c) => c.path));
+    for (const svc of services) {
+      assert.ok(
+        paths.has(`src/${svc}/src/${svc}.csproj`) || paths.has(`src/${svc}/go.mod`),
+        `service ${svc} must have at least one manifest selected`
+      );
+    }
+  });
+
+  it("keeps single-segment buckets for flat top-level dirs", () => {
+    const cand = (path: string, score: number): FileCandidate => ({
+      path, kind: "manifest", priority: 1, score,
+    });
+    const input = [
+      cand("terraform/a.tf", 80),
+      cand("terraform/b.tf", 79),
+      cand("src/svc-a/go.mod", 70),
+      cand("src/svc-b/go.mod", 70),
+    ];
+    // cap=4 → manifest reserve 2: round-robin takes one per bucket
+    // (terraform, then svc-a); the remainder flows through pass 3 by score.
+    const selected = selectWorkspaceAware(input, 4);
+    const paths = selected.map((c) => c.path);
+    assert.ok(paths.includes("terraform/a.tf"));
+    assert.ok(paths.includes("src/svc-a/go.mod"));
+    assert.ok(paths.includes("src/svc-b/go.mod"));
+  });
+
+  it("reserves manifest budget against a container_ci flood (microservices-demo shape)", () => {
+    const cand = (path: string, kind: FileCandidate["kind"], score: number): FileCandidate => ({
+      path, kind, priority: 1, score,
+    });
+    const services = [
+      "cartservice", "frontend", "productcatalogservice", "paymentservice",
+      "shippingservice", "checkoutservice", "currencyservice", "adservice",
+      "emailservice", "recommendationservice",
+    ];
+    const input: FileCandidate[] = [cand("README.md", "readme", 100)];
+    for (const svc of services) {
+      input.push(cand(`src/${svc}/go.mod`, "manifest", 50));
+    }
+    // 55 high-scoring IaC/CI files that used to eat the whole budget in pass 1.
+    for (let i = 0; i < 20; i++) input.push(cand(`kubernetes-manifests/svc-${i}.yaml`, "container_ci", 90));
+    for (let i = 0; i < 15; i++) input.push(cand(`helm-chart/templates/svc-${i}.yaml`, "container_ci", 90));
+    for (let i = 0; i < 10; i++) input.push(cand(`terraform/f${i}.tf`, "container_ci", 90));
+    for (let i = 0; i < 10; i++) input.push(cand(`.github/workflows/ci-${i}.yml`, "container_ci", 90));
+
+    const selected = selectWorkspaceAware(input, 60);
+    assert.strictEqual(selected.length, 60);
+    const paths = new Set(selected.map((c) => c.path));
+    let covered = 0;
+    for (const svc of services) {
+      if (paths.has(`src/${svc}/go.mod`)) covered++;
+    }
+    assert.ok(covered >= 8, `at least 8 of 10 services must survive, got ${covered}`);
+    assert.ok(paths.has("README.md"), "README stays unconditional");
   });
 });

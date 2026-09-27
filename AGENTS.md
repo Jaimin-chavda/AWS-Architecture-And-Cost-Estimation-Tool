@@ -7,7 +7,7 @@ Do not build cost-monitoring, optimization, or security-scanner features.
 
 ## Before changing inference code
 
-Read `DECISIONS.md` (decisions #51–52, log I-24–I-25) and `FLOW.md` Stage 3.
+Read `DECISIONS.md` (decisions #51–53, log I-24–I-25) and `FLOW.md` Stage 3.
 Inference is single-path by design: rules baseline OR LLM deterministic
 mapping, never a merged union. Do not reintroduce a merge step without a
 new decision entry.
@@ -23,7 +23,7 @@ new decision entry.
 
 ## Verification
 
-- `npm test` must stay green (274/274). If a behavior change breaks a
+- `npm test` must stay green (278/278). If a behavior change breaks a
   fixture, report the exact expected-vs-actual diff; do not silently edit
   evaluation fixtures in `testing baseline.md` or `baseline-check.ts`.
 - `npx tsc --noEmit` shows only the known pre-existing errors in
