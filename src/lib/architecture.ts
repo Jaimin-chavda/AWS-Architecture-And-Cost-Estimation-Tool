@@ -668,94 +668,15 @@ function applyPatternBaselines(
   alreadyMapped: AwsServiceMapping[],
   workloadClassification?: WorkloadClassification
 ): AwsServiceMapping[] {
-  const mappings: AwsServiceMapping[] = [];
-  const hasService = (s: ServiceId) =>
-    alreadyMapped.some((m) => m.serviceId === s) || mappings.some((m) => m.serviceId === s);
-  const add = (
-    service: ServiceId,
-    confidence: ConfidenceTier,
-    evidence: string,
-    category: MappingCategory = "recommendation"
-  ) => {
-    if (hasService(service)) return;
-    const cappedConfidence: ConfidenceTier = confidence === "high" ? "medium" : confidence;
-    mappings.push({
-      componentId: `pattern-${service.toLowerCase()}`,
-      serviceId: service,
-      confidence: cappedConfidence,
-      evidence,
-      fromPattern: true,
-      category,
-    });
-  };
-
-  const isMlTraining = workloadClassification?.type === "ml-training";
-  const isMlInference = workloadClassification?.type === "ml-inference";
-  const isStaticSite = workloadClassification?.type === "static-frontend";
-
-  if (isMlTraining) {
-    if (!COMPUTE_SERVICES.some((s) => hasService(s))) {
-      add("SageMaker", "medium", "SageMaker ML training instance", "inference");
-    }
-    add("S3", "medium", "S3 bucket for training datasets, checkpoints, and model weights", "recommendation");
-    add("CloudWatch", "medium", "CloudWatch logging and metrics for training jobs", "recommendation");
-    return mappings;
-  }
-
-  if (isMlInference) {
-    if (!COMPUTE_SERVICES.some((s) => hasService(s))) {
-      add("SageMaker", "medium", "SageMaker real-time inference endpoint or container compute", "inference");
-    }
-    add("ALB", "medium", "Application Load Balancer for routing API requests to model endpoints", "recommendation");
-    add("S3", "medium", "S3 bucket for serialized model weights and artifacts", "recommendation");
-    add("CloudWatch", "medium", "CloudWatch logging and metrics for inference endpoint", "recommendation");
-    return mappings;
-  }
-
-  if (isStaticSite) {
-    add("Route53", "medium", "Route 53 DNS routing for web domain", "recommendation");
-    add("CloudFront", "medium", "CloudFront CDN edge distribution", "recommendation");
-    add("S3", "medium", "S3 static asset storage & hosting", "recommendation");
-    add("CloudWatch", "low", "CloudWatch metrics for CloudFront", "recommendation");
-    return mappings;
-  }
-
-  // Standard web / API / microservices blueprint:
-  // Baselines only fire on real signals. No unconditional enterprise padding.
-  const hasPublicEdge =
-    alreadyMapped.some((m) => m.serviceId === "CloudFront" || m.serviceId === "ALB" || m.serviceId === "APIGateway") ||
-    model.components.some((c) => c.type === "frontend" || c.type === "api");
-  const hasBackend =
-    alreadyMapped.some((m) => m.serviceId === "ECS" || m.serviceId === "Lambda" || m.serviceId === "EKS" || m.serviceId === "EC2" || m.serviceId === "Fargate") ||
-    model.components.some((c) => c.type === "backend" || c.type === "api" || c.type === "worker");
-  const hasCompute = COMPUTE_SERVICES.some((s) => hasService(s));
-
-  // 1. Edge & DNS Ingress — only when public edge proven
-  if (hasPublicEdge) {
-    add("Route53", "medium", "Route 53 DNS routing for public web endpoint", "recommendation");
-  }
-  if (model.components.some((c) => c.type === "frontend" || /react|vue|angular|svelte|next|static/i.test(c.technology))) {
-    add("CloudFront", "medium", "CloudFront CDN edge distribution", "recommendation");
-    add("S3", "medium", "S3 static asset storage & hosting", "recommendation");
-  }
-
-  // 2. Ingress & Compute
-  if (model.components.some((c) => c.type === "backend" || c.type === "api")) {
-    add("ALB", "medium", "Application Load Balancer for public ingress", "recommendation");
-  }
-  if (!COMPUTE_SERVICES.some((s) => hasService(s))) {
-    add("ECS", "medium", "ECS Fargate managed container host", "inference");
-  }
-
-  // 3. Observability & Security — only with compute to observe / secrets to hold
-  if (hasCompute) {
-    add("CloudWatch", "medium", "CloudWatch logging, alarms, and performance metrics", "recommendation");
-  }
-  if (hasBackend) {
-    add("SecretsManager", "medium", "Secrets Manager for environment variables and cryptographic keys", "recommendation");
-  }
-
-  return mappings;
+  // Evidence-gated baselines (Decision 51): every mapping must carry a real
+  // evidence string per commit 6286583. Baseline services have no component
+  // citing them, so unconditional injection is disabled. Component-derived
+  // mappings in mapComponentToAws already cover frontend/backend/compute tiers
+  // with genuine evidence. No fabricated evidence strings are invented here.
+  void model;
+  void alreadyMapped;
+  void workloadClassification;
+  return [];
 }
 
 // ---------------------------------------------------------------------------

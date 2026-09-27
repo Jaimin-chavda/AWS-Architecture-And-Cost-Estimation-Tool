@@ -27,7 +27,7 @@ Stage 3's output contract was rewritten after decisions I-22/I-23 removed the cl
                 ▼
   Stage 3: INFERENCE                  RuleEngine (baseline, never fails)
                 │                     LLM enhance (if key) → schema gate (flaw 5)
-                │                     merge → grounded, catalog-validated ServicePlan
+                │                     single path wins → grounded, catalog-validated ServicePlan
                 │                     + optional curated alternate (patternAlternates.ts)
                 ▼
   Stage 4: DIAGRAM (pure fn)          ServicePlan → deterministic mxGraph XML
@@ -120,8 +120,10 @@ evidence (RepoSignals | description)
    ├─► LLMClient.structured(evidence, SCHEMA)    temp 0, ≤3 retries, generateObject(zod)
    │        └─► output must conform to the single zod `ServicePlan` schema (flaw 5)
    │
-   ▼
-   InferenceService.merge(baseline, validate(llm))
+    ▼
+    Single-path result (no merge layer — Decision 51): LLM success →
+    deterministic mapping of the ArchitectureModel; LLM absent/failed →
+    rules baseline.
 ```
 
 **Schema + validation gate (flaw 5) — provider-agnostic:**
@@ -155,7 +157,7 @@ Four things changed from the original design and are load-bearing:
 
 - **Open 155-entry catalog, not a ~30–40 enum.** `ServiceId` in `schema.ts` is a deliberately-open allowlist of 155 AWS services. It is safe to extend. The **PATTERN_IDS enum (8 values) is a separate thing and must NOT be widened** — the two are distinct (see `.planning/ARCHITECTURE.md`, "Two-Enum Distinction").
 - **Soft ceiling, no hard 12-service cap (I-22).** The old "≤ 12 distinct services by construction" template-slot cap is gone. A plan with more than 25 services emits a **warning and still passes** `safeParse`. Nothing in the pipeline hard-rejects on service count.
-- **`componentId` uniqueness enforced, non-fatally (I-23).** A `.refine()` guard on `ServicePlanSchema` detects duplicate component IDs and auto-deduplicates (keeps the first, logs a warning) — never a `safeParse` rejection. Merge-time clustering in `mergeSingleServicePlan()` (union-find) unifies identical components across baseline and LLM, and multi-service mappings that would collide get semantic suffixes: `-storage` (S3), `-registry` (ECR), `-alb` (ALB), `-gateway` (APIGateway), `-scheduler` (EventBridge).
+ - **`componentId` uniqueness enforced, non-fatally (I-23).** A `.refine()` guard on `ServicePlanSchema` detects duplicate component IDs and auto-deduplicates (keeps the first, logs a warning) — never a `safeParse` rejection. Multi-service mappings that would collide get semantic suffixes: `-storage` (S3), `-registry` (ECR), `-alb` (ALB), `-gateway` (APIGateway), `-scheduler` (EventBridge). (The former union-find merge clustering was deleted with the merge layer, Decision 51.)
 - **Every component and mapping must cite real evidence (commit 6286583).** `normalizeArchitectureModel()` drops components whose `evidence[]` is empty. When an `evidenceRegister` is present, citations are resolved against it and citations failing `isEvidenceSupportingComponent()` are dropped. Nothing may be emitted from prose alone where repo-grounded evidence is expected.
 
 Single-deployable rule (flaw 2) still holds: only root/depth-≤1 manifests reach the fetcher, so classification picks **one** pattern — the strongest root-level deployable. No composition.
@@ -333,4 +335,4 @@ logged-in, "Save analysis"
 <!-- GSD:flow-end -->
 
 ---
-*Last updated: 2026-09-05 — Stage 3 output contract rewritten for the 155-service open catalog, soft >25 ceiling (replacing the hard 12-service cap), `componentId` uniqueness refine + merge-time clustering, and the evidence-citation invariant; alternate-proposal path and CloudFormation export added; scope narrowed to Module A.*
+*Last updated: 2026-09-27 — Stage 3 is single-path (merge layer deleted, Decision 51); pattern baselines evidence-gated (Decision 52). Prior merge/baseline-injection wording is superseded.*

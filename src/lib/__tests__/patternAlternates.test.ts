@@ -6,7 +6,7 @@
  *    identical diagram/cost/CFT output to pre-change behavior (regression-tested).
  * 2. Acceptance Criteria 2: The curated alternate pairs produce two distinct, valid
  *    diagrams + cost estimates + CFT templates side by side.
- * 3. Acceptance Criteria 3: diagram.ts, cftExport.ts, and mergeServicePlans correctly consume
+ * 3. Acceptance Criteria 3: diagram.ts and cftExport.ts correctly consume
  *    the array-based shape (1..N) with single-element arrays producing byte-identical
  *    output to single-path calls.
  *
@@ -21,7 +21,6 @@ import { getAlternateConfig } from "../patternAlternates.ts";
 import { generateDiagramXml } from "../diagram.ts";
 import { generateCftYaml, validateCloudFormationTemplate } from "../cftExport.ts";
 import { computeCostRows } from "../cost.ts";
-import { mergeServicePlans } from "../inference.ts";
 import { ServicePlanSchema } from "../schema.ts";
 
 function makeInput(overrides: Partial<RuleInput> = {}): RuleInput {
@@ -136,16 +135,7 @@ describe("Acceptance Criteria 1 — 6 patterns without alternates produce identi
         `CFT YAML for ${name} must be byte-identical between single and array calls`
       );
 
-      // 3. mergeServicePlans: single-path vs array-path byte-identical
-      const mergedSingle = mergeServicePlans(singlePlan);
-      const mergedArray = mergeServicePlans(arrayPlans);
-      assert.deepEqual(
-        mergedArray[0].awsMappings,
-        mergedSingle.awsMappings,
-        `mergeServicePlans for ${name} must produce identical mappings`
-      );
-
-      // 4. Cost rows: identical
+      // 3. Cost rows: identical
       const singleCost = await computeCostRows(singlePlan, "us-east-1", 10_000);
       const arrayCost = await computeCostRows(arrayPlans[0], "us-east-1", 10_000);
       assert.equal(singleCost.totalMonthlyUsd, arrayCost.totalMonthlyUsd);
@@ -327,28 +317,4 @@ describe("Acceptance Criteria 3 — Downstream consumers handle array shape with
     assert.ok(arrayTwo[1].includes("AWSTemplateFormatVersion"));
   });
 
-  it("mergeServicePlans accepts single plan and 1..N array seamlessly", () => {
-    const input = makeInput({
-      fileNames: ["serverless.yml"],
-      fileContent: "aws-lambda handler dynamodb",
-    });
-    const proposals = runRuleEngineProposals(input);
-
-    // 1. Single plan call
-    const single = mergeServicePlans(proposals[0]);
-    assert.equal(single.detectedPattern, proposals[0].detectedPattern);
-
-    // 2. Single-element array call
-    const arrayOne = mergeServicePlans([proposals[0]]);
-    assert.ok(Array.isArray(arrayOne));
-    assert.equal(arrayOne.length, 1);
-    assert.deepEqual(arrayOne[0], single);
-
-    // 3. Multi-element array call (N == 2)
-    const arrayTwo = mergeServicePlans(proposals);
-    assert.ok(Array.isArray(arrayTwo));
-    assert.equal(arrayTwo.length, 2);
-    assert.deepEqual(arrayTwo[0], single);
-    assert.equal(arrayTwo[1].detectedPattern, proposals[1].detectedPattern);
-  });
 });

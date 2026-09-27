@@ -410,7 +410,7 @@ describe("Priority 4: Workload Classification & Compute Mapping", () => {
     assert.ok(serviceIds.includes("SageMaker"), `ML training must produce SageMaker; got ${serviceIds.join(", ")}`);
     assert.ok(!serviceIds.includes("ALB"), "ML training must NOT include Application Load Balancer");
     assert.ok(!serviceIds.includes("Route53"), "ML training must NOT include Route 53");
-    assert.ok(serviceIds.includes("S3"), "ML training should include S3 for datasets/checkpoints");
+    assert.ok(!serviceIds.includes("S3"), "ML training must NOT include S3 without dataset evidence (Decision 51)");
   });
 
   it("classifies multi-module Spring Boot backend as microservices", () => {
@@ -653,7 +653,7 @@ describe("Hardening: Benchmark Repo 1 (Kuzma02 Electronics eCommerce)", () => {
     assert.ok(serviceIds.includes("RDS"), "Must include RDS for MySQL database");
     assert.ok(serviceIds.includes("ECS"), "Must include ECS for container compute");
     assert.ok(serviceIds.includes("ALB"), "Must include ALB for public ingress");
-    assert.ok(serviceIds.includes("CloudWatch"), "Must include CloudWatch for monitoring");
+    assert.ok(!serviceIds.includes("CloudWatch"), "Must NOT include CloudWatch without real evidence (Decision 51)");
 
     // 4. Forbidden hallucinations (from benchmark specification)
     const forbidden: ServiceId[] = ["DynamoDB", "Cognito", "SES", "ElastiCache", "SQS", "OpenSearch", "EKS"];

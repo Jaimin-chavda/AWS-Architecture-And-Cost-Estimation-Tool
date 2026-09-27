@@ -269,7 +269,7 @@ describe("mapArchitectureModelToServicePlan", () => {
     assert.ok(ids.includes("Lambda"), "Lambda from serverless backend component");
     assert.ok(ids.includes("APIGateway"), "APIGateway from serverless pattern");
     assert.ok(ids.includes("DynamoDB"), "DynamoDB from database component");
-    assert.ok(ids.includes("CloudWatch"), "CloudWatch for compute presence");
+    assert.ok(!ids.includes("CloudWatch"), "no CloudWatch without real evidence (Decision 51)");
   });
 
   it("maps PostgreSQL to RDS and a plain backend to ECS", () => {
