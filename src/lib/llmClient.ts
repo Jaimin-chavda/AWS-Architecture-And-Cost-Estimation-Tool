@@ -10,7 +10,7 @@
  * Provider chain — tried IN ORDER until one returns a model. This is failover,
  * not precedence.
  *   1. GOOGLE_API_KEY       → gemini-3.8-flash              (@ai-sdk/google)
- *   2. OPENROUTER_API_KEY   → openrouter/free                 (@openrouter/ai-sdk-provider)
+ *   2. OPENROUTER_API_KEY   → OpenRouter free models        (@openrouter/ai-sdk-provider)
  *
  * Failure is never silent. analyzeArchitecture returns a discriminated
  * LlmArchitectureResult carrying the reason and per-provider diagnostics, so
@@ -39,7 +39,11 @@ import type { ProjectProfile } from "./repoAnalyzer.ts";
 
 const MODEL_IDS = {
   google: "gemini-3.8-flash",
-  openrouter: "openrouter/free",
+  openrouter: [
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "apodex/apodex-1.1-mini:free",
+    "openrouter/free",
+  ],
 } as const;
 
 interface ProviderConfig {
@@ -74,11 +78,13 @@ function resolveProviders(): ProviderConfig[] {
   }
   if (process.env.OPENROUTER_API_KEY) {
     const client = createOpenRouter({ apiKey: process.env.OPENROUTER_API_KEY });
-    providers.push({
-      name: "openrouter",
-      model: MODEL_IDS.openrouter,
-      getModel: () => client.chat(MODEL_IDS.openrouter),
-    });
+    for (const modelId of MODEL_IDS.openrouter) {
+      providers.push({
+        name: "openrouter",
+        model: modelId,
+        getModel: () => client.chat(modelId),
+      });
+    }
   }
 
   return providers;
