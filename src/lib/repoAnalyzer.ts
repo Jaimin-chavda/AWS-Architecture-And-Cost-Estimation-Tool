@@ -19,6 +19,10 @@
 import { parse as parseYaml } from "yaml";
 import type { RepoSignals, KeyFile } from "./repoFetcher.ts";
 import type { EvidenceRecord } from "./schema.ts";
+import {
+  matchIntegration,
+  type IntegrationEcosystem,
+} from "./integrationRegistry.ts";
 
 // ---------------------------------------------------------------------------
 // Structural component discovery types
@@ -372,6 +376,15 @@ export const NPM_FRAMEWORK_MAP: Record<string, { label: string; category: "frame
   "express-fileupload": { label: "File Upload (S3)", category: "framework" },
   multer: { label: "File Upload (S3)", category: "framework" },
   formidable: { label: "File Upload (S3)", category: "framework" },
+  // Firebase (serverless backend-as-a-service; labels feed productionReadiness detection)
+  firebase: { label: "Firebase", category: "framework" },
+  "firebase-admin": { label: "Firebase Admin", category: "framework" },
+  "firebase-functions": { label: "Firebase Functions", category: "framework" },
+  "firebase-auth": { label: "Firebase Auth", category: "framework" },
+  "firebase-storage": { label: "Firebase Storage", category: "framework" },
+  "@firebase/auth": { label: "Firebase Auth", category: "framework" },
+  "@firebase/storage": { label: "Firebase Storage", category: "framework" },
+  "@angular/fire": { label: "Firebase", category: "framework" },
   // Email (npm)
   nodemailer: { label: "SES / Email", category: "framework" },
   "@sendgrid/mail": { label: "SES / Email", category: "framework" },
@@ -914,6 +927,79 @@ export function mapParsedPackages(
   }
 
   return { frameworks, databases, awsUsage };
+}
+
+/**
+ * Extracts raw dependency names per manifest for registry matching (STEP 1).
+ * One name per entry; callers match each individually, never joined.
+ */
+export function extractRegistryDepNames(
+  fileName: string,
+  content: string
+): { names: string[]; ecosystem: IntegrationEcosystem } {
+  const names: string[] = [];
+  try {
+    if (fileName === "package.json") {
+      const parsed = JSON.parse(content) as Record<string, unknown>;
+      for (const bag of [parsed.dependencies, parsed.devDependencies]) {
+        if (bag && typeof bag === "object") {
+          for (const k of Object.keys(bag as Record<string, unknown>)) names.push(k);
+        }
+      }
+      return { names, ecosystem: "npm" };
+    }
+    if (fileName === "requirements.txt") {
+      for (const rawLine of content.split("\n")) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith("#")) continue;
+        const pkg = line.replace(/[><=!~\s].*/g, "").replace(/\[.*\]/, "");
+        if (pkg) names.push(pkg);
+      }
+      return { names, ecosystem: "pip" };
+    }
+    if (fileName === "pyproject.toml") {
+      for (const p of parsePyprojectToml(content)) names.push(p.name);
+      return { names, ecosystem: "pip" };
+    }
+    if (fileName === "go.mod") {
+      for (const rawLine of content.split("\n")) {
+        const m = rawLine.trim().match(/^(?:require\s+)?(\S+)\s+v\S+/);
+        if (m) names.push(m[1]);
+      }
+      return { names, ecosystem: "go" };
+    }
+    if (/^cargo\.toml$/i.test(fileName)) {
+      for (const p of parseCargoToml(content)) names.push(p.name);
+      return { names, ecosystem: "cargo" };
+    }
+    if (/^gemfile$/i.test(fileName)) {
+      for (const p of parseGemfile(content)) names.push(p.name);
+      return { names, ecosystem: "gem" };
+    }
+    if (/^composer\.json$/i.test(fileName)) {
+      for (const p of parseComposerJson(content)) names.push(p.name);
+      return { names, ecosystem: "composer" };
+    }
+    if (/\.csproj$/i.test(fileName)) {
+      for (const p of parseCsProj(content)) names.push(p.name);
+      return { names, ecosystem: "dotnet" };
+    }
+    if (/^pom\.xml$/i.test(fileName)) {
+      for (const p of parsePomXml(content)) names.push(p.name);
+      return { names, ecosystem: "maven" };
+    }
+    if (/^build\.gradle(\.kts)?$/i.test(fileName)) {
+      for (const p of parseBuildGradle(content)) names.push(p.name);
+      return { names, ecosystem: "maven" };
+    }
+    if (/^mix\.exs$/i.test(fileName)) {
+      for (const p of parseMixExs(content)) names.push(p.name);
+      return { names, ecosystem: "elixir" };
+    }
+  } catch {
+    // unparseable — caller ignores
+  }
+  return { names, ecosystem: "any" };
 }
 
 /**
@@ -1678,6 +1764,42 @@ export function analyzeProject(signals: RepoSignals): ProjectProfile {
             confidence: "high",
           });
         }
+      }
+    }
+  }
+
+  // ── Pass 2b: registry-driven integration matching (STEP 1) ─────────────
+  // Each dependency name matched individually against integrationRegistry,
+  // never against a joined string. Additive over the legacy maps above.
+  for (const file of allFiles) {
+    if (!file.content) continue;
+    const fileName = file.path.split("/").pop() ?? file.path;
+    const depNames = extractRegistryDepNames(fileName, file.content);
+    if (depNames.names.length === 0) continue;
+    for (const dep of depNames.names) {
+      const hit = matchIntegration(dep, depNames.ecosystem);
+      if (!hit) continue;
+      const entry: DetectedTech = {
+        name: hit.label,
+        evidence: `${file.path} → ${dep}`,
+        confidence: "high",
+      };
+      if (hit.awsService && !hit.label.startsWith("AWS SDK") && !hit.label.includes("SDK")) {
+        if (["RDS", "DynamoDB", "DocumentDB", "ElastiCache", "OpenSearch", "MSK", "S3", "SES", "Cognito"].includes(hit.awsService)) {
+          if (["RDS", "DynamoDB", "DocumentDB", "ElastiCache", "OpenSearch"].includes(hit.awsService)) {
+            addUnique(databases, { ...entry, name: hit.awsService === "RDS" ? entry.name : entry.name }, seenDatabases);
+          } else {
+            addUnique(awsUsage, entry, seenAwsUsage);
+          }
+          continue;
+        }
+        addUnique(awsUsage, entry, seenAwsUsage);
+      } else if (hit.awsService) {
+        addUnique(awsUsage, entry, seenAwsUsage);
+      } else if (hit.hosting === "in-process" && hit.role === "data-store") {
+        addUnique(databases, entry, seenDatabases);
+      } else {
+        addUnique(frameworks, entry, seenFrameworks);
       }
     }
   }
