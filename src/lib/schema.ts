@@ -208,6 +208,22 @@ export type ComponentRelationship = z.infer<typeof ComponentRelationshipSchema>;
 // ---------------------------------------------------------------------------
 // Deployment Model per component (inferred, not templated)
 // ---------------------------------------------------------------------------
+export const ThirdPartyIntegrationSchema = z.object({
+  name: z.string().min(1).max(80),
+  purpose: z.string().min(1).max(200),
+  protocol: z.enum(["HTTPS", "SMTP", "SDK", "TCP"]),
+  category: z.enum(["database", "payment", "email", "auth", "storage", "analytics"]),
+});
+export type ThirdPartyIntegration = z.infer<typeof ThirdPartyIntegrationSchema>;
+
+export const ComputeTierEnum = z.enum(["ECS_FARGATE", "EC2", "LAMBDA", "NONE"]);
+export type ComputeTier = z.infer<typeof ComputeTierEnum>;
+
+export const DatabaseSchema = z.object({
+  multiAz: z.boolean().optional().default(false),
+});
+export type DatabaseConfig = z.infer<typeof DatabaseSchema>;
+
 export const DeploymentModelSchema = z.object({
   componentId: z.string(),
   public: z.boolean(),
@@ -217,6 +233,13 @@ export const DeploymentModelSchema = z.object({
   /** "detected" = explicit config found (e.g. k8s replicas); "recommended" = heuristic */
   source: z.enum(["detected", "recommended"]),
   notes: z.string().max(200).optional(),
+  availabilityZones: z.number().int().min(1).max(6).optional().default(1),
+  hasLoadBalancer: z.boolean().optional().default(false),
+  secretsManager: z.boolean().optional().default(false),
+  natGateway: z.boolean().optional().default(false),
+  thirdPartyIntegrations: z.array(ThirdPartyIntegrationSchema).optional().default([]),
+  computeTier: ComputeTierEnum.optional(),
+  database: DatabaseSchema.optional(),
 });
 export type DeploymentModel = z.infer<typeof DeploymentModelSchema>;
 
@@ -252,6 +275,12 @@ export const AwsServiceMappingSchema = z.object({
   /** If true, this mapping came from a pattern lookup table (sanity-check only) */
   fromPattern: z.boolean().default(false),
   category: z.enum(MAPPING_CATEGORIES).optional(),
+  /**
+   * When true, the node renders in the external column (third-party hosted,
+   * e.g. a document store backed by an external provider). Set only by the
+   * trait-gated policy, never by detection.
+   */
+  external: z.boolean().optional(),
 });
 export type AwsServiceMapping = z.infer<typeof AwsServiceMappingSchema>;
 

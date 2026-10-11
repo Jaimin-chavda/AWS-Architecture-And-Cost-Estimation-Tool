@@ -17,11 +17,15 @@ import {
   bucketHeight,
   validateContainmentHierarchy,
   validateDiagramLayout,
-  CONTAINER_PARENTS,
+  containerParent,
   normalizeForComparison,
   nodeStyle,
   FALLBACK_STYLE,
-  SERVICE_TIERS,
+  scopeOf,
+  CID,
+  azId,
+  pubId,
+  privId,
   routeEdges,
   GAP,
   CELL_W,
@@ -364,7 +368,7 @@ describe("Fix 8 — Evidence-justified edges (solid vs dashed)", () => {
 // 6. Structural checks (dynamic grid/subnet layout)
 // ---------------------------------------------------------------------------
 describe("generateDiagramXml - subnet container structure", () => {
-  it("static-site plan renders edge banner + VPC with data subnet containers", () => {
+  it("static-site plan renders edge banner + regional row, no VPC", () => {
     const plan: ServicePlan = {
       inputKind: "github_url",
       detectedPattern: "static-site",
@@ -387,14 +391,14 @@ describe("generateDiagramXml - subnet container structure", () => {
 
     const xml = generateDiagramXml(plan);
     assert.ok(xml.includes('id="container-edge"'), "should render the edge banner container");
-    assert.ok(xml.includes('id="container-vpc"'), "should render the VPC container");
-    assert.ok(xml.includes('id="container-data_subnet"'), "should render the data subnet");
+    assert.ok(xml.includes('id="container-regional"'), "should render the regional row outside the VPC");
+    assert.ok(!xml.includes('id="container-vpc"'), "static plan has no VPC content");
     assert.ok(xml.includes('parent="container-edge"'), "edge services nest in the edge banner");
-    assert.ok(xml.includes('parent="container-data_subnet"'), "data services nest in the data subnet");
+    assert.ok(xml.includes('parent="container-regional"'), "regional services nest outside the VPC");
     assert.ok(xml.includes('pageWidth="'), "page size must be emitted");
   });
 
-  it("serverless-api plan renders edge, compute subnet, and data subnet containers", () => {
+  it("serverless-api plan renders edge, AZ subnets, and regional row", () => {
     const plan: ServicePlan = {
       inputKind: "github_url",
       detectedPattern: "serverless-api",
@@ -414,9 +418,9 @@ describe("generateDiagramXml - subnet container structure", () => {
     };
 
     const xml = generateDiagramXml(plan);
-    assert.ok(xml.includes('id="container-compute_subnet"'), "should render the compute subnet");
-    assert.ok(xml.includes('parent="container-compute_subnet"'), "Lambda nests in the compute subnet");
-    assert.ok(xml.includes('parent="container-data_subnet"'), "DynamoDB nests in the data subnet");
+    assert.ok(xml.includes('id="container-private-1"'), "should render the private subnet");
+    assert.ok(xml.includes('parent="container-private-1"'), "Lambda nests in the private subnet");
+    assert.ok(xml.includes('parent="container-regional"'), "DynamoDB nests in the regional row");
     assert.ok(xml.includes('parent="container-edge"'), "APIGateway nests in the edge banner");
   });
 });
@@ -425,8 +429,8 @@ describe("generateDiagramXml - subnet container structure", () => {
 // Fix B: Dynamic container sizing (computeLayout)
 // ---------------------------------------------------------------------------
 describe("Fix B - dynamic container sizing", () => {
-  it("grows DATA_SUBNET to 4 rows for 14 data-tier services (cols=4) without overlapping EDGE_ROW or VPC_BOX", () => {
-    const dataIds = ["S3", "EBS", "EFS", "Glacier", "RDS", "Aurora", "DynamoDB", "ElastiCache", "Redshift", "DocumentDB", "SQS", "SNS", "EventBridge", "Kinesis"];
+  it("grows the data subnet to 4 rows for 14 data-scope services (cols=4) without overlapping edge or VPC", () => {
+    const dataIds = ["RDS", "Aurora", "ElastiCache", "Redshift", "DocumentDB", "EBS", "EFS", "FSx", "Neptune", "Keyspaces", "Timestream", "MemoryDB", "QLDB", "OpenSearch"];
     const services: AwsServiceMapping[] = dataIds.map((id, i) => ({
       componentId: `d${i}`,
       serviceId: id,
@@ -437,16 +441,16 @@ describe("Fix B - dynamic container sizing", () => {
     services.push({ componentId: "edge", serviceId: "Route53", confidence: "medium", evidence: "test", fromPattern: false });
 
     const layout = computeLayout(services);
-    const data = layout.containers.data_subnet!;
-    const edge = layout.containers.edge!;
-    const vpc = layout.containers.vpc!;
+    const data = layout.containers[CID.data]!;
+    const edge = layout.containers[CID.edge]!;
+    const vpc = layout.containers[CID.vpc]!;
 
     assert.ok(data, "data subnet should exist");
     assert.strictEqual(data.h, bucketHeight(4), "4 rows × CELL_H + label + gaps + pad");
     assert.ok(data.h >= 4 * 78, "must physically fit 4 rows of cells");
-    assert.ok(data.y >= edge.y + edge.h, "DATA_SUBNET must not overlap the edge row");
-    assert.ok(data.x >= vpc.x && data.y + data.h <= vpc.y + vpc.h, "DATA_SUBNET must sit inside VPC_BOX");
-    const dataNodes = Object.values(layout.nodes).filter((n) => n.parent === "container-data_subnet");
+    assert.ok(data.y >= edge.y + edge.h, "data subnet must not overlap the edge row");
+    assert.ok(data.x >= vpc.x && data.y + data.h <= vpc.y + vpc.h, "data subnet must sit inside the VPC");
+    const dataNodes = Object.values(layout.nodes).filter((n) => n.parent === CID.data);
     assert.strictEqual(dataNodes.length, 14);
   });
 
@@ -462,8 +466,9 @@ describe("Fix B - dynamic container sizing", () => {
     const layout = computeLayout(services);
 
     // These containers should be present for the given service set
-    const expectedPresent: (keyof typeof layout.containers)[] = [
-      "aws_cloud", "edge", "vpc", "az", "public_subnet", "compute_subnet", "data_subnet", "external",
+    // (Route53 edge, NATGateway public, EC2 private, S3/SES regional)
+    const expectedPresent: string[] = [
+      CID.aws, CID.edge, CID.vpc, azId(1), pubId(1), privId(1), CID.regional,
     ];
     for (const key of expectedPresent) {
       const rect = layout.containers[key];
@@ -472,12 +477,11 @@ describe("Fix B - dynamic container sizing", () => {
       assert.ok(rect!.x >= 0 && rect!.y >= 0, `${key} must have non-negative origin`);
     }
 
-    // cross_cutting should NOT exist (no cross-cutting services in this test data)
-    assert.strictEqual(layout.containers.cross_cutting, null, "cross_cutting should be null (no services)");
+    // external and data should NOT exist (no external/data services here)
+    assert.ok(!layout.containers[CID.external], "external should be absent (no external services)");
+    assert.ok(!layout.containers[CID.data], "data should be absent (no data-scope services)");
 
-    assert.strictEqual(layout.containers.data_subnet!.h, bucketHeight(1), "1 row → minimal height");
-    assert.strictEqual(layout.containers.compute_subnet!.h, bucketHeight(1));
-    assert.ok(layout.containers.external!.h >= layout.containers.vpc!.h, "external column stretches to VPC height");
+    assert.strictEqual(layout.containers[privId(1)]!.h, bucketHeight(1));
     assert.ok(layout.canvasW > 0 && layout.canvasH > 0);
   });
 
@@ -489,12 +493,12 @@ describe("Fix B - dynamic container sizing", () => {
     ];
 
     const layout = computeLayout(services);
-    assert.strictEqual(layout.containers.public_subnet, null, "empty public subnet → omitted");
-    assert.strictEqual(layout.containers.data_subnet, null, "empty data subnet → omitted");
-    assert.strictEqual(layout.containers.external, null, "empty external tier → omitted");
-    assert.ok(layout.containers.edge, "edge banner present");
-    assert.ok(layout.containers.vpc, "VPC present (compute subnet non-empty)");
-    assert.ok(layout.containers.compute_subnet, "compute subnet present");
+    assert.ok(!layout.containers[pubId(1)], "empty public subnet → omitted");
+    assert.ok(!layout.containers[CID.data], "empty data subnet → omitted");
+    assert.ok(!layout.containers[CID.external], "empty external tier → omitted");
+    assert.ok(layout.containers[CID.edge], "edge banner present");
+    assert.ok(layout.containers[CID.vpc], "VPC present (private subnet non-empty)");
+    assert.ok(layout.containers[privId(1)], "private subnet present");
   });
 });
 
@@ -509,15 +513,15 @@ describe("Fix B - dynamic container sizing", () => {
 // Cloud boxes look like they overlapped everything else.
 // ---------------------------------------------------------------------------
 describe("container width overflow", () => {
-  // Mirrors the private layout constants in diagram.ts. A node's visual
+  // Mirrors the layout constants in diagram.ts. A node's visual
   // footprint is a CELL_W × CELL_H cell (the 56px icon is centred in it and the
   // wrapped label is drawn below at full cell width), so the cell — not the
   // icon — is what has to stay inside the container.
   const CELL_W = 116;
   const CELL_H = 80;
   const EDGE_COLS = 6;
-  const GAP = 32;
-  const PAD = 20;
+  const GAP = 40;
+  const PAD = 24;
 
   /** Natural width layoutNodes() gives a bucket packed into `cols` columns. */
   const gridWidth = (cols: number) => cols * CELL_W + (cols - 1) * GAP + 2 * PAD;
@@ -534,12 +538,11 @@ describe("container width overflow", () => {
 
   /** Every node inside its container, every container inside the AWS Cloud. */
   function assertContained(layout: ReturnType<typeof computeLayout>, label: string) {
-    const cloud = layout.containers.aws_cloud;
+    const cloud = layout.containers[CID.aws];
     assert.ok(cloud, `${label}: AWS Cloud container must exist`);
 
     for (const [componentId, node] of Object.entries(layout.nodes)) {
-      const key = node.parent.replace("container-", "") as keyof typeof layout.containers;
-      const container = layout.containers[key];
+      const container = layout.containers[node.parent];
       assert.ok(container, `${label}: ${componentId} claims parent ${node.parent}, which has no rect`);
 
       const right = node.x + CELL_W;
@@ -570,17 +573,17 @@ describe("container width overflow", () => {
   }
 
   it("keeps a full edge banner inside itself and the AWS Cloud when the VPC is narrow", () => {
-    // The reported case: all 6 edge services over a single-node compute subnet.
-    // The narrow VPC drives the canvas-derived edge width (660px) below the
-    // 6-column grid the banner's nodes sit on (896px).
+    // The reported case: a full 6-service edge banner over a single-node
+    // private subnet. The banner width spans the content, never shrinking
+    // below its own grid.
     const services = mappings([
-      "Route53", "CloudFront", "APIGateway", "ALB", "Cognito", "WAF", // edge, 6 cols
-      "EC2",                                                          // lone compute node
+      "Route53", "CloudFront", "APIGateway", "WAF", "GlobalAccelerator", "Shield", // edge, 6 cols
+      "EC2",                                                                        // lone compute node
     ]);
 
     const layout = computeLayout(services);
-    const edge = layout.containers.edge!;
-    const vpc = layout.containers.vpc!;
+    const edge = layout.containers[CID.edge]!;
+    const vpc = layout.containers[CID.vpc]!;
 
     assert.ok(edge, "edge banner exists");
     assert.ok(
@@ -592,13 +595,13 @@ describe("container width overflow", () => {
   });
 
   it("never shrinks the edge banner below its nodes for any edge-count / VPC-width mix", () => {
-    const edgeIds = ["Route53", "CloudFront", "APIGateway", "ALB", "Cognito", "WAF"];
-    // Widening the VPC one subnet at a time changes the canvas-derived override.
+    const edgeIds = ["Route53", "CloudFront", "APIGateway", "WAF", "GlobalAccelerator", "Shield"];
+    // Widening the VPC one service at a time changes the content width.
     const vpcSets: [string, string[]][] = [
       ["compute only", ["EC2"]],
       ["public + compute", ["NATGateway", "EC2"]],
-      ["all three subnets", ["NATGateway", "EC2", "S3"]],
-      ["wide data subnet", ["NATGateway", "EC2", "S3", "RDS", "DynamoDB", "SQS", "SNS"]],
+      ["plus data", ["NATGateway", "EC2", "RDS"]],
+      ["wide data scope", ["NATGateway", "EC2", "RDS", "Aurora", "ElastiCache", "DocumentDB", "OpenSearch"]],
     ];
 
     for (let edgeCount = 1; edgeCount <= edgeIds.length; edgeCount++) {
@@ -606,44 +609,44 @@ describe("container width overflow", () => {
         const label = `${edgeCount} edge service(s) + ${vpcLabel}`;
         const layout = computeLayout(mappings([...edgeIds.slice(0, edgeCount), ...vpcIds]));
         assert.ok(
-          layout.containers.edge!.w >= gridWidth(EDGE_COLS),
-          `${label}: edge banner ${layout.containers.edge!.w} < grid ${gridWidth(EDGE_COLS)}`
+          layout.containers[CID.edge]!.w >= gridWidth(EDGE_COLS),
+          `${label}: edge banner ${layout.containers[CID.edge]!.w} < grid ${gridWidth(EDGE_COLS)}`
         );
         assertContained(layout, label);
       }
     }
   });
 
-  it("keeps cross-cutting nodes inside the container when it is aligned to the VPC", () => {
-    // Cross-cutting is stretched to the VPC width; it must never end up narrower
-    // than the 4-column grid its own nodes are placed on.
+  it("keeps regional nodes inside the row when it spans the content width", () => {
+    // Regional services sit outside the VPC; the row spans the content width
+    // and must never end up narrower than its own grid.
     const layout = computeLayout(
       mappings(["Route53", "EC2", "CloudWatch", "CloudFormation", "ECR", "CodePipeline"])
     );
-    const cross = layout.containers.cross_cutting!;
-    const vpc = layout.containers.vpc!;
+    const regional = layout.containers[CID.regional]!;
+    const vpc = layout.containers[CID.vpc]!;
 
-    assert.ok(cross, "cross-cutting container exists");
+    assert.ok(regional, "regional row exists");
     assert.ok(
-      cross.w >= gridWidth(4),
-      `cross-cutting must not shrink below its 4-column grid: ${cross.w} < ${gridWidth(4)}`
+      regional.w >= gridWidth(6),
+      `regional row must not shrink below its 6-column grid: ${regional.w} < ${gridWidth(6)}`
     );
-    assert.ok(cross.w >= vpc.w, "cross-cutting still spans at least the VPC width");
-    assertContained(layout, "cross-cutting aligned to VPC");
+    assert.ok(regional.w >= vpc.w, "regional row still spans at least the VPC width");
+    assertContained(layout, "regional row spanning content");
   });
 
-  it("holds containment across every tier populated at once", () => {
-    const layout = computeLayout(
-      mappings([
-        "Route53", "CloudFront", "APIGateway", "ALB", "Cognito", "WAF", // edge
-        "VPC", "NATGateway",                                            // public subnet
-        "EC2", "Lambda", "ECS",                                         // compute subnet
-        "S3", "RDS", "DynamoDB", "ElastiCache", "SQS", "SNS",           // data subnet
-        "CloudWatch", "CloudFormation",                                 // cross-cutting
-        "SES", "Amplify",                                               // external
-      ])
-    );
-    assertContained(layout, "all tiers populated");
+  it("holds containment across every scope populated at once", () => {
+    const layout = computeLayout([
+      ...mappings([
+        "Route53", "CloudFront", "APIGateway", "WAF", // edge
+        "NATGateway",                                 // public subnet
+        "EC2", "Lambda",                              // private subnet
+        "RDS", "ElastiCache",                         // data subnet
+        "SQS", "SES", "Cognito", "ECR",               // regional row
+      ]),
+      { componentId: "x1", serviceId: "DocumentDB", confidence: "medium", evidence: "test", fromPattern: false, external: true },
+    ]);
+    assertContained(layout, "all scopes populated");
   });
 });
 
@@ -669,43 +672,43 @@ describe("Fix 1 — Containment Hierarchy", () => {
     });
     const xml = generateDiagramXml(plan);
 
-    // Subnets should be children of AZ
-    assert.ok(xml.includes('id="container-compute_subnet"'), "compute subnet container present");
-    assert.ok(xml.includes('id="container-az"'), "AZ container present");
+    // Subnets should be children of AZ-1
+    assert.ok(xml.includes('id="container-private-1"'), "private subnet container present");
+    assert.ok(xml.includes('id="container-az-1"'), "AZ container present");
     assert.ok(xml.includes('id="container-vpc"'), "VPC container present");
     assert.ok(xml.includes('id="container-aws_cloud"'), "AWS Cloud container present");
 
     // Check parent chain in XML
-    assert.match(xml, /id="container-compute_subnet"[^>]*parent="container-az"/, "compute_subnet parent is AZ");
-    assert.match(xml, /id="container-data_subnet"[^>]*parent="container-az"/, "data_subnet parent is AZ");
-    assert.match(xml, /id="container-az"[^>]*parent="container-vpc"/, "AZ parent is VPC");
+    assert.match(xml, /id="container-private-1"[^>]*parent="container-az-1"/, "private subnet parent is AZ-1");
+    assert.match(xml, /id="container-regional"[^>]*parent="container-aws_cloud"/, "regional parent is AWS Cloud");
+    assert.match(xml, /id="container-az-1"[^>]*parent="container-vpc"/, "AZ parent is VPC");
     assert.match(xml, /id="container-vpc"[^>]*parent="container-aws_cloud"/, "VPC parent is AWS Cloud");
     assert.match(xml, /id="container-aws_cloud"[^>]*parent="1"/, "AWS Cloud parent is root layer");
   });
 
-  it("AZ container always emitted when subnets exist", () => {
+  it("AZ container always emitted when VPC subnets exist", () => {
     const services: AwsServiceMapping[] = [
       { componentId: "a", serviceId: "EC2", confidence: "medium", evidence: "test", fromPattern: false },
       { componentId: "b", serviceId: "S3", confidence: "medium", evidence: "test", fromPattern: false },
     ];
     const layout = computeLayout(services);
-    assert.ok(layout.containers.az, "AZ container must exist when subnets exist");
-    assert.ok(layout.containers.vpc, "VPC must exist when subnets exist");
-    assert.ok(layout.containers.aws_cloud, "AWS Cloud must exist");
+    assert.ok(layout.containers[azId(1)], "AZ container must exist when subnets exist");
+    assert.ok(layout.containers[CID.vpc], "VPC must exist when subnets exist");
+    assert.ok(layout.containers[CID.aws], "AWS Cloud must exist");
   });
 
   it("validateContainmentHierarchy throws when subnet has no AZ", () => {
     assert.throws(
       () => validateContainmentHierarchy({
-        aws_cloud: { x: 0, y: 0, w: 100, h: 100 },
-        edge: null,
-        vpc: { x: 10, y: 10, w: 80, h: 80 },
-        az: null,  // Missing!
-        public_subnet: { x: 20, y: 20, w: 60, h: 60 },
-        compute_subnet: null,
-        data_subnet: null,
-        cross_cutting: null,
-        external: null,
+        [CID.aws]: { x: 0, y: 0, w: 100, h: 100 },
+        [CID.edge]: null,
+        [CID.vpc]: { x: 10, y: 10, w: 80, h: 80 },
+        [azId(1)]: null,  // Missing!
+        [pubId(1)]: { x: 20, y: 20, w: 60, h: 60 },
+        [privId(1)]: null,
+        [CID.data]: null,
+        [CID.regional]: null,
+        [CID.external]: null,
       }),
       /AZ ancestor/,
       "should throw when subnet exists without AZ"
@@ -715,47 +718,48 @@ describe("Fix 1 — Containment Hierarchy", () => {
   it("validateContainmentHierarchy throws when VPC has no AWS Cloud", () => {
     assert.throws(
       () => validateContainmentHierarchy({
-        aws_cloud: null,  // Missing!
-        edge: null,
-        vpc: { x: 10, y: 10, w: 80, h: 80 },
-        az: { x: 15, y: 15, w: 70, h: 70 },
-        public_subnet: null,
-        compute_subnet: null,
-        data_subnet: null,
-        cross_cutting: null,
-        external: null,
+        [CID.aws]: null,  // Missing!
+        [CID.edge]: null,
+        [CID.vpc]: { x: 10, y: 10, w: 80, h: 80 },
+        [azId(1)]: { x: 15, y: 15, w: 70, h: 70 },
+        [pubId(1)]: null,
+        [privId(1)]: null,
+        [CID.data]: null,
+        [CID.regional]: null,
+        [CID.external]: null,
       }),
       /AWS Cloud ancestor/,
       "should throw when VPC exists without AWS Cloud"
     );
   });
 
-  it("validateContainmentHierarchy throws when cross-cutting has no AWS Cloud", () => {
+  it("validateContainmentHierarchy throws when regional row has no AWS Cloud", () => {
     assert.throws(
       () => validateContainmentHierarchy({
-        aws_cloud: null,  // Missing!
-        edge: null,
-        vpc: null,
-        az: null,
-        public_subnet: null,
-        compute_subnet: null,
-        data_subnet: null,
-        cross_cutting: { x: 0, y: 0, w: 50, h: 50 },
-        external: null,
+        [CID.aws]: null,  // Missing!
+        [CID.edge]: null,
+        [CID.vpc]: null,
+        [azId(1)]: null,
+        [pubId(1)]: null,
+        [privId(1)]: null,
+        [CID.data]: null,
+        [CID.regional]: { x: 0, y: 0, w: 50, h: 50 },
+        [CID.external]: null,
       }),
       /AWS Cloud ancestor/,
-      "should throw when cross-cutting exists without AWS Cloud"
+      "should throw when regional row exists without AWS Cloud"
     );
   });
 
-  it("CONTAINER_PARENTS defines subnet → AZ → VPC → AWS Cloud chain", () => {
-    assert.strictEqual(CONTAINER_PARENTS.public_subnet, "container-az");
-    assert.strictEqual(CONTAINER_PARENTS.compute_subnet, "container-az");
-    assert.strictEqual(CONTAINER_PARENTS.data_subnet, "container-az");
-    assert.strictEqual(CONTAINER_PARENTS.az, "container-vpc");
-    assert.strictEqual(CONTAINER_PARENTS.vpc, "container-aws_cloud");
-    assert.strictEqual(CONTAINER_PARENTS.aws_cloud, "1");
-    assert.strictEqual(CONTAINER_PARENTS.cross_cutting, "container-aws_cloud");
+  it("containerParent defines subnet → AZ → VPC → AWS Cloud chain", () => {
+    assert.strictEqual(containerParent(pubId(1)), azId(1));
+    assert.strictEqual(containerParent(privId(2)), azId(2));
+    assert.strictEqual(containerParent(CID.data), CID.vpc);
+    assert.strictEqual(containerParent(azId(1)), CID.vpc);
+    assert.strictEqual(containerParent(CID.vpc), CID.aws);
+    assert.strictEqual(containerParent(CID.aws), "1");
+    assert.strictEqual(containerParent(CID.regional), CID.aws);
+    assert.strictEqual(containerParent(CID.external), CID.aws);
   });
 });
 
@@ -926,38 +930,36 @@ describe("Fix 5 — Flow Numbering (Edge-Child Badges)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Fix 6: Cross-Cutting Service Placement
+// Fix 6: Regional Service Placement (outside the VPC)
 // ---------------------------------------------------------------------------
-describe("Fix 6 — Cross-Cutting Service Placement", () => {
-  it("assigns CloudWatch, CloudFormation, ECR, CodePipeline to cross_cutting tier", () => {
-    assert.strictEqual(SERVICE_TIERS.CloudWatch, "cross_cutting");
-    assert.strictEqual(SERVICE_TIERS.CloudFormation, "cross_cutting");
-    assert.strictEqual(SERVICE_TIERS.ECR, "cross_cutting");
-    assert.strictEqual(SERVICE_TIERS.CodePipeline, "cross_cutting");
+describe("Fix 6 — Regional Service Placement", () => {
+  it("assigns CloudWatch, SecretsManager, ECR, SES to the regional scope", () => {
+    assert.strictEqual(scopeOf("CloudWatch"), "regional");
+    assert.strictEqual(scopeOf("SecretsManager"), "regional");
+    assert.strictEqual(scopeOf("ECR"), "regional");
+    assert.strictEqual(scopeOf("SES"), "regional");
   });
 
-  it("places cross-cutting container below VPC with full VPC width", () => {
+  it("places the regional row outside the VPC, below the edge banner", () => {
     const services: AwsServiceMapping[] = [
       { componentId: "a", serviceId: "EC2", confidence: "medium", evidence: "test", fromPattern: false },
-      { componentId: "b", serviceId: "S3", confidence: "medium", evidence: "test", fromPattern: false },
+      { componentId: "b", serviceId: "RDS", confidence: "medium", evidence: "test", fromPattern: false },
       { componentId: "c", serviceId: "CloudWatch", confidence: "medium", evidence: "test", fromPattern: false },
     ];
     const layout = computeLayout(services);
-    const vpc = layout.containers.vpc!;
-    const cross = layout.containers.cross_cutting!;
+    const vpc = layout.containers[CID.vpc]!;
+    const regional = layout.containers[CID.regional]!;
 
     assert.ok(vpc, "VPC container exists");
-    assert.ok(cross, "cross-cutting container exists");
-    assert.ok(cross.y >= vpc.y + vpc.h, "cross-cutting container is placed below VPC");
-    assert.strictEqual(cross.w, vpc.w, "cross-cutting container spans full VPC width");
-    assert.strictEqual(cross.x, vpc.x, "cross-cutting container aligns with VPC left edge");
+    assert.ok(regional, "regional row exists");
+    assert.ok(regional.y + regional.h <= vpc.y, "regional row sits above the VPC, outside it");
 
     const cwNode = layout.nodes["c"];
     assert.ok(cwNode, "CloudWatch node exists");
-    assert.strictEqual(cwNode.parent, "container-cross_cutting", "CloudWatch parent is container-cross_cutting");
+    assert.strictEqual(cwNode.parent, CID.regional, "CloudWatch parent is the regional row");
   });
 
-  it("renders cross-cutting container inside AWS Cloud in XML", () => {
+  it("renders the regional row inside AWS Cloud in XML", () => {
     const plan = makePlan({
       components: [
         { id: "c1", type: "backend", technology: "EC2", evidence: ["test"], confidence: "high", status: "detected" },
@@ -969,9 +971,9 @@ describe("Fix 6 — Cross-Cutting Service Placement", () => {
       ],
     });
     const xml = generateDiagramXml(plan);
-    assert.ok(xml.includes('id="container-cross_cutting"'), "cross-cutting container rendered");
-    assert.match(xml, /id="container-cross_cutting"[^>]*parent="container-aws_cloud"/, "cross_cutting parent is AWS Cloud");
-    assert.match(xml, /serviceId="CloudWatch"[^>]*parent="container-cross_cutting"/, "CloudWatch node parent is cross_cutting");
+    assert.ok(xml.includes('id="container-regional"'), "regional row rendered");
+    assert.match(xml, /id="container-regional"[^>]*parent="container-aws_cloud"/, "regional parent is AWS Cloud");
+    assert.match(xml, /serviceId="CloudWatch"[^>]*parent="container-regional"/, "CloudWatch node parent is regional");
   });
 });
 
@@ -1003,22 +1005,23 @@ describe("Fix 7 — validateDiagramLayout Invariant Checks", () => {
   it("detects when two nodes collide (AABB intersection)", () => {
     const layout = {
       containers: {
-        aws_cloud: { x: 0, y: 0, w: 600, h: 600 },
-        edge: null,
-        vpc: { x: 20, y: 20, w: 560, h: 560 },
-        az: { x: 40, y: 40, w: 520, h: 520 },
-        public_subnet: null,
-        compute_subnet: { x: 60, y: 60, w: 480, h: 480 },
-        data_subnet: null,
-        cross_cutting: null,
-        external: null,
+        [CID.aws]: { x: 0, y: 0, w: 600, h: 600 },
+        [CID.edge]: null,
+        [CID.vpc]: { x: 20, y: 20, w: 560, h: 560 },
+        [azId(1)]: { x: 40, y: 40, w: 520, h: 520 },
+        [pubId(1)]: null,
+        [privId(1)]: { x: 60, y: 60, w: 480, h: 480 },
+        [CID.data]: null,
+        [CID.regional]: null,
+        [CID.external]: null,
       },
       nodes: {
-        c1: { x: 100, y: 120, parent: "container-compute_subnet", serviceId: "ECS" },
-        c2: { x: 120, y: 130, parent: "container-compute_subnet", serviceId: "Lambda" }, // Overlaps c1!
+        c1: { x: 100, y: 120, parent: privId(1), serviceId: "ECS", componentId: "c1" },
+        c2: { x: 120, y: 130, parent: privId(1), serviceId: "Lambda", componentId: "c2" }, // Overlaps c1!
       },
       canvasW: 800,
       canvasH: 800,
+      azCount: 1,
     };
     const res = validateDiagramLayout(layout);
     assert.strictEqual(res.valid, false, "should detect colliding nodes");
@@ -1028,43 +1031,45 @@ describe("Fix 7 — validateDiagramLayout Invariant Checks", () => {
   it("detects when VPC overlaps Edge container vertically", () => {
     const layout = {
       containers: {
-        aws_cloud: { x: 0, y: 0, w: 600, h: 600 },
-        edge: { x: 20, y: 20, w: 560, h: 100 }, // bottom = 120
-        vpc: { x: 20, y: 100, w: 560, h: 400 }, // top = 100, overlaps Edge by 20px!
-        az: null,
-        public_subnet: null,
-        compute_subnet: null,
-        data_subnet: null,
-        cross_cutting: null,
-        external: null,
+        [CID.aws]: { x: 0, y: 0, w: 600, h: 600 },
+        [CID.edge]: { x: 20, y: 20, w: 560, h: 100 }, // bottom = 120
+        [CID.vpc]: { x: 20, y: 100, w: 560, h: 400 }, // top = 100, overlaps Edge by 20px!
+        [azId(1)]: null,
+        [pubId(1)]: null,
+        [privId(1)]: null,
+        [CID.data]: null,
+        [CID.regional]: null,
+        [CID.external]: null,
       },
       nodes: {},
       canvasW: 800,
       canvasH: 800,
+      azCount: 0,
     };
     const res = validateDiagramLayout(layout);
-    assert.strictEqual(res.valid, false, "should detect VPC/Edge vertical overlap");
-    assert.ok(res.errors.some((e) => e.includes("overlaps Edge vertically")));
+    assert.strictEqual(res.valid, false, "should detect VPC/Edge overlap");
+    assert.ok(res.errors.some((e) => e.includes("overlap")));
   });
 
   it("detects when a node hangs outside its parent container bounds", () => {
     const layout = {
       containers: {
-        aws_cloud: { x: 0, y: 0, w: 600, h: 600 },
-        edge: null,
-        vpc: { x: 20, y: 20, w: 560, h: 560 },
-        az: { x: 40, y: 40, w: 520, h: 520 },
-        public_subnet: null,
-        compute_subnet: { x: 60, y: 60, w: 200, h: 160 },
-        data_subnet: null,
-        cross_cutting: null,
-        external: null,
+        [CID.aws]: { x: 0, y: 0, w: 600, h: 600 },
+        [CID.edge]: null,
+        [CID.vpc]: { x: 20, y: 20, w: 560, h: 560 },
+        [azId(1)]: { x: 40, y: 40, w: 520, h: 520 },
+        [pubId(1)]: null,
+        [privId(1)]: { x: 60, y: 60, w: 200, h: 160 },
+        [CID.data]: null,
+        [CID.regional]: null,
+        [CID.external]: null,
       },
       nodes: {
-        c1: { x: 300, y: 100, parent: "container-compute_subnet", serviceId: "ECS" }, // x=300 hangs far outside w=200!
+        c1: { x: 300, y: 100, parent: privId(1), serviceId: "ECS", componentId: "c1" }, // x=300 hangs far outside w=200!
       },
       canvasW: 800,
       canvasH: 800,
+      azCount: 1,
     };
     const res = validateDiagramLayout(layout);
     assert.strictEqual(res.valid, false, "should detect node exceeding container bounds");
@@ -1316,11 +1321,11 @@ describe("Stage 2 — Semantic Integrity", () => {
       const { nodes } = buildDiagramElements(plan);
       const nodeByService = new Map(nodes.map((n) => [n.serviceId, n]));
 
-      assert.strictEqual(nodeByService.get("Route53")?.parent, "container-edge");
-      assert.strictEqual(nodeByService.get("NATGateway")?.parent, "container-public_subnet");
-      assert.strictEqual(nodeByService.get("ECS")?.parent, "container-compute_subnet");
-      assert.strictEqual(nodeByService.get("RDS")?.parent, "container-data_subnet");
-      assert.strictEqual(nodeByService.get("CloudWatch")?.parent, "container-cross_cutting");
+      assert.strictEqual(nodeByService.get("Route53")?.parent, CID.edge);
+      assert.strictEqual(nodeByService.get("NATGateway")?.parent, pubId(1));
+      assert.strictEqual(nodeByService.get("ECS")?.parent, privId(1));
+      assert.strictEqual(nodeByService.get("RDS")?.parent, CID.data);
+      assert.strictEqual(nodeByService.get("CloudWatch")?.parent, CID.regional);
     });
 
     it("detects containment semantic mismatch when a node is in the wrong container", () => {
@@ -1332,14 +1337,14 @@ describe("Stage 2 — Semantic Integrity", () => {
 
       // RDS incorrectly placed in public subnet
       const misplacedNodes = [
-        { id: "node-2", componentId: "rds-1", serviceId: "RDS" as const, parent: "container-public_subnet" },
+        { id: "node-2", componentId: "rds-1", serviceId: "RDS" as const, parent: pubId(1) },
       ];
 
       const res = validateDiagramSemantics(plan, misplacedNodes, []);
       assert.strictEqual(res.valid, false);
       assert.ok(
         res.errors.some((e) =>
-          e.includes('Containment semantic mismatch: service "RDS" is in "container-public_subnet", expected "container-data_subnet"')
+          e.includes(`Containment semantic mismatch: service "RDS" is in "${pubId(1)}"`)
         )
       );
     });
@@ -1718,14 +1723,14 @@ describe("Stage 2 — Semantic Integrity", () => {
       assert.strictEqual(res.valid, true, "Plan semantics must be 100% valid");
       assert.deepStrictEqual(res.errors, [], "Must have 0 semantic validation errors");
 
-      // Verify containment tiers
+      // Verify containment scopes
       const parentByService = new Map(nodes.map((n) => [n.serviceId, n.parent]));
-      assert.strictEqual(parentByService.get("Lambda"), "container-compute_subnet");
-      assert.strictEqual(parentByService.get("EKS"), "container-compute_subnet");
-      assert.strictEqual(parentByService.get("ECR"), "container-cross_cutting");
-      assert.strictEqual(parentByService.get("S3"), "container-data_subnet");
-      assert.strictEqual(parentByService.get("RDS"), "container-data_subnet");
-      assert.strictEqual(parentByService.get("CloudWatch"), "container-cross_cutting");
+      assert.strictEqual(parentByService.get("Lambda"), privId(1));
+      assert.strictEqual(parentByService.get("EKS"), privId(1));
+      assert.strictEqual(parentByService.get("ECR"), CID.regional);
+      assert.strictEqual(parentByService.get("S3"), CID.regional);
+      assert.strictEqual(parentByService.get("RDS"), CID.data);
+      assert.strictEqual(parentByService.get("CloudWatch"), CID.regional);
     });
   });
 });
