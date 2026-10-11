@@ -916,6 +916,25 @@ export function mapArchitectureModelToServicePlan(
   // 8. Detect pattern for UI label (never constrains output)
   const detectedPattern = detectPatternFromComponents(model.components);
 
+  // 8b. Derive dbEngine for RDS cost labelling (postgres/mysql/none)
+  // Use component technology + details text plus RDS/Aurora mapping evidence
+  function deriveDbEngine(): "postgres" | "mysql" | "none" {
+    const textParts: string[] = [];
+    for (const c of model.components) {
+      textParts.push(c.technology, c.details ?? "");
+    }
+    for (const m of finalAwsMappings) {
+      if (m.serviceId === "RDS" || m.serviceId === "Aurora") {
+        textParts.push(m.evidence ?? "");
+      }
+    }
+    const text = textParts.join(" ").toLowerCase();
+    if (/postgres|postgresql/.test(text)) return "postgres";
+    if (/mysql|mariadb/.test(text)) return "mysql";
+    return "none";
+  }
+  const dbEngine = deriveDbEngine();
+
   // 9. Build ServicePlan
   const plan = {
     inputKind: ctx.inputKind,
@@ -928,6 +947,7 @@ export function mapArchitectureModelToServicePlan(
       grounding: ctx.grounding,
       truncated: ctx.truncated,
       parseErrors: ctx.parseErrors,
+      dbEngine,
     },
   };
 

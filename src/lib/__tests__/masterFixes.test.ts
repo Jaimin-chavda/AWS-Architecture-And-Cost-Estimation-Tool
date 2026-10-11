@@ -17,9 +17,10 @@ import {
 } from "../repoAnalyzer.ts";
 import { runRuleEngine } from "../ruleEngine.ts";
 import type { RuleInput } from "../ruleEngine.ts";
-import { LIVE_PRICE_CAPS } from "../prices.ts";
+import { FIXED_COST_SERVICES } from "../SERVICE_DEFAULTS.ts";
 import { getServiceDefaults } from "../SERVICE_DEFAULTS.ts";
-import { computeCostRows } from "../cost.ts";
+import { computeCostRows, scaleCostRows } from "../cost.ts";
+import { LIVE_PRICE_CAPS } from "../prices.ts";
 import type { ServicePlan } from "../schema.ts";
 
 function makeInput(overrides: Partial<RuleInput> = {}): RuleInput {
@@ -139,7 +140,11 @@ describe("Fix 5 — pricing", () => {
     const d = getServiceDefaults("RDS", "postgres");
     assert.ok(d?.annotation.includes("PostgreSQL"));
     const d2 = getServiceDefaults("RDS", "none");
-    assert.ok(d2?.annotation.includes("MySQL"));
+    // "none" should NOT contain MySQL (neutral label)
+    assert.ok(!d2?.annotation.includes("MySQL"), `none should not mention MySQL: ${d2?.annotation}`);
+    // "mysql" should contain MySQL
+    const d3 = getServiceDefaults("RDS", "mysql");
+    assert.ok(d3?.annotation.includes("MySQL"), `mysql should mention MySQL: ${d3?.annotation}`);
   });
 
   it("zeroes sub-50k Cognito and dedupes ECS/Fargate rows", async () => {
@@ -197,5 +202,94 @@ describe("Fix 3 — engine helpers", () => {
     const rds = plan.awsMappings.find((m) => m.serviceId === "RDS");
     // ORM-implied default may still suggest Postgres, but never from SQLite evidence.
     if (rds) assert.ok(!/sqlite/i.test(rds.evidence), "SQLite must not back RDS evidence");
+  });
+});
+
+describe("Fixed cost services — do not scale with user count", () => {
+  it("FIXED_COST_SERVICES contains expected always-on services", () => {
+    const expected = [
+      "EC2", "ECS", "Fargate", "EKS", "Lightsail",
+      "RDS", "Aurora", "ElastiCache", "Redshift", "DocumentDB", "OpenSearch",
+      "ALB", "NATGateway", "VPC", "Route53", "Kinesis", "MSK",
+      "WAF", "SecretsManager", "CodePipeline", "CloudFormation",
+    ];
+    for (const svc of expected) {
+      assert.ok(FIXED_COST_SERVICES.has(svc), `${svc} should be in FIXED_COST_SERVICES`);
+    }
+  });
+
+  it("computeCostRows at 1k vs 10k users: RDS and ALB identical, S3 1/10", async () => {
+    const plan = {
+      inputKind: "github_url",
+      components: [],
+      relationships: [],
+      deploymentModel: [],
+      awsMappings: [
+        { componentId: "rds", serviceId: "RDS", confidence: "high", evidence: "x", fromPattern: false },
+        { componentId: "alb", serviceId: "ALB", confidence: "high", evidence: "x", fromPattern: false },
+        { componentId: "s3", serviceId: "S3", confidence: "high", evidence: "x", fromPattern: false },
+      ],
+      detectedPattern: "generic",
+      metadata: { grounding: "repoFiles", truncated: false, parseErrors: [], dbEngine: "none" },
+      warnings: [],
+    } as unknown as ServicePlan;
+
+    const res1k = await computeCostRows(plan, "us-east-1", 1_000);
+    const res10k = await computeCostRows(plan, "us-east-1", 10_000);
+
+    const rds1k = res1k.rows.find((r) => r.serviceId === "RDS");
+    const rds10k = res10k.rows.find((r) => r.serviceId === "RDS");
+    const alb1k = res1k.rows.find((r) => r.serviceId === "ALB");
+    const alb10k = res10k.rows.find((r) => r.serviceId === "ALB");
+    const s3_1k = res1k.rows.find((r) => r.serviceId === "S3");
+    const s3_10k = res10k.rows.find((r) => r.serviceId === "S3");
+
+    assert.ok(rds1k && rds10k, "RDS rows present");
+    assert.ok(alb1k && alb10k, "ALB rows present");
+    assert.ok(s3_1k && s3_10k, "S3 rows present");
+
+    // RDS and ALB are fixed — monthlyUsd should be identical
+    assert.strictEqual(rds1k.monthlyUsd, rds10k.monthlyUsd, "RDS monthlyUsd must not scale with user count");
+    assert.strictEqual(alb1k.monthlyUsd, alb10k.monthlyUsd, "ALB monthlyUsd must not scale with user count");
+
+    // S3 scales — 1k should be 1/10 of 10k
+    assert.ok(Math.abs(s3_1k.monthlyUsd - s3_10k.monthlyUsd / 10) < 0.01,
+      `S3 at 1k (${s3_1k.monthlyUsd}) should be 1/10 of 10k (${s3_10k.monthlyUsd})`);
+  });
+
+  it("scaleCostRows(base10k, 1000) keeps RDS fixed and reduces S3", async () => {
+    const plan = {
+      inputKind: "github_url",
+      components: [],
+      relationships: [],
+      deploymentModel: [],
+      awsMappings: [
+        { componentId: "rds", serviceId: "RDS", confidence: "high", evidence: "x", fromPattern: false },
+        { componentId: "s3", serviceId: "S3", confidence: "high", evidence: "x", fromPattern: false },
+      ],
+      detectedPattern: "generic",
+      metadata: { grounding: "repoFiles", truncated: false, parseErrors: [], dbEngine: "none" },
+      warnings: [],
+    } as unknown as ServicePlan;
+
+    const base10k = await computeCostRows(plan, "us-east-1", 10_000);
+    const scaled1k = scaleCostRows(base10k, 1_000);
+
+    const rdsBase = base10k.rows.find((r) => r.serviceId === "RDS");
+    const rdsScaled = scaled1k.rows.find((r) => r.serviceId === "RDS");
+    const s3Base = base10k.rows.find((r) => r.serviceId === "S3");
+    const s3Scaled = scaled1k.rows.find((r) => r.serviceId === "S3");
+
+    assert.ok(rdsBase && rdsScaled && s3Base && s3Scaled);
+
+    // RDS fixed — identical
+    assert.strictEqual(rdsScaled.monthlyUsd, rdsBase.monthlyUsd, "scaleCostRows: RDS must stay fixed");
+    assert.strictEqual(rdsScaled.quantity, rdsBase.quantity, "scaleCostRows: RDS quantity must stay fixed");
+    assert.strictEqual(rdsScaled.fixed, true, "scaleCostRows: RDS row must have fixed=true");
+
+    // S3 scales — 1/10
+    assert.ok(Math.abs(s3Scaled.monthlyUsd - s3Base.monthlyUsd / 10) < 0.01,
+      `scaleCostRows: S3 at 1k (${s3Scaled.monthlyUsd}) should be 1/10 of 10k (${s3Base.monthlyUsd})`);
+    assert.strictEqual(s3Scaled.fixed, false, "scaleCostRows: S3 row must not have fixed=true");
   });
 });

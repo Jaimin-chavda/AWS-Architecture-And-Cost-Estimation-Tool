@@ -354,6 +354,17 @@ export const SERVICE_DEFAULTS: Record<string, ServiceDefault> = {
 /** Base user count for the above quantities (used for scaling on the client). */
 export const BASE_USER_COUNT = 10_000;
 
+/**
+ * Always-on (hourly/fixed-capacity) services whose cost does NOT scale with user count.
+ * These represent provisioned capacity that runs 24/7 regardless of traffic.
+ */
+export const FIXED_COST_SERVICES: ReadonlySet<string> = new Set([
+  "EC2", "ECS", "Fargate", "EKS", "Lightsail",
+  "RDS", "Aurora", "ElastiCache", "Redshift", "DocumentDB", "OpenSearch",
+  "ALB", "NATGateway", "VPC", "Route53", "Kinesis", "MSK",
+  "WAF", "SecretsManager", "CodePipeline", "CloudFormation",
+]);
+
 export type RdsEngineLabel = "postgres" | "mysql" | "none";
 
 /**
@@ -366,11 +377,26 @@ export function getServiceDefaults(
 ): ServiceDefault | undefined {
   const base = SERVICE_DEFAULTS[serviceId];
   if (!base) return undefined;
-  if (serviceId === "RDS" && dbEngine === "postgres") {
+  if (serviceId === "RDS") {
+    if (dbEngine === "postgres") {
+      return {
+        ...base,
+        unitLabel: "instance-hours/mo (db.t3.micro, PostgreSQL)",
+        annotation: "1 db.t3.micro PostgreSQL instance × 720 h; source: RDS pricing page",
+      };
+    }
+    if (dbEngine === "mysql") {
+      return {
+        ...base,
+        unitLabel: "instance-hours/mo (db.t3.micro, MySQL)",
+        annotation: "1 db.t3.micro MySQL instance × 720 h; source: RDS pricing page",
+      };
+    }
+    // dbEngine === "none": neutral label without assuming MySQL
     return {
       ...base,
-      unitLabel: "instance-hours/mo (db.t3.micro, PostgreSQL)",
-      annotation: "1 db.t3.micro PostgreSQL instance × 720 h; source: RDS pricing page",
+      unitLabel: "instance-hours/mo (db.t3.micro)",
+      annotation: "1 db.t3.micro instance × 720 h; source: RDS pricing page",
     };
   }
   return base;

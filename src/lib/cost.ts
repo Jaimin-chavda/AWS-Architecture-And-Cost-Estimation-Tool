@@ -21,7 +21,7 @@
 import type { ServicePlan, AwsServiceMapping } from "./schema.ts";
 import { getUnitPrice, getPriceSourceMode } from "./prices.ts";
 import type { PriceSourceMode } from "./prices.ts";
-import { getServiceDefaults, BASE_USER_COUNT } from "./SERVICE_DEFAULTS.ts";
+import { getServiceDefaults, BASE_USER_COUNT, FIXED_COST_SERVICES } from "./SERVICE_DEFAULTS.ts";
 import type { RdsEngineLabel } from "./SERVICE_DEFAULTS.ts";
 
 /** Cognito User Pools free tier: first 50k MAU free. */
@@ -40,6 +40,7 @@ export interface CostRow {
   monthlyUsd: number;
   priceSource: "live" | "fallback";
   annotation: string;
+  fixed?: boolean;
 }
 
 export interface UnpricedRow {
@@ -110,7 +111,8 @@ export async function computeCostRows(
       priceSource
     );
 
-    const scaledQuantity = defaults.baseQuantity * userScaleFactor;
+    const isFixed = FIXED_COST_SERVICES.has(mapping.serviceId);
+    const scaledQuantity = isFixed ? defaults.baseQuantity : defaults.baseQuantity * userScaleFactor;
     // Cognito bills only MAU past the 50k free tier.
     const billableQuantity =
       mapping.serviceId === "Cognito"
@@ -127,6 +129,7 @@ export async function computeCostRows(
       monthlyUsd,
       priceSource: source,
       annotation: defaults.annotation,
+      fixed: isFixed,
     };
 
     return row;
@@ -170,11 +173,14 @@ export async function computeCostRows(
 export function scaleCostRows(original: CostResult, newCount: number): CostResult {
   const ratio = Math.max(newCount, 1) / Math.max(original.userCount, 1);
 
-  const rows: CostRow[] = original.rows.map((r) => ({
-    ...r,
-    quantity: r.quantity * ratio,
-    monthlyUsd: r.monthlyUsd * ratio,
-  }));
+  const rows: CostRow[] = original.rows.map((r) => {
+    if (r.fixed) return r;
+    return {
+      ...r,
+      quantity: r.quantity * ratio,
+      monthlyUsd: r.monthlyUsd * ratio,
+    };
+  });
 
   const totalMonthlyUsd = rows.reduce((sum, r) => sum + r.monthlyUsd, 0);
 
