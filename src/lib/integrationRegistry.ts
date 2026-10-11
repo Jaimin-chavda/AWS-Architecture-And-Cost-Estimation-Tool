@@ -159,6 +159,22 @@ export function matchAllIntegrations(
   return out;
 }
 
+/**
+ * Matches a free-form technology label (component technology, database
+ * name) against the registry: full label first, then individual tokens.
+ * Lets mapping layers resolve hosting/role without naming technologies.
+ */
+export function matchTechLabel(technology: string): MatchedIntegration | null {
+  const direct = matchIntegration(technology);
+  if (direct) return direct;
+  const tokens = technology.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length >= 4);
+  for (const tok of tokens) {
+    const hit = matchIntegration(tok);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 export interface ExternalFallback {
   /** Display name, e.g. "External: api.example.com" or "External: STRIPE_API_KEY". */
   name: string;
@@ -179,6 +195,13 @@ const IGNORED_HOSTS = [
   "w3.org",
 ];
 
+export interface FallbackFile {
+  path: string;
+  content: string | null;
+  /** README prose is excluded: badges and doc links are not endpoints. */
+  kind?: string;
+}
+
 /**
  * STEP 2: generic fallback for unknown services.
  * Scans manifest/config content for outbound-endpoint evidence (env var
@@ -187,12 +210,13 @@ const IGNORED_HOSTS = [
  * file:line citation. Never emits one without a cited location.
  */
 export function detectExternalFallback(
-  files: Array<{ path: string; content: string | null }>
+  files: Array<{ path: string; content: string | null; kind?: string }>
 ): ExternalFallback[] {
   const out: ExternalFallback[] = [];
   const seen = new Set<string>();
   for (const file of files) {
     if (!file.content) continue;
+    if (file.kind === "readme") continue;
     const lines = file.content.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];

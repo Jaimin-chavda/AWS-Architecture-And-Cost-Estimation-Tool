@@ -23,6 +23,7 @@ import {
   matchIntegration,
   detectExternalFallback,
   type IntegrationEcosystem,
+  type IntegrationHosting,
 } from "./integrationRegistry.ts";
 
 // ---------------------------------------------------------------------------
@@ -101,6 +102,8 @@ export interface DetectedTech {
   evidence: string;
   /** How strong the signal is */
   confidence: "high" | "medium" | "low";
+  /** Registry hosting for this technology, when recognized */
+  hosting?: IntegrationHosting;
 }
 
 /** Terraform resource type → canonical AWS service label. */
@@ -178,6 +181,10 @@ export function detectLibraryRepo(
   if (hasFunctionSources) return false;
 
   for (const f of files) {
+    // Only root manifests decide library-ness: a nested member manifest
+    // (packages/<lib>/package.json) describes one workspace member, not the
+    // repo. Without this, any lib-styled member marks a whole monorepo.
+    if (f.path.includes("/")) continue;
     const base = f.path.split("/").pop() ?? f.path;
     if (/^deno\.jsonc?$/i.test(base)) {
       try {
@@ -279,6 +286,12 @@ export interface ProjectProfile {
   deploymentHints: DetectedTech[];
   /** File paths where structured manifest parsing failed */
   parseFailures?: string[];
+  /**
+   * Low-confidence unknown-service hints from outbound-endpoint evidence
+   * (Step 2 fallback). Kept separate from frameworks/databases: fallback
+   * evidence must not flip structural classification (library/IaC-only).
+   */
+  externalFallbacks?: DetectedTech[];
   /**
    * True when the repo is IaC-only (.tf files with no application code).
    * Suppresses inferring application-tier services not declared as resources.
@@ -1784,6 +1797,7 @@ export function analyzeProject(signals: RepoSignals): ProjectProfile {
         name: hit.label,
         evidence: `${file.path} → ${dep}`,
         confidence: "high",
+        hosting: hit.hosting,
       };
       if (hit.awsService && !hit.label.startsWith("AWS SDK") && !hit.label.includes("SDK")) {
         if (["RDS", "DynamoDB", "DocumentDB", "ElastiCache", "OpenSearch", "MSK", "S3", "SES", "Cognito"].includes(hit.awsService)) {
@@ -1810,7 +1824,7 @@ export function analyzeProject(signals: RepoSignals): ProjectProfile {
   // citations. Skipped when the same line already matched the registry.
   {
     const fallbacks = detectExternalFallback(
-      allFiles.map((f) => ({ path: f.path, content: f.content }))
+      allFiles.map((f) => ({ path: f.path, content: f.content, kind: f.kind }))
     );
     const knownTokens = new Set<string>();
     for (const f of [...frameworks, ...databases, ...awsUsage]) {
@@ -2068,7 +2082,13 @@ export function classifyWorkload(
   });
 
   // 1. ML Training vs ML Inference
-  const hasMlLib = /tensorflow|keras|pytorch|torch|scikit-learn|\bcnn\b|plantvillage|onnx|transformers|huggingface/.test(allTech) ||
+  // Bare prose matches are gated: "torch" and "transformers" also occur in
+  // unrelated prose (HTTP "transformers", "torch" substrings), so outside
+  // manifests they only count as dependency/import/version references.
+  const mlDepOrImport =
+    /["'](torch|transformers|tensorflow|keras|scikit-learn|onnx)["']|import\s+(torch|transformers|tensorflow|keras|onnx)|from\s+(torch|transformers|tensorflow)\s+import|(torch|transformers|tensorflow|keras|scikit-learn|onnx)\s*[><=~!^@]/;
+  const hasMlLib = /tensorflow|keras|pytorch|scikit-learn|plantvillage|onnx|huggingface|\bcnn\b/.test(allTech) ||
+                   mlDepOrImport.test(allTech) ||
                    /cnn|convolutional|plantvillage|dataset from kaggle|model\.fit|train\.py/.test(readme);
   const hasWebServer = /express|fastapi|flask|django|spring boot|rails|next\.js|nuxt|nestjs|\bgin\b|\becho\b|\bfiber\b|bentoml|triton|asp\.net|aspnet|webapi|dotnet|laravel|symfony|actix|axum|rocket/.test(allTech);
   const hasTrainingScript = /train\.py|single training script|training job|epochs|batch_size|model\.fit\(/.test(readme) ||

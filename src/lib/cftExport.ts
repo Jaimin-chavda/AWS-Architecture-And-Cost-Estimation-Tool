@@ -1030,9 +1030,12 @@ export function generateSingleCftYaml(
   const rawPattern = options?.patternOverride || plan.detectedPattern || "generic";
   const pattern = rawPattern.toLowerCase().trim();
 
-  // Collect unique services present in the plan's awsMappings
+  // Collect unique services present in the plan's awsMappings.
+  // External (third-party hosted) mappings follow the same hosting field:
+  // no AWS resource is emitted for them.
   const mappedServices = new Set<string>();
   for (const m of plan.awsMappings) {
+    if (m.external === true) continue;
     if (CFT_SERVICE_RESOURCE_MAP[m.serviceId]) {
       mappedServices.add(m.serviceId);
     }

@@ -962,6 +962,9 @@ export function validateDiagramSemantics(
   }
 
   let expectedRelCount = 0;
+  const lbNodeIds = awsNodes
+    .filter((n) => LB_SERVICES.has(n.serviceId))
+    .map((n) => n.id);
   for (const rel of plan.relationships ?? []) {
     // Resolve endpoints by componentId first, then via mapping alias, then serviceId
     const srcMapping = plan.awsMappings.find((m) => m.componentId === rel.from);
@@ -979,8 +982,16 @@ export function validateDiagramSemantics(
     if (srcNode && dstNode) {
       expectedRelCount++;
 
-      const forwardEdge = safeEdges.find((e) => e.sourceId === srcNode.id && e.targetId === dstNode.id);
-      const reverseEdge = safeEdges.find((e) => e.sourceId === dstNode.id && e.targetId === srcNode.id);
+      // Same CDN↔compute ingress redirect the builder applies.
+      const redir = redirectCdnEdge(
+        srcNode.serviceId,
+        dstNode.serviceId,
+        srcNode.id,
+        dstNode.id,
+        lbNodeIds
+      );
+      const forwardEdge = safeEdges.find((e) => e.sourceId === redir.src && e.targetId === redir.dst);
+      const reverseEdge = safeEdges.find((e) => e.sourceId === redir.dst && e.targetId === redir.src);
 
       if (reverseEdge && !forwardEdge) {
         errors.push(
@@ -1581,6 +1592,29 @@ function isDataServiceId(s: string): boolean {
 }
 
 /**
+ * CDN↔compute traffic traverses the load balancer when one exists.
+ * Returns the (possibly redirected) edge endpoints; the label is untouched
+ * so relationship-type checks still match. Both the builder (4a) and the
+ * semantic check apply this identically.
+ */
+export function redirectCdnEdge(
+  srcService: string,
+  dstService: string,
+  srcNodeId: string,
+  dstNodeId: string,
+  lbNodeIds: string[]
+): { src: string; dst: string } {
+  if (lbNodeIds.length === 0) return { src: srcNodeId, dst: dstNodeId };
+  if (srcService === "CloudFront" && isComputeServiceId(dstService)) {
+    return { src: srcNodeId, dst: lbNodeIds[0] };
+  }
+  if (dstService === "CloudFront" && isComputeServiceId(srcService)) {
+    return { src: lbNodeIds[0], dst: dstNodeId };
+  }
+  return { src: srcNodeId, dst: dstNodeId };
+}
+
+/**
  * Derives inferred edges between grounded node ids from service roles.
  * Explicit plan relationships are handled separately and always win;
  * pairs they already connect are skipped here.
@@ -1809,6 +1843,11 @@ export function routeEdges(
     style: "solid" | "dashed";
     tooltip?: string;
     flowStep?: number;
+    /**
+     * Inferred hint edges may be omitted when no collision-free lane
+     * exists; explicit evidence edges are never dropped.
+     */
+    droppable?: boolean;
   }>,
   nodeAbsGeo: Record<string, { x: number; y: number; w: number; h: number }>
 ): RoutedEdge[] {
@@ -1955,10 +1994,16 @@ export function routeEdges(
 
   // Post-pass: test every routed segment against every non-endpoint node
   // rect and shift waypoints into the nearest free channel when a segment
-  // would cross a node it does not terminate at.
+  // would cross a node it does not terminate at. Droppable hint edges with
+  // no clean lane are omitted rather than drawn through a node.
+  const droppable = new Map(routed.map((e, i) => [e.id, edgesToRoute[i]?.droppable === true]));
   adjustEdgeLanes(routed, nodeAbsGeo);
+  const kept = routed.filter((e) => {
+    if (!droppable.get(e.id)) return true;
+    return !edgeHitsNode(e, nodeAbsGeo);
+  });
 
-  return routed;
+  return kept;
 }
 
 /** True when segment p1→p2 touches rect (endpoints excluded by the caller). */
@@ -2047,16 +2092,23 @@ export function adjustEdgeLanes(
       }
     }
     if (edge.waypoints.length === 0) continue;
-    for (let attempt = 1; attempt <= 8 && edgeHitsNode(edge, nodeAbsGeo); attempt++) {
-      const pts = edgeNodeCenters(edge, nodeAbsGeo);
-      const dx = Math.abs(pts[pts.length - 1].x - pts[0].x);
-      const dy = Math.abs(pts[pts.length - 1].y - pts[0].y);
-      const step = Math.ceil(attempt / 2) * (GAP / 2);
-      const dir = attempt % 2 === 0 ? -1 : 1;
-      for (const wp of edge.waypoints) {
-        if (dy >= dx) wp.x += dir * step;
-        else wp.y += dir * step;
-      }
+    const original = edge.waypoints.map((w) => ({ ...w }));
+    const probe = edgeNodeCenters(edge, nodeAbsGeo);
+    const dx = Math.abs(probe[probe.length - 1].x - probe[0].x);
+    const dy = Math.abs(probe[probe.length - 1].y - probe[0].y);
+    const dominantVertical = dy >= dx;
+    // Each attempt resets to the original waypoints and tries one offset:
+    // both axes, both directions, growing magnitude. The first offset that
+    // clears every non-endpoint node wins.
+    for (let attempt = 1; attempt <= 12; attempt++) {
+      if (!edgeHitsNode(edge, nodeAbsGeo)) break;
+      const cycle = Math.floor((attempt - 1) / 2);
+      const dir = attempt % 2 === 1 ? 1 : -1;
+      const useDominant = cycle % 2 === 0;
+      const step = (Math.floor(cycle / 2) + 1) * (GAP / 2);
+      const shiftX = (useDominant ? !dominantVertical : dominantVertical) ? 0 : dir * step;
+      const shiftY = (useDominant ? dominantVertical : !dominantVertical) ? dir * step : 0;
+      edge.waypoints = original.map((w) => ({ x: w.x + shiftX, y: w.y + shiftY }));
     }
   }
 }
@@ -2389,12 +2441,20 @@ export function buildDiagramElements(
     style: "solid" | "dashed";
     tooltip?: string;
     flowStep?: number;
+    droppable?: boolean;
   }
   const rawEdges: RawEdge[] = [];
   const edgeKeys = new Set<string>(); // "srcId->dstId"
   const connectedPairs = new Set<string>(); // "minId<->maxId"
 
   // 4a. Explicit relationships from Stage 1 plan (Highest priority: solid, preserve exact direction)
+  // CDN↔compute traffic always traverses the load balancer when one is
+  // present: the edge is redirected through the first LB node with its
+  // label intact (see redirectCdnEdge, mirrored by the semantic check).
+  const lbNodeIds = groundedNodes
+    .filter((n) => LB_SERVICES.has(n.serviceId))
+    .map((n) => n.id);
+  const svcByCompId = new Map(groundedNodes.map((n) => [n.componentId, n.serviceId]));
   for (const rel of plan.relationships ?? []) {
     const mappedFrom = compIdRedirect[rel.from] ?? rel.from;
     const mappedTo = compIdRedirect[rel.to] ?? rel.to;
@@ -2406,17 +2466,24 @@ export function buildDiagramElements(
       const dstExists = groundedNodes.some((n) => n.id === dstNodeId);
       if (!srcExists || !dstExists) continue;
 
-      const forwardKey = `${srcNodeId}->${dstNodeId}`;
+      const redir = redirectCdnEdge(
+        svcByCompId.get(mappedFrom) ?? rel.from,
+        svcByCompId.get(mappedTo) ?? rel.to,
+        srcNodeId,
+        dstNodeId,
+        lbNodeIds
+      );
+      const forwardKey = `${redir.src}->${redir.dst}`;
       if (!edgeKeys.has(forwardKey)) {
         rawEdges.push({
-          source: srcNodeId,
-          target: dstNodeId,
+          source: redir.src,
+          target: redir.dst,
           label: rel.type ?? "",
           style: "solid",
           tooltip: rel.type ?? undefined,
         });
         edgeKeys.add(forwardKey);
-        const pairKey = srcNodeId < dstNodeId ? `${srcNodeId}<->${dstNodeId}` : `${dstNodeId}<->${srcNodeId}`;
+        const pairKey = redir.src < redir.dst ? `${redir.src}<->${redir.dst}` : `${redir.dst}<->${redir.src}`;
         connectedPairs.add(pairKey);
       }
     }
@@ -2438,11 +2505,14 @@ export function buildDiagramElements(
   }
 
   const nodeById = new Map(groundedNodes.map((n) => [n.id, n]));
+  const externalComps = new Set(
+    consolidatedMappings.filter((m) => m.external === true).map((m) => m.componentId)
+  );
   const roleEdges = deriveRoleEdges(
     groundedNodes.map((n) => ({
       id: n.id,
       serviceId: n.serviceId,
-      external: n.componentId.startsWith("ext-"),
+      external: n.componentId.startsWith("ext-") || externalComps.has(n.componentId),
     })),
     connectedPairs
   );
@@ -2487,6 +2557,7 @@ export function buildDiagramElements(
       style: confirmed ? "solid" : "dashed",
       tooltip: confirmed ? undefined : "inferred topology",
       flowStep,
+      droppable: true,
     });
     edgeKeys.add(forwardKey);
   }

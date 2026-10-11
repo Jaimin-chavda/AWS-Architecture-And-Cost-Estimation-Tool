@@ -90,8 +90,18 @@ export async function computeCostRows(
       m.serviceId !== "Fargate" || !arr.some((o) => o.serviceId === "ECS")
   );
 
-  // Fetch prices for all services in parallel
+  // Fetch prices for all services in parallel.
+  // External (third-party hosted) mappings follow the same hosting field:
+  // they are reported as $0 external rows, never priced as AWS resources.
   const pricePromises = mappings.map(async (mapping) => {
+    if (mapping.external === true) {
+      unpricedRows.push({
+        serviceId: mapping.serviceId,
+        componentId: mapping.componentId,
+        note: `External (third-party hosted) — not billed as an AWS resource.`,
+      });
+      return null;
+    }
     const defaults = getServiceDefaults(mapping.serviceId, dbEngine);
 
     if (!defaults) {

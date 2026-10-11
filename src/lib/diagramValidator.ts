@@ -23,6 +23,7 @@ import {
   type DiagramElements,
   type ServiceScope,
 } from "./diagram.ts";
+import { POLICY_OWNED_SERVICES } from "./infraPolicy.ts";
 
 export { SERVICE_SCOPE, scopeOf };
 export type { ServiceScope };
@@ -270,9 +271,14 @@ export function validateDiagram(plan: ServicePlan, elements: DiagramElements): D
     }
   }
 
-  // 8. Every policy-added service carries a policy evidence record.
+  // 8. Every policy-owned recommendation carries a policy evidence record.
+  // (Detection suggestions for other services keep detection evidence.)
   for (const m of plan.awsMappings) {
-    if (m.category === "recommendation" && !m.evidence.startsWith("policy:")) {
+    if (
+      m.category === "recommendation" &&
+      POLICY_OWNED_SERVICES.has(m.serviceId) &&
+      !m.evidence.startsWith("policy:")
+    ) {
       failures.push(
         `policy-added mapping "${m.componentId}" (${m.serviceId}) lacks a "policy:" evidence record`
       );

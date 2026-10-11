@@ -38,6 +38,7 @@ import {
 } from "./schema.ts";
 import type { WorkloadClassification } from "./repoAnalyzer.ts";
 import { serviceTypeFromId } from "./ruleEngine.ts";
+import { matchTechLabel } from "./integrationRegistry.ts";
 
 // ---------------------------------------------------------------------------
 // Architecture Model schema (LLM output)
@@ -453,20 +454,30 @@ const PATTERN_SERVICE_LOOKUP: Record<PatternId, ServiceId[]> = {
 // Component type + technology → AWS service mapping
 function mapComponentToAws(
   c: ArchitectureComponent,
-  context?: { workloadClassification?: WorkloadClassification }
+  context?: { workloadClassification?: WorkloadClassification; evidenceRegister?: EvidenceRecord[] }
 ): AwsServiceMapping[] {
   const tech = `${c.name} ${c.technology} ${c.details ?? ""}`.toLowerCase();
   const ev = `component ${c.name} (${c.technology})`;
   const mappings: AwsServiceMapping[] = [];
 
   switch (c.type) {
-    case "database":
+    case "database": {
+      // Registry hosting decides external rendering (third-party hosted
+      // stores stay out of the VPC). Resolved through the registry only;
+      // IaC-backed components are self-hosted by definition.
+      const iacBacked = (context?.evidenceRegister ?? []).some(
+        (r) => r.kind === "iac" && isEvidenceSupportingComponent(r, c.technology, c.type)
+      );
+      const hosting = iacBacked
+        ? undefined
+        : matchTechLabel(`${c.technology} ${c.details ?? ""}`)?.hosting;
+      const external = hosting === "third-party" ? true : undefined;
       if (/dynamo/.test(tech)) {
         mappings.push({ componentId: c.id, serviceId: "DynamoDB", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
       } else if (/mongo/.test(tech)) {
-        mappings.push({ componentId: c.id, serviceId: "DocumentDB", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
+        mappings.push({ componentId: c.id, serviceId: "DocumentDB", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence", external });
       } else if (/redis|memcached|valkey/.test(tech)) {
-        mappings.push({ componentId: c.id, serviceId: "ElastiCache", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
+        mappings.push({ componentId: c.id, serviceId: "ElastiCache", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence", external });
       } else if (/aurora/.test(tech)) {
         mappings.push({ componentId: c.id, serviceId: "Aurora", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
       } else if (/postgres|postgresql/.test(tech)) {
@@ -477,6 +488,7 @@ function mapComponentToAws(
         mappings.push({ componentId: c.id, serviceId: "RDS", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
       }
       break;
+    }
 
     case "cache":
       mappings.push({ componentId: c.id, serviceId: "ElastiCache", confidence: "high", evidence: ev, fromPattern: false, category: "repository-evidence" });
@@ -621,7 +633,7 @@ function mapListTechnologies(model: ArchitectureModel, alreadyMapped: AwsService
 
   const hasService = (s: ServiceId) =>
     alreadyMapped.some((m) => m.serviceId === s) || mappings.some((m) => m.serviceId === s);
-  const add = (service: ServiceId, confidence: ConfidenceTier, evidence: string) => {
+  const add = (service: ServiceId, confidence: ConfidenceTier, evidence: string, external?: boolean) => {
     if (hasService(service)) return;
     const pseudoId = `list-${service.toLowerCase()}`;
     mappings.push({
@@ -631,11 +643,16 @@ function mapListTechnologies(model: ArchitectureModel, alreadyMapped: AwsService
       evidence,
       fromPattern: false,
       category: "inference",
+      external,
     });
   };
 
   if (/dynamo/.test(listText)) add("DynamoDB", "medium", "DynamoDB listed in model");
-  if (/mongo/.test(listText)) add("DocumentDB", "medium", "MongoDB listed in model");
+  if (/mongo/.test(listText)) {
+    const entry = [...model.databases, ...model.dependencies].find((d) => /mongo/i.test(d));
+    const hosting = entry ? matchTechLabel(entry)?.hosting : undefined;
+    add("DocumentDB", "medium", "MongoDB listed in model", hosting === "third-party" ? true : undefined);
+  }
   if (/redis|memcached|valkey/.test(listText)) add("ElastiCache", "medium", "Redis/cache listed in model");
   if (/aurora/.test(listText)) add("Aurora", "medium", "Aurora listed in model");
   if (/(postgres|postgresql|mysql|mariadb)/.test(listText) || /\bsql\b/.test(listText)) {
@@ -828,7 +845,7 @@ export function mapArchitectureModelToServicePlan(
 
   // 1. Map each discovered component to AWS services
   for (const c of model.components) {
-    const mapped = mapComponentToAws(c, { workloadClassification: ctx.workloadClassification });
+    const mapped = mapComponentToAws(c, { workloadClassification: ctx.workloadClassification, evidenceRegister: ctx.evidenceRegister });
     for (const m of mapped) {
       if (!componentServices.has(c.id)) componentServices.set(c.id, m.serviceId);
       // Deduplicate by (componentId, serviceId)

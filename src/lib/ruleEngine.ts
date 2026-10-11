@@ -23,6 +23,8 @@ import type { ProjectProfile } from "./repoAnalyzer.ts";
 import { type PatternId, deduplicateAwsMappings } from "./architecture.ts";
 import { buildAlternateProposal } from "./patternAlternates.ts";
 import { enforceProductionReadiness, extractProductionSignals, type ProductionSignals } from "./productionReadiness.ts";
+import { matchTechLabel } from "./integrationRegistry.ts";
+import type { IntegrationHosting } from "./integrationRegistry.ts";
 import { deriveTraits } from "./workloadTraits.ts";
 import { applyInfraPolicy } from "./infraPolicy.ts";
 
@@ -50,6 +52,8 @@ export interface DetectedService {
   confidence: ConfidenceTier;
   evidence: string;
   category?: MappingCategory;
+  /** Registry hosting for the underlying technology, when recognized */
+  hosting?: IntegrationHosting;
 }
 
 const CONFIDENCE_RANK: Record<ConfidenceTier, number> = {
@@ -599,7 +603,8 @@ function detectServices(
     serviceId: ServiceId,
     confidence: ConfidenceTier,
     evidence: string,
-    category?: MappingCategory
+    category?: MappingCategory,
+    opts?: { hosting?: IntegrationHosting }
   ) => {
     const existing = detected.find((d) => d.serviceId === serviceId);
     if (existing) {
@@ -612,6 +617,9 @@ function detectServices(
       if (!existing.evidence.includes(evidence)) {
         existing.evidence = `${existing.evidence}; ${evidence}`.slice(0, 200);
       }
+      if (!existing.hosting && opts?.hosting) {
+        existing.hosting = opts.hosting;
+      }
       return;
     }
 
@@ -623,7 +631,23 @@ function detectServices(
       confidence,
       evidence: evidence.slice(0, 200),
       category: defaultCategory,
+      hosting: opts?.hosting,
     });
+  };
+
+  /**
+   * Registry hosting for a profile database entry matched by name.
+   * Resolves through the registry only — no technology names here.
+   */
+  const dbHosting = (profile: ProjectProfile | undefined, ...names: string[]): IntegrationHosting | undefined => {
+    if (!profile) return undefined;
+    const lower = names.map((n) => n.toLowerCase());
+    for (const d of profile.databases) {
+      if (lower.some((n) => d.name.toLowerCase().includes(n)) && d.hosting) {
+        return d.hosting;
+      }
+    }
+    return undefined;
   };
 
   // --- Compute ---
@@ -702,10 +726,14 @@ function detectServices(
     add("RDS", "high", rdsSdkEv ? `RDS SDK client imported — ${rdsSdkEv}` : "Explicit RDS declaration in IaC/config");
   } else if (dbEngine !== "none" && dbCorroborated) {
     const label = dbEngine === "postgres" ? "RDS (PostgreSQL)" : "RDS (MySQL)";
-    add("RDS", "medium", `${label} dependency detected — corroborated by connection/ORM/migration evidence → RDS`);
+    add("RDS", "medium", `${label} dependency detected — corroborated by connection/ORM/migration evidence → RDS`, undefined, {
+      hosting: dbHosting(profile, "postgres", "mysql", "mariadb"),
+    });
   } else if (dbEngine !== "none" && hasDocker && !hasDbConnectionString && k8sWeight(fileNames) === 0) {
     const label = dbEngine === "postgres" ? "RDS (PostgreSQL)" : "RDS (MySQL)";
-    add("RDS", "low", `${label} driver seen without corroboration — suggested RDS`);
+    add("RDS", "low", `${label} driver seen without corroboration — suggested RDS`, undefined, {
+      hosting: dbHosting(profile, "postgres", "mysql", "mariadb"),
+    });
   }
 
   // SQL Server preserves the pre-existing RDS mapping when corroborated
@@ -723,10 +751,15 @@ function detectServices(
     add("ElastiCache", "high", elastiCacheSdkEv ? `ElastiCache SDK imported — ${elastiCacheSdkEv}` : "Explicit ElastiCache declaration in IaC");
   } else if (redisEv) {
     const hasRedisWorkload = hasRedisConnectionString || hasAny(combined, ["sidekiq", "celery", "bull", "cache", "session"]);
+    const redisHosting = dbHosting(profile, "redis", "memcached");
     if (hasRedisWorkload) {
-      add("ElastiCache", "medium", `Redis dependency detected — corroborated by caching/worker configuration → ElastiCache Redis`);
+      add("ElastiCache", "medium", `Redis dependency detected — corroborated by caching/worker configuration → ElastiCache Redis`, undefined, {
+        hosting: redisHosting,
+      });
     } else if (!hasDocker) {
-      add("ElastiCache", "low", "Redis reference detected without connection config — suggested ElastiCache");
+      add("ElastiCache", "low", "Redis reference detected without connection config — suggested ElastiCache", undefined, {
+        hosting: redisHosting,
+      });
     }
   }
 
@@ -904,17 +937,23 @@ function detectServices(
   if (profile?.discoveredComponents?.length) {
     for (const dc of profile.discoveredComponents) {
       const dcEv = `${dc.source}: ${dc.evidence[0] ?? dc.name} (${dc.confidence} confidence)`;
+      // Registry hosting for the discovered technology (third-party hosted
+      // stores render external). Resolved through the registry only.
+      // IaC/compose-defined stores are self-hosted by definition.
+      const dcSelfHosted =
+        dc.source === "docker-compose" || dc.source === "iac" || dc.source === "serverless-yml";
+      const dcHosting = dcSelfHosted ? undefined : matchTechLabel(dc.technology)?.hosting;
       switch (dc.type) {
         case "database": {
           const tech = dc.technology.toLowerCase();
           if (/dynamo/.test(tech)) { if (!detected.some((s) => s.serviceId === "DynamoDB")) add("DynamoDB", dc.confidence, dcEv); }
-          else if (/mongo/.test(tech)) { if (!detected.some((s) => s.serviceId === "DocumentDB")) add("DocumentDB", dc.confidence, dcEv); }
+          else if (/mongo/.test(tech)) { if (!detected.some((s) => s.serviceId === "DocumentDB")) add("DocumentDB", dc.confidence, dcEv, undefined, { hosting: dcHosting }); }
           else if (/aurora/.test(tech)) { if (!detected.some((s) => s.serviceId === "Aurora")) add("Aurora", dc.confidence, dcEv); }
           else if (/athena/.test(tech)) { if (!detected.some((s) => s.serviceId === "Athena")) add("Athena", dc.confidence, dcEv); }
-          else { if (!detected.some((s) => s.serviceId === "RDS" || s.serviceId === "Aurora")) add("RDS", dc.confidence, dcEv); }
+          else { if (!detected.some((s) => s.serviceId === "RDS" || s.serviceId === "Aurora")) add("RDS", dc.confidence, dcEv, undefined, { hosting: dcHosting }); }
           break;
         }
-        case "cache": { if (!detected.some((s) => s.serviceId === "ElastiCache")) add("ElastiCache", dc.confidence, dcEv); break; }
+        case "cache": { if (!detected.some((s) => s.serviceId === "ElastiCache")) add("ElastiCache", dc.confidence, dcEv, undefined, { hosting: dcHosting }); break; }
         case "queue": {
           const tech = dc.technology.toLowerCase();
           if (/kafka|confluent/.test(tech)) {
@@ -1257,7 +1296,8 @@ export function buildServicePlan(
     };
   });
 
-  // Build AWS mappings (1:1 with components)
+  // Build AWS mappings (1:1 with components). Database hosting comes from
+  // the registry only: third-party hosted stores render external.
   const rawAwsMappings: AwsServiceMapping[] = planServices.map((s) => ({
     componentId: `svc-${s.serviceId.toLowerCase()}`,
     serviceId: s.serviceId,
@@ -1265,6 +1305,7 @@ export function buildServicePlan(
     evidence: s.evidence,
     fromPattern: false,
     category: s.category ?? (s.confidence === "high" ? "repository-evidence" : "inference"),
+    external: s.hosting === "third-party" ? true : undefined,
   }));
   const awsMappings = deduplicateAwsMappings(rawAwsMappings);
 
@@ -1398,7 +1439,12 @@ export function serviceTypeFromId(serviceId: ServiceId): DiscoveredComponent["ty
 
 function buildBasicRelationships(components: DiscoveredComponent[]): ComponentRelationship[] {
   const relationships: ComponentRelationship[] = [];
-  const computeComponents = components.filter((c) => ["backend", "worker", "scheduler", "api"].includes(c.type));
+  // Load balancers front compute; they never read datastores directly.
+  const isBalancer = (c: DiscoveredComponent): boolean =>
+    ["ALB", "NLB", "GLB"].includes((c.technology || "").toUpperCase());
+  const computeComponents = components.filter(
+    (c) => ["backend", "worker", "scheduler", "api"].includes(c.type) && !isBalancer(c)
+  );
   const dbComponents = components.filter((c) => c.type === "database");
   const cacheComponents = components.filter((c) => c.type === "cache");
   const queueComponents = components.filter((c) => c.type === "queue" || c.type === "messaging");

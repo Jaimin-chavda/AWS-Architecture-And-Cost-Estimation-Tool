@@ -17,6 +17,7 @@ import type {
   ThirdPartyIntegration,
 } from "../schema.ts";
 import { applyInfraPolicy } from "../infraPolicy.ts";
+import { POLICY_OWNED_SERVICES as POLICY_OWNED } from "../infraPolicy.ts";
 import { buildDiagramElements } from "../diagram.ts";
 import { validateDiagram } from "../diagramValidator.ts";
 import type { WorkloadTraits, ComputeModel } from "../workloadTraits.ts";
@@ -176,7 +177,7 @@ describe("STEP 8: synthetic trait-product matrix", () => {
               assert.ok(ids.has("S3") && ids.has("CloudFront"), `static origin [${model}]`);
             }
             for (const m of gated.awsMappings) {
-              if (m.category === "recommendation") {
+              if (m.category === "recommendation" && POLICY_OWNED.has(m.serviceId)) {
                 assert.ok(
                   m.evidence.startsWith("policy:"),
                   `policy evidence [${model}/${db}/${frontend}/${integ}/${secrets}]`

@@ -33,6 +33,21 @@ export type PolicyRuleName =
   | "relational-multi-az"
   | "static-origin";
 
+/**
+ * Services the policy owns: it is the sole minter of recommendation-category
+ * injections for these. Detection guesses for them are adopted (predicate
+ * fired) or pruned (predicate failed), so post-policy every recommendation
+ * mapping here carries policy evidence. Other recommendation mappings
+ * (CloudWatch-style detection suggestions) keep their detection evidence.
+ */
+export const POLICY_OWNED_SERVICES: ReadonlySet<string> = new Set([
+  "ALB",
+  "NLB",
+  "GLB",
+  "SecretsManager",
+  "NATGateway",
+]);
+
 function policyEvidence(rule: PolicyRuleName, trait: string, evidence: string): string {
   return `policy: ${rule} because ${trait} (${evidence})`;
 }

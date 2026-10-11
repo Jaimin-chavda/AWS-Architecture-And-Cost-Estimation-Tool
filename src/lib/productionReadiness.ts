@@ -13,10 +13,12 @@ import type {
   ServiceId,
   ConfidenceTier,
   MappingCategory,
+  ComponentType,
 } from "./schema.ts";
 import type { RuleInput } from "./ruleEngine.ts";
 import type { ProjectProfile } from "./repoAnalyzer.ts";
 import type { WorkloadTraits } from "./workloadTraits.ts";
+import { matchIntegration } from "./integrationRegistry.ts";
 
 // ---------------------------------------------------------------------------
 // Third-Party Signature Table (items 20-28)
@@ -309,7 +311,7 @@ export function enforceProductionReadiness(
   }
 
   // Also add Secrets Manager, NAT Gateway, ALB as explicit awsMappings if not present
-  const ensureMapping = (serviceId: ServiceId, evidence: string, confidence: ConfidenceTier = "medium", category: MappingCategory = "recommendation") => {
+  const ensureMapping = (serviceId: ServiceId, evidence: string, confidence: ConfidenceTier = "medium", category: MappingCategory = "recommendation", external?: boolean) => {
     const existing = plan.awsMappings.find((m) => m.serviceId === serviceId);
     if (!existing) {
       const componentId = `svc-${serviceId.toLowerCase()}`;
@@ -320,6 +322,7 @@ export function enforceProductionReadiness(
         evidence,
         fromPattern: false,
         category,
+        external,
       });
       // Add corresponding component if missing
       if (!plan.components.some((c) => c.id === componentId)) {
@@ -350,11 +353,14 @@ export function enforceProductionReadiness(
     }
   }
 
-  // Add third-party integrations as external service mappings
+  // Add third-party integrations as external service mappings.
+  // Hosting comes from the registry only: third-party hosted stores stay
+  // external (Outbound tier) instead of rendering as in-VPC AWS resources.
   for (const integration of signals.thirdPartyIntegrations) {
     const extServiceId = getExternalServiceId(integration);
     if (extServiceId && !plan.awsMappings.some((m) => m.serviceId === extServiceId)) {
-      ensureMapping(extServiceId, `Third-party: ${integration.name} (${integration.purpose}) via ${integration.protocol}`, "medium", "repository-evidence");
+      const hosting = matchIntegration(integration.name)?.hosting;
+      ensureMapping(extServiceId, `Third-party: ${integration.name} (${integration.purpose}) via ${integration.protocol}`, "medium", "repository-evidence", hosting === "third-party" ? true : undefined);
     }
   }
 
@@ -393,8 +399,8 @@ function getExternalServiceId(integration: ThirdPartyIntegration): ServiceId | n
   }
 }
 
-function serviceTypeFromId(serviceId: ServiceId): DeploymentModel["componentId"] extends string ? never : string {
-  const map: Partial<Record<ServiceId, string>> = {
+function serviceTypeFromId(serviceId: ServiceId): ComponentType {
+  const map: Partial<Record<ServiceId, ComponentType>> = {
     SecretsManager: "auth",
     NATGateway: "proxy",
     ALB: "api",
