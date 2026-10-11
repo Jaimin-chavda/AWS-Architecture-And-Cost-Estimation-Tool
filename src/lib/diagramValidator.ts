@@ -17,6 +17,7 @@ import {
   nodeStyle,
   CELL_W,
   CELL_H,
+  ICON_SIZE,
   SERVICE_SCOPE,
   scopeOf,
   type DiagramElements,
@@ -108,12 +109,22 @@ export function validateDiagram(plan: ServicePlan, elements: DiagramElements): D
   const { layout, nodes, routedEdges } = elements;
 
   const vpc = layout.containers["container-vpc"] ?? null;
+  // Icon geometry: the router ports edges at the 56px icon centred in each
+  // cell, so crossing checks use the same icon rects the router avoided.
+  const iconOffsetX = Math.round((CELL_W - ICON_SIZE) / 2);
   const nodeIdRect = new Map<string, Rect>();
   for (const n of nodes) {
     const placed = Object.values(layout.nodes).find(
       (e) => e.componentId === n.componentId && e.parent === n.parent
     );
-    if (placed) nodeIdRect.set(n.id, { x: placed.x, y: placed.y, w: CELL_W, h: CELL_H });
+    if (placed) {
+      nodeIdRect.set(n.id, {
+        x: placed.x + iconOffsetX,
+        y: placed.y + 4,
+        w: ICON_SIZE,
+        h: ICON_SIZE,
+      });
+    }
   }
 
   const isAwsNode = (n: { componentId: string }): boolean =>

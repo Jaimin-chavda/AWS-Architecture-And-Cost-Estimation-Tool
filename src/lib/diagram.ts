@@ -486,7 +486,7 @@ export const SUBNET_COLS = 4;   // Columns per VPC subnet
 export const EDGE_COLS = 6;     // Columns in top edge banner
 export const REGIONAL_COLS = 6; // Columns in regional row (outside VPC)
 export const DATA_COLS = 4;     // Columns in spanning data subnet
-export const EXTERNAL_COLS = 2; // Columns in external column
+export const EXTERNAL_COLS = 1; // Columns in external column (one column: stacked rows keep egress edges from crossing siblings)
 
 export interface Rect {
   x: number;
@@ -1330,12 +1330,18 @@ export function computeLayout(
     if (renderedAzs.length === 0) renderedAzs.push(1);
   }
   const azW = azSubnetW + 2 * PAD;
+  // Private subnets start at the same y in every AZ (reserving the public
+  // row height even where no public subnet renders) so cross-AZ edges run
+  // through open gutters instead of neighbouring subnets.
+  const hasAnyPub = buckets["vpc-public"].length > 0;
+  const hasAnyPriv = buckets["vpc-private"].length > 0;
+  const pubRowH = hasAnyPub && hasAnyPriv ? publicH + VGAP : 0;
   const azHFor = (az: number): number => {
-    const hasPub = az === 1 && buckets["vpc-public"].length > 0;
-    const hasPriv = buckets["vpc-private"].length > 0;
+    const hasPub = az === 1 && hasAnyPub;
     let h = LABEL_H + PAD_TOP;
-    if (hasPub) h += publicH + (hasPriv ? VGAP : 0);
-    if (hasPriv) h += privateH;
+    if (hasPub) h += publicH + (hasAnyPriv ? VGAP : 0);
+    else if (hasAnyPriv) h += pubRowH;
+    if (hasAnyPriv) h += privateH;
     return h + PAD_BOTTOM;
   };
   const azRowH = renderedAzs.length > 0 ? Math.max(...renderedAzs.map(azHFor)) : 0;
@@ -1381,13 +1387,15 @@ export function computeLayout(
       const h = azHFor(az);
       containers[azId(az)] = { x: azX, y: azY, w: azW, h };
       let subY = azY + LABEL_H + PAD_TOP;
-      if (az === 1 && buckets["vpc-public"].length > 0) {
+      if (az === 1 && hasAnyPub) {
         const pub: Rect = { x: azX + PAD, y: subY, w: azSubnetW, h: publicH };
         containers[pubId(az)] = pub;
         placeBucket(buckets["vpc-public"], SUBNET_COLS, pub, pubId(az));
-        subY += publicH + (buckets["vpc-private"].length > 0 ? VGAP : 0);
+        subY += publicH + (hasAnyPriv ? VGAP : 0);
+      } else if (hasAnyPriv) {
+        subY += pubRowH;
       }
-      if (buckets["vpc-private"].length > 0) {
+      if (hasAnyPriv) {
         const priv: Rect = { x: azX + PAD, y: subY, w: azSubnetW, h: privateH };
         containers[privId(az)] = priv;
         const actualCols = Math.min(buckets["vpc-private"].length, SUBNET_COLS);
@@ -2026,8 +2034,20 @@ export function adjustEdgeLanes(
   nodeAbsGeo: Record<string, { x: number; y: number; w: number; h: number }>
 ): void {
   for (const edge of routed) {
+    // A straight port-to-port edge can still cross a node it does not
+    // terminate at: seed a midpoint waypoint so the shifting loop below
+    // has something to move into the nearest free channel.
+    if (edge.waypoints.length === 0 && edgeHitsNode(edge, nodeAbsGeo)) {
+      const pts = edgeNodeCenters(edge, nodeAbsGeo);
+      if (pts.length >= 2) {
+        edge.waypoints.push({
+          x: Math.round((pts[0].x + pts[pts.length - 1].x) / 2),
+          y: Math.round((pts[0].y + pts[pts.length - 1].y) / 2),
+        });
+      }
+    }
     if (edge.waypoints.length === 0) continue;
-    for (let attempt = 1; attempt <= 6 && edgeHitsNode(edge, nodeAbsGeo); attempt++) {
+    for (let attempt = 1; attempt <= 8 && edgeHitsNode(edge, nodeAbsGeo); attempt++) {
       const pts = edgeNodeCenters(edge, nodeAbsGeo);
       const dx = Math.abs(pts[pts.length - 1].x - pts[0].x);
       const dy = Math.abs(pts[pts.length - 1].y - pts[0].y);
