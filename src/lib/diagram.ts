@@ -29,6 +29,7 @@ import type {
   AwsServiceMapping,
   ComponentRelationship,
 } from "./schema.ts";
+import { SERVICE_CATEGORIES } from "./schema.ts";
 import type { SdkEvidence } from "./repoFetcher.ts";
 import { matchIntegration } from "./integrationRegistry.ts";
 
@@ -464,6 +465,28 @@ const COMPUTE_SCOPES: ReadonlySet<string> = new Set(["vpc-private"]);
 
 /** Load-balancer services: ingress into compute. */
 const LB_SERVICES: ReadonlySet<string> = new Set(["ALB", "NLB", "GLB"]);
+
+/**
+ * Wire protocol per data service, used as the compute→data edge label.
+ * Keyed by ServiceId (data table, like the scope table).
+ */
+const SERVICE_PROTOCOL: Partial<Record<string, string>> = {
+  RDS: "SQL (TLS)",
+  Aurora: "SQL (TLS)",
+  DynamoDB: "HTTPS",
+  DocumentDB: "DocumentDB wire (TLS)",
+  ElastiCache: "RESP (TLS)",
+  MemoryDB: "RESP (TLS)",
+  Neptune: "HTTPS",
+  Keyspaces: "CQL (TLS)",
+  Timestream: "HTTPS",
+  Redshift: "SQL (TLS)",
+  QLDB: "HTTPS",
+};
+
+function protocolFor(serviceId: string): string {
+  return SERVICE_PROTOCOL[serviceId] ?? "reads/writes";
+}
 
 // ---------------------------------------------------------------------------
 // Grid & Container Geometry Constants
@@ -1549,17 +1572,23 @@ export interface RoleEdgeNode {
   serviceId: string;
   /** True for third-party integration boxes in the external column. */
   external: boolean;
+  /**
+   * True when object storage has SDK/usage evidence (repository mapping or
+   * SDK hint). compute→storage edges require it.
+   */
+  storageProven: boolean;
 }
 
 const ROLE_VERBS = {
   dns: "DNS",
-  cdnOrigin: "origin",
-  ingress: "routes",
-  invoke: "invokes",
+  staticOrigin: "static assets (read-only, OAC)",
+  ingress: "HTTP",
+  invoke: "API (HTTPS)",
   store: "reads/writes",
   publish: "sends/receives",
   egress: "egress",
   image: "pulls image",
+  secrets: "reads secrets",
 } as const;
 
 function isComputeServiceId(s: string): boolean {
@@ -1655,10 +1684,17 @@ export function deriveRoleEdges(
   for (const d of dns) {
     for (const target of [...cdn, ...lbs, ...gateways]) link(d.id, target.id, ROLE_VERBS.dns);
   }
-  // CDN origin: LB when present, else compute, else object storage.
-  const origins = lbs.length > 0 ? lbs : compute.length > 0 ? compute : data;
+  // CDN origin is the static origin only: LB when present, else compute,
+  // else object storage. Never CDN -> compute while an LB exists, and never
+  // CDN -> datastores that are not object storage.
+  const origins =
+    lbs.length > 0
+      ? lbs
+      : compute.length > 0
+        ? compute
+        : data.filter((n) => SERVICE_CATEGORIES[n.serviceId as ServiceId] === "storage");
   for (const c of cdn) {
-    for (const o of origins) link(c.id, o.id, ROLE_VERBS.cdnOrigin);
+    for (const o of origins) link(c.id, o.id, ROLE_VERBS.staticOrigin);
   }
   // Gateways invoke compute; otherwise they front data-backed APIs.
   for (const g of gateways) {
@@ -1674,9 +1710,20 @@ export function deriveRoleEdges(
   for (const r of registries) {
     for (const c of compute) link(r.id, c.id, ROLE_VERBS.image);
   }
-  // Compute fans out to data, secrets and messaging stores.
+  // Compute fans out to proven data: secrets by role label, databases by
+  // wire protocol, messaging by verb. Object storage links require SDK or
+  // usage evidence — never a bare topology guess.
   for (const c of compute) {
-    for (const d of data) link(c.id, d.id, ROLE_VERBS.store);
+    for (const d of data) {
+      if (d.serviceId === "SecretsManager") link(c.id, d.id, ROLE_VERBS.secrets);
+      else if (SERVICE_CATEGORIES[d.serviceId as ServiceId] === "storage") {
+        if (d.storageProven) link(c.id, d.id, ROLE_VERBS.store);
+      } else if (SERVICE_PROTOCOL[d.serviceId] !== undefined) {
+        link(c.id, d.id, protocolFor(d.serviceId));
+      } else {
+        link(c.id, d.id, ROLE_VERBS.publish);
+      }
+    }
   }
   // NAT chains compute egress to the outside world.
   for (const c of compute) {
@@ -2508,11 +2555,21 @@ export function buildDiagramElements(
   const externalComps = new Set(
     consolidatedMappings.filter((m) => m.external === true).map((m) => m.componentId)
   );
+  // Object storage counts as proven with a repository mapping or an SDK
+  // hint naming the service; bare topology never earns a storage edge.
+  const storageProvenFor = (node: DiagramNode): boolean => {
+    const mapping = consolidatedMappings.find((m) => m.componentId === node.componentId);
+    if (mapping?.category === "repository-evidence") return true;
+    return (sdkEvidence ?? []).some(
+      (ev) => (ev.serviceHint ?? ev.service ?? "").toLowerCase() === node.serviceId.toLowerCase()
+    );
+  };
   const roleEdges = deriveRoleEdges(
     groundedNodes.map((n) => ({
       id: n.id,
       serviceId: n.serviceId,
       external: n.componentId.startsWith("ext-") || externalComps.has(n.componentId),
+      storageProven: storageProvenFor(n),
     })),
     connectedPairs
   );
@@ -2545,8 +2602,8 @@ export function buildDiagramElements(
     );
 
     const protocol = protocolForExternal(def.from) ?? protocolForExternal(def.to);
-    const baseLabel = protocol ? `egress via ${protocol}` : def.label;
-    const edgeLabel = confirmed ? baseLabel : `${baseLabel} (inferred topology)`;
+    // Labels come from role/protocol only — never a generic guess marker.
+    const edgeLabel = protocol ?? def.label;
     const isPrimary = isPrimaryPathEdge(srcNode.serviceId, dstNode.serviceId, def.label);
     const flowStep = isPrimary ? primaryFlowCounter++ : undefined;
 
@@ -2555,7 +2612,7 @@ export function buildDiagramElements(
       target: def.to,
       label: edgeLabel,
       style: confirmed ? "solid" : "dashed",
-      tooltip: confirmed ? undefined : "inferred topology",
+      tooltip: undefined,
       flowStep,
       droppable: true,
     });

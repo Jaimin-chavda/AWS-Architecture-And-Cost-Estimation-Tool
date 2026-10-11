@@ -334,7 +334,7 @@ describe("Fix 8 — Evidence-justified edges (solid vs dashed)", () => {
     );
   });
 
-  it("(b) Pattern-only connection with no cross-service evidence generates a dashed edge", () => {
+  it("(b) Static origin without compute evidence generates a dashed role edge", () => {
     const plan = makePlan({
       detectedPattern: "static-site",
       components: [
@@ -355,12 +355,62 @@ describe("Fix 8 — Evidence-justified edges (solid vs dashed)", () => {
     const xml = generateDiagramXml(plan, []);
     assert.ok(
       xml.includes('dashed=1;dashPattern=8 8;strokeColor=#6B7280;strokeWidth=1;'),
-      "Pattern-only edges should be dashed"
+      "Static origin edges without cross-service evidence should be dashed"
     );
     assert.ok(
-      xml.includes("inferred topology"),
-      "Pattern-only edges should have inferred topology label"
+      xml.includes("static assets (read-only, OAC)"),
+      "CDN origin edge carries the static-origin role label"
     );
+    assert.ok(
+      !xml.includes("inferred topology"),
+      "No generic guess marker in user-facing labels"
+    );
+  });
+
+  it("(c) Compute without storage SDK evidence draws no storage edge", () => {
+    const plan = makePlan({
+      components: [
+        { id: "compute", type: "backend", technology: "ECS", evidence: ["docker"], confidence: "high", status: "detected" },
+      ],
+      awsMappings: [
+        { componentId: "compute", serviceId: "ECS", confidence: "high", evidence: "docker", fromPattern: false },
+        { componentId: "store", serviceId: "S3", confidence: "low", evidence: "suggested", fromPattern: false, category: "inference" },
+      ],
+      relationships: [],
+      deploymentModel: [],
+      metadata: { grounding: "description", truncated: false, parseErrors: [] },
+    });
+    const { nodes, routedEdges } = buildDiagramElements(plan, []);
+    const ecs = nodes.find((n) => n.serviceId === "ECS")!;
+    const s3 = nodes.find((n) => n.serviceId === "S3")!;
+    assert.ok(
+      !routedEdges.some((e) => e.sourceId === ecs.id && e.targetId === s3.id),
+      "unproven compute -> storage edge must be omitted"
+    );
+  });
+
+  it("(d) Compute with repository storage evidence keeps the storage edge", () => {
+    const plan = makePlan({
+      components: [
+        { id: "compute", type: "backend", technology: "ECS", evidence: ["docker"], confidence: "high", status: "detected" },
+      ],
+      awsMappings: [
+        { componentId: "compute", serviceId: "ECS", confidence: "high", evidence: "docker", fromPattern: false },
+        { componentId: "store", serviceId: "S3", confidence: "high", evidence: "S3 SDK import", fromPattern: false, category: "repository-evidence" },
+      ],
+      relationships: [],
+      deploymentModel: [],
+      metadata: { grounding: "description", truncated: false, parseErrors: [] },
+    });
+    const sdkEvidence = [
+      { file: "app.js", filePath: "app.js", match: "s3.upload", matchSnippet: "s3.upload", service: "S3", serviceHint: "S3" },
+    ];
+    const { nodes, routedEdges } = buildDiagramElements(plan, sdkEvidence);
+    const ecs = nodes.find((n) => n.serviceId === "ECS")!;
+    const s3 = nodes.find((n) => n.serviceId === "S3")!;
+    const edge = routedEdges.find((e) => e.sourceId === ecs.id && e.targetId === s3.id);
+    assert.ok(edge, "proven compute -> storage edge drawn");
+    assert.strictEqual(edge.style, "solid", "SDK-confirmed storage edge is solid");
   });
 });
 
