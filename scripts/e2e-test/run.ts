@@ -7,7 +7,9 @@
  *
  * Usage: npm run test:e2e-repos  (tsx scripts/e2e-test/run.ts)
  */
-import "dotenv/config";
+import dotenv from "dotenv";
+dotenv.config({ path: ".env.local" });
+dotenv.config();
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,18 +19,16 @@ import { runInference, deriveGrounding } from "../../src/lib/inference.ts";
 import { computeCostRows } from "../../src/lib/cost.ts";
 
 const TEST_REPOS = [
-  { name: "example-voting-app", url: "https://github.com/dockersamples/example-voting-app" },
-  { name: "microservices-demo", url: "https://github.com/GoogleCloudPlatform/microservices-demo" },
-  { name: "spring-petclinic", url: "https://github.com/spring-projects/spring-petclinic" },
-  { name: "realworld-node-express", url: "https://github.com/gothinkster/node-express-realworld-example-app" },
-  { name: "realworld-django", url: "https://github.com/gothinkster/django-realworld-example-app" },
-  { name: "realworld-golang", url: "https://github.com/gothinkster/golang-gin-realworld-example-app" },
-  { name: "terraform-eks", url: "https://github.com/hashicorp/learn-terraform-provision-eks-cluster" },
-  { name: "aws-serverless-workshops", url: "https://github.com/aws-samples/aws-serverless-workshops" },
-  { name: "supabase", url: "https://github.com/supabase/supabase" },
-  { name: "oak", url: "https://github.com/oakserver/oak" },
-  { name: "go-kit-examples", url: "https://github.com/go-kit/examples" },
-  { name: "decentralized-voting-system", url: "https://github.com/Jaimin-chavda/Decentralized-Voting-System" },
+  { name: "mern-student-mgmt", url: "https://github.com/elselif/MERN" },
+  { name: "honours-project-system", url: "https://github.com/davidm03/honours-project-system" },
+  { name: "campus-web-firebase", url: "https://github.com/gdsc-jssstu/campUS-Web" },
+  { name: "yearbook-firebase", url: "https://github.com/m-ehab2/Yearbook" },
+  { name: "springboot-student-backend", url: "https://github.com/PubuduJ/student-management-system-back-end" },
+  { name: "springboot-student-mgmt", url: "https://github.com/ankitkumar2020/StudentManagementSystem" },
+  { name: "php-library-mgmt", url: "https://github.com/freesourcecode/Library-Management-System-Project-in-PHP-with-Source-Code" },
+  { name: "flask-placement-ml", url: "https://github.com/saravanaganesh7/Placement_Project" },
+  { name: "flask-ml-deployment", url: "https://github.com/HemanthJoseph/ML-Projects-with-Deployment" },
+  { name: "django-blog-sqlite", url: "https://github.com/drisskhattabi6/Django-Blog-Project" },
 ];
 
 const REGION = "us-east-1";

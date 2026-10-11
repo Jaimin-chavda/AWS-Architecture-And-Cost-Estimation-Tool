@@ -9,7 +9,7 @@
  *
  * Provider chain — tried IN ORDER until one returns a model. This is failover,
  * not precedence.
- *   1. GOOGLE_API_KEY       → gemini-3.7-flash              (@ai-sdk/google)
+ *   1. GOOGLE_API_KEY       → gemini-3.8-flash              (@ai-sdk/google)
  *   2. OPENROUTER_API_KEY   → openrouter/free                 (@openrouter/ai-sdk-provider)
  *
  * Failure is never silent. analyzeArchitecture returns a discriminated
@@ -38,7 +38,7 @@ import type { ProjectProfile } from "./repoAnalyzer.ts";
 // ---------------------------------------------------------------------------
 
 const MODEL_IDS = {
-  google: "gemini-3.7-flash",
+  google: "gemini-3.8-flash",
   openrouter: "openrouter/free",
 } as const;
 
