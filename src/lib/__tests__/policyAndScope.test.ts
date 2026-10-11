@@ -365,7 +365,8 @@ describe("STEP 8 lint: generic files contain no registry names", () => {
       "node", "nodes", "amazon", "identity", "observability",
       "migration", "segment", "segments", "registry", "promise",
       "system", "project", "projects", "starter", "core", "driver",
-      "drivers", "engine", "rest", "web", "js",
+      "drivers", "engine", "rest", "web", "js", "function", "functions",
+      "elastic",
     ]) {
       allowed.add(w);
     }

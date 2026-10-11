@@ -21,6 +21,8 @@ import {
   normalizeForComparison,
   nodeStyle,
   FALLBACK_STYLE,
+  SERVICE_LABELS,
+  AWS_ICON_STYLES,
   scopeOf,
   CID,
   azId,
@@ -34,6 +36,7 @@ import {
   validatePlanSemantics,
   buildDiagramElements,
 } from "../diagram.ts";
+import { SERVICE_IDS } from "../schema.ts";
 import type { ServicePlan, AwsServiceMapping, DiscoveredComponent, ComponentRelationship } from "../schema.ts";
 
 // ---------------------------------------------------------------------------
@@ -871,7 +874,7 @@ describe("Fix 2 — Label Deduplication & Collision", () => {
 // Fix 3: Icon Fallback Handling
 // ---------------------------------------------------------------------------
 describe("Fix 3 — Icon Fallback Handling", () => {
-  it("uses generic AWS Cloud shape for unknown serviceId and logs a warning", () => {
+  it("uses a labelled rounded rect for unknown serviceId and logs a warning", () => {
     const warnings: string[] = [];
     const origWarn = console.warn;
     console.warn = (msg: string) => { warnings.push(msg); };
@@ -879,11 +882,26 @@ describe("Fix 3 — Icon Fallback Handling", () => {
     try {
       const style = nodeStyle("UnknownServiceCustom");
       assert.strictEqual(style, FALLBACK_STYLE);
-      assert.ok(style.includes("resIcon=mxgraph.aws4.general_AWS_Cloud;"), "fallback style should use general AWS Cloud icon");
+      assert.ok(style.includes("rounded=1;"), "fallback is a rounded rect, never a filled square");
+      assert.ok(!style.includes("fillColor=#FF9900"), "fallback has no attention fill");
       assert.strictEqual(warnings.length, 1);
       assert.ok(warnings[0].includes("Missing AWS icon for serviceId: \"UnknownServiceCustom\""));
     } finally {
       console.warn = origWarn;
+    }
+  });
+
+  it("every ServiceId in SERVICE_LABELS has a display label and a shape entry", () => {
+    const missingLabels = SERVICE_IDS.filter((id) => !SERVICE_LABELS[id]);
+    assert.deepStrictEqual(missingLabels, [], "all catalog services need display labels");
+    const missingShapes = SERVICE_IDS.filter((id) => !AWS_ICON_STYLES[id]);
+    assert.deepStrictEqual(missingShapes, [], "all catalog services need shape entries");
+    for (const id of SERVICE_IDS) {
+      const shape = AWS_ICON_STYLES[id] ?? "";
+      assert.ok(
+        /^shape=mxgraph\.aws4\.[a-z0-9_]+;$/.test(shape),
+        `${id} shape entry must be a well-formed stencil reference`
+      );
     }
   });
 
