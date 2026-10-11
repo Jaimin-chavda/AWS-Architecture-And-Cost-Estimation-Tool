@@ -155,3 +155,81 @@ export function matchAllIntegrations(
   }
   return out;
 }
+
+export interface ExternalFallback {
+  /** Display name, e.g. "External: api.example.com" or "External: STRIPE_API_KEY". */
+  name: string;
+  /** Exact cited location: "path:line → snippet". Always present. */
+  evidence: string;
+  confidence: "low";
+}
+
+const ENV_VAR_RE =
+  /\b([A-Z][A-Z0-9_]*_(?:API_KEY|API_SECRET|SECRET_KEY|SECRET|TOKEN|URL|ENDPOINT|HOST|DSN|PASSWORD))\b/;
+const HOST_RE = /https?:\/\/([a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?:\.[a-z]{2,}))/gi;
+const IGNORED_HOSTS = [
+  "github.com",
+  "raw.githubusercontent.com",
+  "amazonaws.com",
+  "localhost",
+  "example.com",
+  "w3.org",
+];
+
+/**
+ * STEP 2: generic fallback for unknown services.
+ * Scans manifest/config content for outbound-endpoint evidence (env var
+ * names like *_API_KEY / *_URL / *_ENDPOINT and external hostnames).
+ * Emits low-confidence external-service candidates, each with an exact
+ * file:line citation. Never emits one without a cited location.
+ */
+export function detectExternalFallback(
+  files: Array<{ path: string; content: string | null }>
+): ExternalFallback[] {
+  const out: ExternalFallback[] = [];
+  const seen = new Set<string>();
+  for (const file of files) {
+    if (!file.content) continue;
+    const lines = file.content.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (out.length >= 8) return out;
+      const env = line.match(ENV_VAR_RE);
+      if (env) {
+        const key = `var:${env[1]}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          out.push({
+            name: `External: ${env[1]}`,
+            evidence: `${file.path}:${i + 1} → ${line.trim().slice(0, 120)}`,
+            confidence: "low",
+          });
+        }
+        continue;
+      }
+      HOST_RE.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = HOST_RE.exec(line)) !== null) {
+        const host = m[1].toLowerCase();
+        if (
+          IGNORED_HOSTS.some((h) => host === h || host.endsWith(`.${h}`)) ||
+          host.endsWith(".local") ||
+          /^\d+\.\d+\.\d+\.\d+$/.test(host)
+        ) {
+          continue;
+        }
+        const key = `host:${host}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          out.push({
+            name: `External: ${host}`,
+            evidence: `${file.path}:${i + 1} → ${line.trim().slice(0, 120)}`,
+            confidence: "low",
+          });
+        }
+        if (out.length >= 8) return out;
+      }
+    }
+  }
+  return out;
+}

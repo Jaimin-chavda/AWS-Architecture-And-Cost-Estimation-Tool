@@ -21,6 +21,7 @@ import type { RepoSignals, KeyFile } from "./repoFetcher.ts";
 import type { EvidenceRecord } from "./schema.ts";
 import {
   matchIntegration,
+  detectExternalFallback,
   type IntegrationEcosystem,
 } from "./integrationRegistry.ts";
 
@@ -1800,6 +1801,36 @@ export function analyzeProject(signals: RepoSignals): ProjectProfile {
         addUnique(databases, entry, seenDatabases);
       } else {
         addUnique(frameworks, entry, seenFrameworks);
+      }
+    }
+  }
+
+  // ── Pass 2c: unknown-service fallback (STEP 2) ──────────────────────────
+  // Outbound-endpoint evidence in manifests/config with exact file:line
+  // citations. Skipped when the same line already matched the registry.
+  {
+    const fallbacks = detectExternalFallback(
+      allFiles.map((f) => ({ path: f.path, content: f.content }))
+    );
+    const knownTokens = new Set<string>();
+    for (const f of [...frameworks, ...databases, ...awsUsage]) {
+      for (const tok of f.name.toLowerCase().split(/[^a-z0-9]+/)) {
+        if (tok.length >= 4) knownTokens.add(tok);
+      }
+    }
+    for (const fb of fallbacks) {
+      const snippet = fb.evidence.toLowerCase();
+      let known = false;
+      for (const tok of knownTokens) {
+        if (snippet.includes(tok)) {
+          known = true;
+          break;
+        }
+      }
+      if (known) continue;
+      if (!seenFrameworks.has(fb.name)) {
+        seenFrameworks.add(fb.name);
+        frameworks.push({ name: fb.name, evidence: fb.evidence, confidence: "low" });
       }
     }
   }
