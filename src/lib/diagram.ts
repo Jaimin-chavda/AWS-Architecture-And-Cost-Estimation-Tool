@@ -896,16 +896,19 @@ function rectsCollide(a: Rect, b: Rect): boolean {
 /**
  * Computes the label bounding box for a node.
  * Labels are positioned below the icon (verticalLabelPosition=bottom).
- * Width = CELL_W (full cell width for centering), height = lineCount * 14px.
+ * Width tracks the longest line (~7px/char, capped at the cell width);
+ * height = lineCount * 14px.
  */
-function labelBbox(nodeX: number, nodeY: number, labelLineCount: number): Rect {
+function labelBbox(nodeX: number, nodeY: number, label: string): Rect {
   const LINE_H = 14;
   const iconCenterX = nodeX + ICON_SIZE / 2;
+  const longest = Math.max(1, ...label.split("\n").map((l) => l.length));
+  const w = Math.min(CELL_W, longest * 7 + 8);
   return {
-    x: iconCenterX - CELL_W / 2,
+    x: iconCenterX - w / 2,
     y: nodeY + ICON_SIZE + 4, // 4px spacing below icon
-    w: CELL_W,
-    h: labelLineCount * LINE_H,
+    w,
+    h: label.split("\n").length * LINE_H,
   };
 }
 
@@ -2119,6 +2122,116 @@ export interface RoutedEdge {
 }
 
 /**
+ * Label box for an edge label anchored at a point. Shared with the
+ * validator so seating and checking use identical geometry.
+ */
+export function edgeLabelBox(anchor: { x: number; y: number }, label: string): Rect {
+  return {
+    x: anchor.x - (label.length * 7 + 8) / 2,
+    y: anchor.y - 8,
+    w: label.length * 7 + 8,
+    h: 16,
+  };
+}
+
+/**
+ * Label box for a node label below its 56px icon. Shared with the
+ * validator so seating and checking use identical geometry.
+ */
+export function nodeLabelBox(
+  icon: { x: number; y: number },
+  label: string
+): Rect {
+  const lines = Math.max(1, label.split("\n").length);
+  return {
+    x: icon.x + ICON_SIZE / 2 - CELL_W / 2,
+    y: icon.y + ICON_SIZE + 4,
+    w: CELL_W,
+    h: lines * 14,
+  };
+}
+
+function boxesOverlap(a: Rect, b: Rect): boolean {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+/**
+ * Seats every labelled edge on a horizontal segment, clear of node label
+ * boxes. The recorded offset is set to (seat − path middle) so renderers
+ * and the validator agree exactly where the label sits.
+ */
+export function seatEdgeLabels(
+  routed: RoutedEdge[],
+  nodes: Array<{ id: string; label: string }>,
+  nodeAbsGeo: Record<string, { x: number; y: number; w: number; h: number }>
+): void {
+  const labelOf = new Map(nodes.map((n) => [n.id, n.label]));
+  for (const edge of routed) {
+    if (!edge.label || edge.label.trim().length === 0) continue;
+    const src = nodeAbsGeo[edge.sourceId];
+    const dst = nodeAbsGeo[edge.targetId];
+    if (!src || !dst) continue;
+    const pts = [
+      { x: src.x + src.w / 2, y: src.y + src.h / 2 },
+      ...edge.waypoints,
+      { x: dst.x + dst.w / 2, y: dst.y + dst.h / 2 },
+    ];
+    // Path middle (what renderers offset from).
+    let total = 0;
+    const lens: number[] = [];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const len = Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+      lens.push(len);
+      total += len;
+    }
+    let acc = 0;
+    let middle = pts[pts.length - 1];
+    for (let i = 0; i < pts.length - 1; i++) {
+      if (acc + lens[i] >= total / 2) {
+        const t = lens[i] === 0 ? 0 : (total / 2 - acc) / lens[i];
+        middle = {
+          x: pts[i].x + (pts[i + 1].x - pts[i].x) * t,
+          y: pts[i].y + (pts[i + 1].y - pts[i].y) * t,
+        };
+        break;
+      }
+      acc += lens[i];
+    }
+    // Candidate seats: midpoints and quarter points of horizontal runs.
+    const candidates: Array<{ x: number; y: number }> = [];
+    for (let i = 0; i < pts.length - 1; i++) {
+      if (Math.abs(pts[i + 1].y - pts[i].y) <= 4) {
+        const len = Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+        if (len >= 24) {
+          for (const t of [0.25, 0.5, 0.75]) {
+            candidates.push({
+              x: pts[i].x + (pts[i + 1].x - pts[i].x) * t,
+              y: pts[i].y + (pts[i + 1].y - pts[i].y) * t,
+            });
+          }
+        }
+      }
+    }
+    const blockers: Rect[] = [];
+    for (const [id, g] of Object.entries(nodeAbsGeo)) {
+      if (id === edge.sourceId || id === edge.targetId) continue;
+      blockers.push(nodeLabelBox(g, labelOf.get(id) ?? ""));
+      blockers.push({ x: g.x, y: g.y, w: g.w, h: g.h });
+    }
+    let seat = candidates[0] ?? middle;
+    for (const c of candidates) {
+      const box = edgeLabelBox(c, edge.label);
+      if (!blockers.some((b) => boxesOverlap(box, b))) {
+        seat = c;
+        break;
+      }
+    }
+    edge.labelOffsetX = Math.round(seat.x - middle.x);
+    edge.labelOffsetY = Math.round(seat.y - middle.y);
+  }
+}
+
+/**
  * Computes orthogonal waypoints through container gutters with clean branching
  * and positions edge labels with non-colliding offsets and opaque backgrounds.
  */
@@ -2176,16 +2289,25 @@ export function routeEdges(
       const srcBot = Math.round(src.y + src.h);
       const dstTop = Math.round(dst.y);
 
-      // Primary direction determines exit and entry ports
+      // Primary direction determines exit and entry ports.
+      // The horizontal strip between the endpoints bounds every
+      // between-check below.
+      const stripMinX = Math.min(srcCx, dstCx) - 8;
+      const stripMaxX = Math.max(srcCx, dstCx) + 8;
+      const inStrip = (n: { x: number; y: number; w: number; h: number }): boolean =>
+        n.x < stripMaxX && n.x + n.w > stripMinX;
       if (Math.abs(dy) >= Math.abs(dx)) {
         if (dy >= 0) {
           // Downward vertical flow
           exitPort = { x: 0.5, y: 1 };
           entryPort = { x: 0.5, y: 0 };
 
-          // Check if intermediate nodes lie between source and target
+          // Check if intermediate nodes lie between source and target:
+          // in the vertical band AND overlapping the horizontal strip
+          // between the two endpoints. Nodes off to the side never count —
+          // routing around them produces absurd cross-diagram detours.
           const intermediateNodes = allNodeGeos.filter(
-            (n) => n !== src && n !== dst && n.y >= srcBot - 5 && n.y + n.h <= dstTop + 5
+            (n) => n !== src && n !== dst && inStrip(n) && n.y >= srcBot - 5 && n.y + n.h <= dstTop + 5
           );
 
           if (srcBot < dstTop - 15) {
@@ -2227,7 +2349,7 @@ export function routeEdges(
           const laneOffset = (laneIdx % 2 === 0 ? 1 : -1) * Math.ceil(laneIdx / 2) * 12;
 
           const intermediateNodes = allNodeGeos.filter(
-            (n) => n !== src && n !== dst && n.y >= dst.y + dst.h - 5 && n.y + n.h <= src.y + 5
+            (n) => n !== src && n !== dst && inStrip(n) && n.y >= dst.y + dst.h - 5 && n.y + n.h <= src.y + 5
           );
 
           if (intermediateNodes.length > 0) {
@@ -2238,6 +2360,9 @@ export function routeEdges(
             const bypassX = Math.abs(srcCx - bypassRight) <= Math.abs(srcCx - bypassLeft) ? bypassRight : bypassLeft;
             const g1Y = Math.round(src.y - 16) - laneOffset;
             const g2Y = Math.round(dst.y + dst.h + 16) + laneOffset;
+            if (process.env.DIAGRAM_DEBUG === "1") {
+              console.log(`UP ${e.source}->${e.target} src=(${srcCx},${Math.round(src.y + src.h / 2)}) dst=(${dstCx},${Math.round(dst.y + dst.h / 2)}) n=${intermediateNodes.length} bypassX=${bypassX} g1=${g1Y} g2=${g2Y}`);
+            }
             waypoints.push({ x: srcCx, y: g1Y });
             waypoints.push({ x: bypassX, y: g1Y });
             waypoints.push({ x: bypassX, y: g2Y });
@@ -2277,6 +2402,22 @@ export function routeEdges(
       entryPort,
       flowStep: e.flowStep,
     });
+  }
+
+  // Every edge gets explicit waypoints through the inter-tier channels:
+  // waypoint-less edges receive a horizontal bus at the vertical midpoint,
+  // so labels always have a horizontal segment to sit on.
+  for (const edge of routed) {
+    if (edge.waypoints.length > 0) continue;
+    const src = nodeAbsGeo[edge.sourceId];
+    const dst = nodeAbsGeo[edge.targetId];
+    if (!src || !dst) continue;
+    const srcCx = Math.round(src.x + src.w / 2);
+    const srcCy = Math.round(src.y + src.h / 2);
+    const dstCx = Math.round(dst.x + dst.w / 2);
+    const dstCy = Math.round(dst.y + dst.h / 2);
+    const midY = Math.round((srcCy + dstCy) / 2);
+    edge.waypoints.push({ x: srcCx, y: midY }, { x: dstCx, y: midY });
   }
 
   // Post-pass: test every routed segment against every non-endpoint node
@@ -2387,14 +2528,19 @@ export function adjustEdgeLanes(
     // Each attempt resets to the original waypoints and tries one offset:
     // both axes, both directions, growing magnitude. The first offset that
     // clears every non-endpoint node wins.
+    // Each attempt resets to the original waypoints and tries one offset:
+    // perpendicular axis first (into the channels), then parallel, both
+    // directions, growing magnitude. The first offset that clears every
+    // non-endpoint node wins.
+    const perpIsX = dominantVertical;
     for (let attempt = 1; attempt <= 12; attempt++) {
       if (!edgeHitsNode(edge, nodeAbsGeo)) break;
-      const cycle = Math.floor((attempt - 1) / 2);
-      const dir = attempt % 2 === 1 ? 1 : -1;
-      const useDominant = cycle % 2 === 0;
-      const step = (Math.floor(cycle / 2) + 1) * (GAP / 2);
-      const shiftX = (useDominant ? !dominantVertical : dominantVertical) ? 0 : dir * step;
-      const shiftY = (useDominant ? dominantVertical : !dominantVertical) ? dir * step : 0;
+      const mag = 20 * (1 + Math.floor((attempt - 1) / 4));
+      const phase = (attempt - 1) % 4;
+      const useX = (phase < 2) === perpIsX;
+      const dir = phase % 2 === 0 ? 1 : -1;
+      const shiftX = useX ? dir * mag : 0;
+      const shiftY = useX ? 0 : dir * mag;
       edge.waypoints = original.map((w) => ({ x: w.x + shiftX, y: w.y + shiftY }));
     }
   }
@@ -2689,15 +2835,16 @@ export function buildDiagramElements(
     (n) => stage1ServiceIds.has(n.serviceId as ServiceId) || n.componentId.startsWith("ext-")
   );
 
-  // 3b. Label collision resolution pass (clamped to parent container bounds)
+  // 3b. Label collision resolution pass (clamped to parent container bounds).
+  // Shifted nodes write back into the layout so routing, validation and
+  // rendering all share one geometry.
   {
     const occupiedBboxes: Rect[] = [];
     for (const node of groundedNodes) {
       const absGeo = nodeAbsGeo[node.id];
       if (!absGeo) continue;
 
-      const lines = labelLineCount(node.label);
-      let bbox = labelBbox(absGeo.x, absGeo.y, lines);
+      let bbox = labelBbox(absGeo.x, absGeo.y, node.label);
       let attempts = 0;
       const MAX_ATTEMPTS = 5;
 
@@ -2711,8 +2858,16 @@ export function buildDiagramElements(
         }
         absGeo.y += shift;
         node.geo.y += shift;
-        bbox = labelBbox(absGeo.x, absGeo.y, lines);
+        bbox = labelBbox(absGeo.x, absGeo.y, node.label);
         attempts++;
+      }
+      if (attempts > 0) {
+        const dy = attempts * (CELL_H + GAP);
+        for (const entry of Object.values(layout.nodes)) {
+          if (entry.componentId === node.componentId && entry.parent === node.parent) {
+            entry.y += dy;
+          }
+        }
       }
 
       occupiedBboxes.push({ x: absGeo.x, y: absGeo.y, w: absGeo.w, h: absGeo.h });
@@ -2859,8 +3014,10 @@ export function buildDiagramElements(
     edgeKeys.add(forwardKey);
   }
 
-  // 5. Route edges with collision avoidance and label staggering
+  // 5. Route edges with collision avoidance and label staggering,
+  // then seat every label on a clear horizontal run.
   const routedEdges = routeEdges(rawEdges, nodeAbsGeo);
+  seatEdgeLabels(routedEdges, groundedNodes, nodeAbsGeo);
 
   return {
     layout,

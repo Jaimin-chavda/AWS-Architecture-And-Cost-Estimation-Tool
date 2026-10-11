@@ -18,6 +18,9 @@ import {
   CELL_W,
   CELL_H,
   ICON_SIZE,
+  containerParent,
+  edgeLabelBox,
+  nodeLabelBox,
   SERVICE_SCOPE,
   scopeOf,
   type DiagramElements,
@@ -228,6 +231,125 @@ export function validateDiagram(plan: ServicePlan, elements: DiagramElements): D
           failures.push(`edge "${e.id}" segment ${i} intersects node "${n.componentId}" (${n.serviceId})`);
           break;
         }
+      }
+    }
+  }
+
+  // 5b. No segment may cross an isolation container unless an endpoint
+  // node is inside it or shares its AZ. Cloud/edge/regional bands and the
+  // VPC/AZ shells are transit by design and exempt; subnets, the spanning
+  // data subnet and the external column are not. Subnets stacked in one AZ
+  // are legitimate transit for that AZ's own endpoints.
+  const azOfContainer = (cid: string): number | null => {
+    const m = cid.match(/^container-(?:public|private|az)-(\d+)$/);
+    return m ? Number(m[1]) : null;
+  };
+  const azOfNode = (nodeId: string): number | null => {
+    const node = nodes.find((n) => n.id === nodeId);
+    if (!node) return null;
+    let id: string | undefined = node.parent;
+    while (id && id !== "1" && id !== "container-aws_cloud") {
+      const m = id.match(/^container-(?:public|private|az)-(\d+)$/);
+      if (m) return Number(m[1]);
+      id = containerParent(id);
+    }
+    return null;
+  };
+  const isTransitShell = (cid: string): boolean =>
+    cid === "container-aws_cloud" ||
+    cid === "container-edge" ||
+    cid === "container-regional" ||
+    cid === "container-vpc" ||
+    /^container-az-\d+$/.test(cid);
+  const nodeInside = (nodeId: string, containerId: string): boolean => {
+    const r = nodeIdRect.get(nodeId);
+    const c = layout.containers[containerId];
+    return Boolean(r && c && insideRect(center(r), c));
+  };
+  for (const e of routedEdges) {
+    const src = nodeIdRect.get(e.sourceId);
+    const dst = nodeIdRect.get(e.targetId);
+    if (!src || !dst) continue;
+    const srcAz = azOfNode(e.sourceId);
+    const dstAz = azOfNode(e.targetId);
+    const pts = [center(src), ...e.waypoints, center(dst)];
+    for (let i = 0; i < pts.length - 1; i++) {
+      for (const [cid, c] of Object.entries(layout.containers)) {
+        if (!c || isTransitShell(cid)) continue;
+        if (nodeInside(e.sourceId, cid) || nodeInside(e.targetId, cid)) continue;
+        const az = azOfContainer(cid);
+        if (az !== null && (srcAz === az || dstAz === az)) continue;
+        if (segmentHitsRect(pts[i], pts[i + 1], c)) {
+          failures.push(
+            `edge "${e.id}" segment ${i} crosses container "${cid}" with no endpoint inside`
+          );
+          break;
+        }
+      }
+    }
+  }
+
+  // 5c. Edge labels sit on a horizontal segment, offset from the line, and
+  // never overlap a node label box. Box geometry is shared with the layout
+  // (edgeLabelBox/nodeLabelBox), so seating and checking agree exactly.
+  const labelBoxOf = (nodeId: string): Rect | null => {
+    const node = nodes.find((n) => n.id === nodeId);
+    const r = nodeIdRect.get(nodeId);
+    if (!node || !r) return null;
+    return nodeLabelBox({ x: r.x, y: r.y }, node.label);
+  };
+  const boxesOverlap = (a: Rect, b: Rect): boolean =>
+    a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  for (const e of routedEdges) {
+    if (!e.label || e.label.trim().length === 0) continue;
+    const src = nodeIdRect.get(e.sourceId);
+    const dst = nodeIdRect.get(e.targetId);
+    if (!src || !dst) continue;
+    const pts = [center(src), ...e.waypoints, center(dst)];
+    // Label anchor: polyline midpoint plus the recorded offset.
+    let total = 0;
+    const segLens: number[] = [];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const len = Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+      segLens.push(len);
+      total += len;
+    }
+    let acc = 0;
+    let anchor = pts[pts.length - 1];
+    for (let i = 0; i < pts.length - 1; i++) {
+      if (acc + segLens[i] >= total / 2) {
+        const t = segLens[i] === 0 ? 0 : (total / 2 - acc) / segLens[i];
+        anchor = {
+          x: pts[i].x + (pts[i + 1].x - pts[i].x) * t + e.labelOffsetX,
+          y: pts[i].y + (pts[i + 1].y - pts[i].y) * t + e.labelOffsetY,
+        };
+        break;
+      }
+      acc += segLens[i];
+    }
+    // The anchor must sit near a horizontal segment (stagger offsets
+    // deliberately push labels along/across it, so admit the offset).
+    const nearHorizontal = pts.some(
+      (_, i) =>
+        i < pts.length - 1 &&
+        Math.abs(pts[i + 1].y - pts[i].y) <= 4 &&
+        Math.min(pts[i].y, pts[i + 1].y) - 20 <= anchor.y &&
+        anchor.y <= Math.max(pts[i].y, pts[i + 1].y) + 20 &&
+        Math.min(pts[i].x, pts[i + 1].x) - 8 - Math.abs(e.labelOffsetX) <= anchor.x &&
+        anchor.x <= Math.max(pts[i].x, pts[i + 1].x) + 8 + Math.abs(e.labelOffsetX)
+    );
+    if (!nearHorizontal) {
+      failures.push(`edge "${e.id}" label is not on a horizontal segment`);
+    }
+    const labelBox: Rect = edgeLabelBox(anchor, e.label);
+    for (const n of nodes) {
+      if (n.id === e.sourceId || n.id === e.targetId) continue;
+      const lb = labelBoxOf(n.id);
+      if (lb && boxesOverlap(labelBox, lb)) {
+        failures.push(
+          `edge "${e.id}" label overlaps node "${n.componentId}" (${n.serviceId}) label`
+        );
+        break;
       }
     }
   }
