@@ -86,7 +86,10 @@ export const INTEGRATION_REGISTRY: IntegrationRow[] = [
   { match: r("^nodemailer$|^@sendgrid\\/mail$|^sendgrid(-python|-go)?$|^mailgun$|^smtplib$|^spring-boot-starter-mail$"), ecosystem: "any", role: "email", hosting: "third-party", protocol: "SMTP", label: "Email provider" },
   { match: r("^@aws-sdk\\/client-ses$|^aws-sdk-php.*|.*ses.*"), ecosystem: "any", role: "email", hosting: "aws-managed", awsService: "SES", protocol: "SDK", label: "Amazon SES" },
   // --- Auth ---
-  { match: r("^keycloak.*$|^keycloak-js$|^keycloak-connect$|^keycloak-spring-boot-starter$|^keycloak-adapter-core$"), ecosystem: "any", role: "auth", hosting: "third-party", protocol: "HTTPS", label: "Keycloak" },
+  // Self-hosted identity provider: runs inside the VPC as a container, so it
+  // is not external egress (unlike SaaS identity providers below). Maps to
+  // the managed substitution, never to a secrets store.
+  { match: r("^keycloak.*$|^keycloak-js$|^keycloak-connect$|^keycloak-spring-boot-starter$|^keycloak-adapter-core$"), ecosystem: "any", role: "auth", hosting: "in-process", protocol: "SDK", label: "Keycloak" },
   { match: r("^jsonwebtoken$|^passport$|^bcrypt$|^next-auth$|^@auth\\/core$|^oauth$"), ecosystem: "any", role: "auth", hosting: "in-process", protocol: "SDK", label: "Auth library" },
   { match: r("^auth0.*$|^@auth0\\/.*|^okta.*$|^clerk.*$"), ecosystem: "any", role: "auth", hosting: "third-party", protocol: "HTTPS", label: "Identity provider" },
   { match: r("^@aws-sdk\\/client-cognito-identity-provider$"), ecosystem: "any", role: "auth", hosting: "aws-managed", awsService: "Cognito", protocol: "SDK", label: "Amazon Cognito" },

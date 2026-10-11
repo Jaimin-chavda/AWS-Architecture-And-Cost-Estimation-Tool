@@ -22,6 +22,9 @@ import type {
 import type { ProjectProfile } from "./repoAnalyzer.ts";
 import { type PatternId, deduplicateAwsMappings } from "./architecture.ts";
 import { buildAlternateProposal } from "./patternAlternates.ts";
+import { enforceProductionReadiness, extractProductionSignals, type ProductionSignals } from "./productionReadiness.ts";
+import { deriveTraits } from "./workloadTraits.ts";
+import { applyInfraPolicy } from "./infraPolicy.ts";
 
 // ---------------------------------------------------------------------------
 // RuleInput — signals available to the rule engine
@@ -1333,7 +1336,21 @@ export function buildServicePlan(
     return floor;
   }
 
-  return check.data;
+  // Apply production readiness enforcement (flags only; service injection
+  // is owned by infraPolicy.ts). Traits gate every predicate so nothing is
+  // injected unless its rule fired.
+  const combined = [input.description, input.fileContent].join("\n");
+  const traits = deriveTraits({
+    profile: input.profile,
+    serviceIds: planServices.map((s) => s.serviceId),
+    fileNames: input.fileNames,
+    combinedText: combined,
+  });
+  const prodSignals = extractProductionSignals(combined, input.fileNames, input.profile);
+  const flaggedPlan = enforceProductionReadiness(check.data, prodSignals, traits);
+  const finalPlan = applyInfraPolicy(flaggedPlan, traits);
+
+  return finalPlan;
 }
 
 const buildPlan = buildServicePlan;

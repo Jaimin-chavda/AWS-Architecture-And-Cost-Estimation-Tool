@@ -14,6 +14,8 @@ import { runRuleEngine } from "./ruleEngine.ts";
 import { analyzeArchitecture, llmConfigured } from "./llmClient.ts";
 import { mapArchitectureModelToServicePlan } from "./architecture.ts";
 import type { ArchitectureModel } from "./architecture.ts";
+import { deriveTraits } from "./workloadTraits.ts";
+import { applyInfraPolicy } from "./infraPolicy.ts";
 import {
   type Diagnostic,
   type PipelineEngine,
@@ -135,8 +137,20 @@ export async function runInference(input: InferenceInput): Promise<InferenceResu
   const diagnostics: Diagnostic[] = [];
 
   // Fallback: deterministic rule engine (no LLM configured, or LLM failed).
+  // runRuleEngine already applies the policy; re-applying here with traits
+  // derived from the produced plan is idempotent and keeps this choke
+  // point the single place where the winning plan is finalized.
   const baseline = (engine: PipelineEngine): InferenceResult => {
-    const basePlan = runRuleEngine({ ...ruleInput, profile: profile ?? undefined });
+    const raw = runRuleEngine({ ...ruleInput, profile: profile ?? undefined });
+    const basePlan = applyInfraPolicy(
+      raw,
+      deriveTraits({
+        profile: profile ?? undefined,
+        serviceIds: raw.awsMappings.map((m) => m.serviceId),
+        fileNames: ruleInput.fileNames,
+        combinedText: [ruleInput.description, ruleInput.fileContent ?? ""].join("\n"),
+      })
+    );
     pushTerminalStateDiagnostic(basePlan, diagnostics);
     const plans =
       basePlan.proposals && basePlan.proposals.length > 0 ? basePlan.proposals : [basePlan];
@@ -176,7 +190,7 @@ export async function runInference(input: InferenceInput): Promise<InferenceResu
   }
 
   // 3. Deterministic AWS service mapping from the model — the ONLY inference path.
-  const primaryPlan = mapArchitectureModelToServicePlan(llm.model, {
+  const mappedPlan = mapArchitectureModelToServicePlan(llm.model, {
     inputKind: ruleInput.inputKind,
     grounding: ruleInput.grounding,
     truncated: ruleInput.truncated,
@@ -185,6 +199,18 @@ export async function runInference(input: InferenceInput): Promise<InferenceResu
     evidenceRegister: profile?.evidenceRegister,
     diagnostics,
   });
+
+  // Single choke point: trait-gated policy runs after the winning path
+  // produces a plan and before diagram/cost/CFT consume it.
+  const primaryPlan = applyInfraPolicy(
+    mappedPlan,
+    deriveTraits({
+      profile: profile ?? undefined,
+      serviceIds: mappedPlan.awsMappings.map((m) => m.serviceId),
+      fileNames: ruleInput.fileNames,
+      combinedText: [description, ruleInput.fileContent ?? ""].join("\n"),
+    })
+  );
 
   const cappedPlan = applyGroundingCap(primaryPlan, ruleInput.grounding);
   const alternatePlan = buildAlternateProposal(cappedPlan, ruleInput);
