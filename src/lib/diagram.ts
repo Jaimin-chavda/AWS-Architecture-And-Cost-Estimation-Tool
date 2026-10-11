@@ -1352,7 +1352,8 @@ export function computeLayout(
 
   // ---- AZ row ----------------------------------------------------------
   // AZs with no subnets are omitted; compute replicas land in every AZ that
-  // has a private subnet (one compute node per AZ).
+  // has a private subnet (one compute node per AZ). A VPC with only a
+  // spanning data subnet renders no AZ boxes at all.
   const azSubnetW = gridW(SUBNET_COLS);
   const renderedAzs: number[] = [];
   if (hasVpcContent) {
@@ -1361,7 +1362,6 @@ export function computeLayout(
       const hasPriv = buckets["vpc-private"].length > 0;
       if (hasPub || hasPriv) renderedAzs.push(i);
     }
-    if (renderedAzs.length === 0) renderedAzs.push(1);
   }
   const azW = azSubnetW + 2 * PAD;
   // Private subnets start at the same y in every AZ (reserving the public

@@ -886,6 +886,46 @@ describe("Fix 3 — Icon Fallback Handling", () => {
       console.warn = origWarn;
     }
   });
+
+  it("every vertex in generated XML has a label or an icon style", () => {
+    const plan = makePlan({
+      components: [
+        { id: "compute", type: "backend", technology: "ECS", evidence: ["test"], confidence: "high", status: "detected" },
+        { id: "db", type: "database", technology: "RDS", evidence: ["test"], confidence: "high", status: "detected" },
+        { id: "cdn", type: "frontend", technology: "CloudFront", evidence: ["test"], confidence: "high", status: "detected" },
+      ],
+      awsMappings: [
+        { componentId: "compute", serviceId: "ECS", confidence: "high", evidence: "test", fromPattern: false },
+        { componentId: "db", serviceId: "RDS", confidence: "high", evidence: "test", fromPattern: false },
+        { componentId: "cdn", serviceId: "CloudFront", confidence: "high", evidence: "test", fromPattern: false },
+      ],
+    });
+    const xml = generateDiagramXml(plan);
+    const vertices = [...xml.matchAll(/<mxCell id="([^"]+)" value="([^"]*)" serviceId="[^"]*" style="([^"]*)"[^>]*vertex="1"/g)];
+    assert.ok(vertices.length >= 3, "expected service vertices in XML");
+    for (const m of vertices) {
+      const label = m[2].replace(/&amp;|&lt;|&gt;|&quot;|&apos;/g, "").trim();
+      const style = m[3];
+      assert.ok(
+        label.length > 0 || /mxgraph\.aws4\.[a-z_]+;/.test(style),
+        `vertex ${m[1]} must have a label or an icon style`
+      );
+    }
+  });
+
+  it("data-only plans render no empty AZ placeholder", () => {
+    const plan = makePlan({
+      components: [
+        { id: "db", type: "database", technology: "RDS", evidence: ["test"], confidence: "high", status: "detected" },
+      ],
+      awsMappings: [
+        { componentId: "db", serviceId: "RDS", confidence: "high", evidence: "test", fromPattern: false },
+      ],
+    });
+    const xml = generateDiagramXml(plan);
+    assert.ok(xml.includes('id="container-data"'), "data subnet rendered");
+    assert.ok(!xml.includes("container-az-"), "no AZ placeholder without subnets");
+  });
 });
 
 // ---------------------------------------------------------------------------
