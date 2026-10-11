@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { SERVICE_IDS, type ServicePlan, type ServiceId } from "../schema.ts";
 import { SERVICE_SCOPE, scopeOf } from "../diagramValidator.ts";
 import { applyInfraPolicy } from "../infraPolicy.ts";
+import { deriveTraits } from "../workloadTraits.ts";
 import {
   INTEGRATION_REGISTRY,
   matchIntegration,
@@ -219,6 +220,55 @@ describe("STEP 4: policy predicates", () => {
     assert.ok(mappingIds(out).includes("S3"));
     assert.ok(mappingIds(out).includes("CloudFront"));
     assert.ok(!mappingIds(out).includes("ALB"));
+  });
+
+  it("datastore credentials in evidence add SecretsManager with policy evidence", () => {
+    const seeded: ServicePlan = {
+      ...emptyPlan(),
+      awsMappings: [
+        {
+          componentId: "svc-rds",
+          serviceId: "RDS",
+          confidence: "medium",
+          evidence: "postgres://user:pass@db:5432/app",
+          fromPattern: false,
+          category: "repository-evidence",
+        },
+      ],
+    };
+    const t = deriveTraits({
+      serviceIds: ["RDS"],
+      evidenceTexts: ["postgres://user:pass@db:5432/app"],
+    });
+    assert.ok(t.dbCredentialEvidence);
+    const out = applyInfraPolicy(seeded, t);
+    const sm = out.awsMappings.find((m) => m.serviceId === "SecretsManager")!;
+    assert.ok(sm, "SecretsManager added");
+    assert.ok(sm.evidence.startsWith("policy: datastore-credentials because"));
+    assert.strictEqual(sm.category, "recommendation");
+  });
+
+  it("no credential evidence means no datastore-credentials injection", () => {
+    const seeded: ServicePlan = {
+      ...emptyPlan(),
+      awsMappings: [
+        {
+          componentId: "svc-rds",
+          serviceId: "RDS",
+          confidence: "medium",
+          evidence: "relational driver seen without corroboration",
+          fromPattern: false,
+          category: "inference",
+        },
+      ],
+    };
+    const t = deriveTraits({
+      serviceIds: ["RDS"],
+      evidenceTexts: ["relational driver seen without corroboration"],
+    });
+    assert.strictEqual(t.dbCredentialEvidence, undefined);
+    const out = applyInfraPolicy(seeded, t);
+    assert.ok(!mappingIds(out).includes("SecretsManager"));
   });
 
   it("repository-evidence mappings survive pruning", () => {

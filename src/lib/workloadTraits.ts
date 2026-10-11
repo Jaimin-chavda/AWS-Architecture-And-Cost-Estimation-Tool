@@ -29,6 +29,12 @@ export interface WorkloadTraits {
   hasKvStore: boolean;
   /** Credentials/tokens/keys in config, or sensitive-role external egress. */
   hasSecrets: boolean;
+  /**
+   * Cited evidence that a networked data store is reached with credentials
+   * (connection string or credential env var in mapping evidence).
+   * Present only when such evidence exists.
+   */
+  dbCredentialEvidence?: string;
   /** Third-party integrations whose protocol is network-based (egress). */
   egressTargets: string[];
   /** Cited evidence per trait, for policy explanations. */
@@ -77,6 +83,22 @@ const NETWORK_PROTOCOLS: ReadonlySet<string> = new Set([
   "TCP",
 ]);
 
+/** Data stores reached over the network (never in-process files). */
+const NETWORKED_STORES: ReadonlySet<string> = new Set([
+  ...RELATIONAL_SERVICES,
+  ...DOCUMENT_SERVICES,
+  ...KV_SERVICES,
+  "Redshift",
+]);
+
+/**
+ * Credential material inside mapping/component evidence: a connection
+ * string (scheme:// or user@host) or a credential env var name. Bare
+ * words like "connection" never match — only cited credential evidence.
+ */
+const EVIDENCE_CREDENTIAL_RE =
+  /:\/\/|\w+@[\w.-]+|connection[_-]?string|\b(password|passwd|secret|api[_-]?key|auth[_-]?token|access[_-]?token|private[_-]?key|client[_-]?secret|db[_-]?password|database_url)\b/i;
+
 export interface TraitInputs {
   profile?: ProjectProfile | null;
   /** Detected/mapped AWS service ids from either inference path. */
@@ -84,6 +106,8 @@ export interface TraitInputs {
   fileNames?: string[];
   /** Combined non-README code/config text for secret scanning. */
   combinedText?: string;
+  /** Mapping/component evidence strings from either inference path. */
+  evidenceTexts?: string[];
 }
 
 function fileHas(fileNames: string[] | undefined, re: RegExp): boolean {
@@ -136,6 +160,7 @@ function registryRoles(profile: ProjectProfile | undefined): {
 
 export function deriveTraits(inputs: TraitInputs): WorkloadTraits {
   const { profile, serviceIds = [], fileNames = [], combinedText = "" } = inputs;
+  const evidenceTexts = inputs.evidenceTexts ?? [];
   const evidence: WorkloadTraits["evidence"] = {};
   const services = new Set<string>(serviceIds);
 
@@ -251,6 +276,19 @@ export function deriveTraits(inputs: TraitInputs): WorkloadTraits {
     evidence.hasSecrets = `sensitive-role external integration: ${sensitiveEgress[0]}`;
   }
 
+  // Data store reached over the network with credentials as evidence:
+  // a networked store mapping plus a connection string or credential env
+  // var cited in mapping/component evidence.
+  let dbCredentialEvidence: string | undefined;
+  if ([...services].some((s) => NETWORKED_STORES.has(s))) {
+    const hit = evidenceTexts.find((t) => EVIDENCE_CREDENTIAL_RE.test(t));
+    if (hit) {
+      const m = hit.match(EVIDENCE_CREDENTIAL_RE);
+      dbCredentialEvidence = `${(m?.[0] ?? "credential").slice(0, 40)} cited in mapping evidence`;
+      evidence.dbCredentialEvidence = dbCredentialEvidence;
+    }
+  }
+
   const egressTargets = reg.egress;
   if (egressTargets.length > 0) {
     evidence.egressTargets = `${egressTargets.length} external egress target(s)`;
@@ -265,6 +303,7 @@ export function deriveTraits(inputs: TraitInputs): WorkloadTraits {
     hasDocumentDb,
     hasKvStore,
     hasSecrets,
+    dbCredentialEvidence,
     egressTargets,
     evidence,
   };

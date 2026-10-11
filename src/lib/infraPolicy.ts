@@ -28,6 +28,7 @@ export type PolicyRuleName =
   | "load-balancer"
   | "no-compute"
   | "secrets-manager"
+  | "datastore-credentials"
   | "nat-gateway"
   | "relational-multi-az"
   | "static-origin";
@@ -43,13 +44,27 @@ function ensureMapping(
   trait: string,
   traitEvidence: string
 ): void {
+  const evidence = policyEvidence(rule, trait, traitEvidence);
   const existing = plan.awsMappings.find((m) => m.serviceId === serviceId);
   if (existing) {
-    // A repository-evidence mapping already proves this service; leave it.
-    // A previous policy injection is already correct (idempotency).
+    // Repository ground truth (declared config resources) is never
+    // rewritten. Anything else the predicate confirmed is adopted into the
+    // policy: evidence becomes the policy record, so the validator's
+    // policy-evidence rule holds and re-application is idempotent.
+    if (existing.category === "repository-evidence" || /\.tf\b/i.test(existing.evidence)) {
+      return;
+    }
+    existing.evidence = evidence.slice(0, 200);
+    existing.confidence = "low";
+    existing.category = "recommendation";
+    const comp = plan.components.find((c) => c.id === existing.componentId);
+    if (comp) {
+      comp.evidence = [evidence.slice(0, 200)];
+      comp.confidence = "low";
+      if (comp.status !== "detected") comp.status = "inferred";
+    }
     return;
   }
-  const evidence = policyEvidence(rule, trait, traitEvidence);
   const componentId = `svc-${serviceId.toLowerCase()}`;
   const mapping: AwsServiceMapping = {
     componentId,
@@ -173,7 +188,20 @@ export function applyInfraPolicy(
   }
 
   // Rule: secrets predicate -> secrets manager, else prune the suggestion.
-  if (traits.hasSecrets) {
+  // A data store reached over the network with credentials (connection
+  // string or credential env var as evidence) always qualifies on its own.
+  if (traits.dbCredentialEvidence) {
+    ensureMapping(
+      gated,
+      "SecretsManager",
+      "datastore-credentials",
+      "networked data store with credential evidence",
+      traits.dbCredentialEvidence
+    );
+    for (const dm of gated.deploymentModel) {
+      dm.secretsManager = true;
+    }
+  } else if (traits.hasSecrets) {
     ensureMapping(
       gated,
       "SecretsManager",

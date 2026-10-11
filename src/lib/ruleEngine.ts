@@ -1345,6 +1345,7 @@ export function buildServicePlan(
     serviceIds: planServices.map((s) => s.serviceId),
     fileNames: input.fileNames,
     combinedText: combined,
+    evidenceTexts: planServices.map((s) => s.evidence),
   });
   const prodSignals = extractProductionSignals(combined, input.fileNames, input.profile);
   const flaggedPlan = enforceProductionReadiness(check.data, prodSignals, traits);

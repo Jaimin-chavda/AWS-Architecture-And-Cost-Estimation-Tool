@@ -149,6 +149,7 @@ export async function runInference(input: InferenceInput): Promise<InferenceResu
         serviceIds: raw.awsMappings.map((m) => m.serviceId),
         fileNames: ruleInput.fileNames,
         combinedText: [ruleInput.description, ruleInput.fileContent ?? ""].join("\n"),
+        evidenceTexts: raw.awsMappings.map((m) => m.evidence),
       })
     );
     pushTerminalStateDiagnostic(basePlan, diagnostics);
@@ -209,6 +210,10 @@ export async function runInference(input: InferenceInput): Promise<InferenceResu
       serviceIds: mappedPlan.awsMappings.map((m) => m.serviceId),
       fileNames: ruleInput.fileNames,
       combinedText: [description, ruleInput.fileContent ?? ""].join("\n"),
+      evidenceTexts: [
+        ...mappedPlan.awsMappings.map((m) => m.evidence),
+        ...mappedPlan.components.flatMap((c) => c.evidence),
+      ],
     })
   );
 
