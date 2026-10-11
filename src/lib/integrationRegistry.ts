@@ -67,7 +67,7 @@ export const INTEGRATION_REGISTRY: IntegrationRow[] = [
   { match: r("^sqlite3$|^better-sqlite3$|^mattn\\/go-sqlite3$|^modernc\\.org\\/sqlite$|^gorm\\.io\\/driver\\/sqlite$"), ecosystem: "any", role: "data-store", hosting: "in-process", protocol: "TCP", label: "SQLite" },
   { match: r("^mssql$|^tedious$|^microsoft\\.data\\.sqlclient$|^system\\.data\\.sqlclient$|^microsoft\\.entityframeworkcore\\.sqlserver$"), ecosystem: "any", role: "data-store", hosting: "aws-managed", awsService: "RDS", protocol: "TCP", label: "SQL Server" },
   // --- Document / NoSQL ---
-  { match: r("^mongoose$|^mongodb$|^pymongo$|^motor$|^mongodb\\.driver$|^mongodb\\.driver\\.core$|^mongodb\\/mongo-go-driver$|^spring-boot-starter-data-mongodb$|^mongodb-driver-sync$|^mongo-java-driver$"), ecosystem: "any", role: "data-store", hosting: "third-party", protocol: "HTTPS", label: "MongoDB Atlas" },
+  { match: r("^mongoose$|^mongodb$|^pymongo$|^motor$|^mongodb\\.driver$|^mongodb\\.driver\\.core$|^mongodb\\/mongo-go-driver$|^spring-boot-starter-data-mongodb$|^mongodb-driver-sync$|^mongo-java-driver$"), ecosystem: "any", role: "data-store", hosting: "third-party", awsService: "DocumentDB", protocol: "HTTPS", label: "MongoDB Atlas" },
   // --- Key-value / cache ---
   { match: r("^redis$|^ioredis$|^aioredis$|^django-redis$|^predis\\/predis$|^go-redis\\/redis$|^jedis$|^lettuce$|^redix$"), ecosystem: "any", role: "data-store", hosting: "aws-managed", awsService: "ElastiCache", protocol: "TCP", label: "Redis" },
   { match: r("^memcached$|^memjs$"), ecosystem: "any", role: "data-store", hosting: "aws-managed", awsService: "ElastiCache", protocol: "TCP", label: "Memcached" },

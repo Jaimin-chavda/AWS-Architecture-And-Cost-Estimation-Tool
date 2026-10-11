@@ -9,7 +9,7 @@
  * Each rule is a small named predicate over WorkloadTraits. Every injected
  * service records "policy: <rule> because <trait> (<evidence>)" with
  * category "recommendation" and "low" confidence — never "detected".
- * Nothing is added unless its predicate fired (no unconditional injections).
+ * Nothing is added unless its predicate triggered (no unconditional injections).
  *
  * This file contains no package, repo or framework names. It reads traits
  * and ServiceIds only.
@@ -90,7 +90,7 @@ function ensureMapping(
 
 /**
  * Drops recommendation/inference mappings for a service when its predicate
- * did not fire. Repository-evidence mappings (ground truth such as declared
+ * did not trigger. Repository-evidence mappings (ground truth such as declared
  * config resources) always survive.
  */
 function pruneUnevidenced(plan: ServicePlan, serviceId: ServiceId): void {
@@ -128,27 +128,43 @@ export function applyInfraPolicy(
   plan: ServicePlan,
   traits: WorkloadTraits
 ): ServicePlan {
-  const next: ServicePlan = structuredClone(plan);
+  const gated: ServicePlan = structuredClone(plan);
   const ev = (k: keyof Omit<WorkloadTraits, "evidence" | "egressTargets">, fallback: string) =>
     traits.evidence[k] ?? fallback;
 
   // Rule: servesRequests && computeModel != none -> load balancer, 2 AZs.
   if (traits.servesRequests && traits.computeModel !== "none") {
     ensureMapping(
-      next,
+      gated,
       "ALB",
       "load-balancer",
       "servesRequests with backend compute",
       ev("servesRequests", "request-serving workload")
     );
-    for (const dm of next.deploymentModel) {
+    for (const dm of gated.deploymentModel) {
       dm.availabilityZones = 2;
       dm.hasLoadBalancer = true;
     }
   } else {
-    // Rule: computeModel == none (or nothing serves requests) -> no LB.
-    pruneUnevidenced(next, "ALB");
-    for (const dm of next.deploymentModel) {
+    // Rule: computeModel == none (or nothing serves requests) -> no LB,
+    // no compute suggestions: drop unevidenced compute/LB mappings.
+    pruneUnevidenced(gated, "ALB");
+    if (traits.computeModel === "none") {
+      for (const svc of [
+        "ECS",
+        "EKS",
+        "Fargate",
+        "AppRunner",
+        "ElasticBeanstalk",
+        "EC2",
+        "Lightsail",
+        "Batch",
+        "Lambda",
+      ] as ServiceId[]) {
+        pruneUnevidenced(gated, svc);
+      }
+    }
+    for (const dm of gated.deploymentModel) {
       dm.hasLoadBalancer = false;
       if (!traits.servesRequests || traits.computeModel === "none") {
         dm.availabilityZones = 1;
@@ -159,18 +175,18 @@ export function applyInfraPolicy(
   // Rule: secrets predicate -> secrets manager, else prune the suggestion.
   if (traits.hasSecrets) {
     ensureMapping(
-      next,
+      gated,
       "SecretsManager",
       "secrets-manager",
       "hasSecrets",
       ev("hasSecrets", "secret material or sensitive-role integration")
     );
-    for (const dm of next.deploymentModel) {
+    for (const dm of gated.deploymentModel) {
       dm.secretsManager = true;
     }
   } else {
-    pruneUnevidenced(next, "SecretsManager");
-    for (const dm of next.deploymentModel) {
+    pruneUnevidenced(gated, "SecretsManager");
+    for (const dm of gated.deploymentModel) {
       dm.secretsManager = false;
     }
   }
@@ -178,18 +194,18 @@ export function applyInfraPolicy(
   // Rule: egress && compute -> NAT in the public subnet.
   if (traits.egressTargets.length > 0 && traits.computeModel !== "none") {
     ensureMapping(
-      next,
+      gated,
       "NATGateway",
       "nat-gateway",
       "egressTargets with backend compute",
       traits.evidence.egressTargets ?? "external egress"
     );
-    for (const dm of next.deploymentModel) {
+    for (const dm of gated.deploymentModel) {
       dm.natGateway = true;
     }
   } else {
-    pruneUnevidenced(next, "NATGateway");
-    for (const dm of next.deploymentModel) {
+    pruneUnevidenced(gated, "NATGateway");
+    for (const dm of gated.deploymentModel) {
       dm.natGateway = false;
     }
   }
@@ -197,8 +213,8 @@ export function applyInfraPolicy(
   // Rule: relational DB -> multi-AZ flag. Document stores stay external
   // when third-party hosted: no VPC data-subnet flag is set for them here.
   if (traits.hasRelationalDb) {
-    for (const dm of next.deploymentModel) {
-      if (isRelationalComponent(next, dm.componentId)) {
+    for (const dm of gated.deploymentModel) {
+      if (isRelationalComponent(gated, dm.componentId)) {
         dm.database = { multiAz: true };
         if (!dm.notes) dm.notes = "Production DB → recommend Multi-AZ";
       }
@@ -209,14 +225,14 @@ export function applyInfraPolicy(
   // origin, and no compute-flavoured suggestions.
   if (traits.staticOnly) {
     ensureMapping(
-      next,
+      gated,
       "S3",
       "static-origin",
       "staticOnly",
       "static frontend without backend"
     );
     ensureMapping(
-      next,
+      gated,
       "CloudFront",
       "static-origin",
       "staticOnly",
@@ -224,5 +240,5 @@ export function applyInfraPolicy(
     );
   }
 
-  return next;
+  return gated;
 }

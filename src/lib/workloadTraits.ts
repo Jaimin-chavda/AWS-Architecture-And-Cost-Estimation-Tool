@@ -130,13 +130,6 @@ function registryRoles(profile: ProjectProfile | undefined): {
       if (DOCUMENT_SERVICES.has(hit.awsService)) document = true;
       if (KV_SERVICES.has(hit.awsService)) kv = true;
     }
-    // Registry rows without an AWS equivalent still carry a role: a
-    // third-party document store implies a document workload, etc.
-    if (!hit.awsService && hit.hosting !== "in-process") {
-      if (hit.role === "data-store" && /document|mongo|nosql/i.test(hit.label)) {
-        document = true;
-      }
-    }
   }
   return { roles, egress, relational, document, kv };
 }
