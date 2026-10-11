@@ -1,0 +1,18 @@
+[
+  {
+    "componentId": "frontend-1-storage",
+    "serviceId": "S3",
+    "confidence": "high",
+    "evidence": "component Yearbook Frontend (React, Vite, Firebase) → static assets",
+    "fromPattern": false,
+    "category": "repository-evidence"
+  },
+  {
+    "componentId": "frontend-1",
+    "serviceId": "CloudFront",
+    "confidence": "high",
+    "evidence": "component Yearbook Frontend (React, Vite, Firebase) → CDN",
+    "fromPattern": false,
+    "category": "deployment-requirement"
+  }
+]

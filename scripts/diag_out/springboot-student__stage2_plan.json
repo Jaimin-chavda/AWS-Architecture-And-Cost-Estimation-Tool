@@ -1,0 +1,319 @@
+{
+  "architectureModel": {
+    "appType": "generic",
+    "appName": "StudentManagementSystem",
+    "description": "A Spring Boot API for managing student records with CRUD operations, backed by a MySQL database.",
+    "components": [
+      {
+        "id": "backend-api",
+        "name": "Student Management System API",
+        "type": "api",
+        "technology": "Spring Boot, Java",
+        "details": "Provides REST endpoints for student data management (CRUD)",
+        "evidence": [
+          "ev-2",
+          "ev-3"
+        ],
+        "confidence": "high"
+      },
+      {
+        "id": "mysql-database",
+        "name": "MySQL Database",
+        "type": "database",
+        "technology": "MySQL",
+        "details": "Stores student records; configured via application.properties to use database 'CollegeDB'",
+        "evidence": [
+          "ev-4",
+          "ev-5",
+          "ev-6"
+        ],
+        "confidence": "high"
+      }
+    ],
+    "languages": [],
+    "frameworks": [],
+    "databases": [],
+    "apis": [],
+    "externalServices": [],
+    "dependencies": [],
+    "buildConfig": [],
+    "relationships": [
+      {
+        "from": "backend-api",
+        "to": "mysql-database",
+        "type": "reads"
+      },
+      {
+        "from": "backend-api",
+        "to": "mysql-database",
+        "type": "writes"
+      }
+    ]
+  },
+  "servicePlan": {
+    "inputKind": "github_url",
+    "components": [
+      {
+        "id": "backend-api",
+        "type": "api",
+        "technology": "Spring Boot, Java",
+        "evidence": [
+          "ev-2",
+          "ev-3"
+        ],
+        "confidence": "high",
+        "status": "detected"
+      },
+      {
+        "id": "mysql-database",
+        "type": "database",
+        "technology": "MySQL",
+        "evidence": [
+          "ev-4",
+          "ev-5",
+          "ev-6"
+        ],
+        "confidence": "high",
+        "status": "detected"
+      },
+      {
+        "id": "backend-api-alb",
+        "type": "api",
+        "technology": "ALB",
+        "evidence": [
+          "component Student Management System API (Spring Boot, Java) → Application Load Balancer recommendation"
+        ],
+        "confidence": "medium",
+        "status": "inferred"
+      }
+    ],
+    "relationships": [
+      {
+        "from": "backend-api",
+        "to": "mysql-database",
+        "type": "reads"
+      },
+      {
+        "from": "backend-api",
+        "to": "mysql-database",
+        "type": "writes"
+      },
+      {
+        "from": "backend-api-alb",
+        "to": "backend-api",
+        "type": "calls"
+      }
+    ],
+    "deploymentModel": [
+      {
+        "componentId": "backend-api",
+        "public": true,
+        "needsVpc": true,
+        "needsMultiAz": false,
+        "needsAutoscaling": true,
+        "source": "recommended",
+        "availabilityZones": 1,
+        "hasLoadBalancer": false,
+        "secretsManager": false,
+        "natGateway": false,
+        "thirdPartyIntegrations": []
+      },
+      {
+        "componentId": "mysql-database",
+        "public": false,
+        "needsVpc": true,
+        "needsMultiAz": true,
+        "needsAutoscaling": false,
+        "source": "recommended",
+        "notes": "Production DB → recommend Multi-AZ",
+        "availabilityZones": 1,
+        "hasLoadBalancer": false,
+        "secretsManager": false,
+        "natGateway": false,
+        "thirdPartyIntegrations": []
+      },
+      {
+        "componentId": "backend-api-alb",
+        "public": true,
+        "needsVpc": false,
+        "needsMultiAz": false,
+        "needsAutoscaling": false,
+        "source": "recommended",
+        "availabilityZones": 1,
+        "hasLoadBalancer": false,
+        "secretsManager": false,
+        "natGateway": false,
+        "thirdPartyIntegrations": []
+      }
+    ],
+    "awsMappings": [
+      {
+        "componentId": "backend-api",
+        "serviceId": "ECS",
+        "confidence": "low",
+        "evidence": "component Student Management System API (Spring Boot, Java) (possible container host, no container evidence)",
+        "fromPattern": false,
+        "category": "inference"
+      },
+      {
+        "componentId": "backend-api-alb",
+        "serviceId": "ALB",
+        "confidence": "medium",
+        "evidence": "component Student Management System API (Spring Boot, Java) → Application Load Balancer recommendation",
+        "fromPattern": false,
+        "category": "recommendation"
+      },
+      {
+        "componentId": "mysql-database",
+        "serviceId": "RDS",
+        "confidence": "high",
+        "evidence": "component MySQL Database (MySQL) → RDS (MySQL)",
+        "fromPattern": false,
+        "category": "repository-evidence"
+      }
+    ],
+    "detectedPattern": "generic",
+    "terminalState": "OK",
+    "metadata": {
+      "grounding": "repoFiles",
+      "truncated": false,
+      "parseErrors": [],
+      "dbEngine": "mysql"
+    },
+    "warnings": [],
+    "proposals": [
+      {
+        "inputKind": "github_url",
+        "components": [
+          {
+            "id": "backend-api",
+            "type": "api",
+            "technology": "Spring Boot, Java",
+            "evidence": [
+              "ev-2",
+              "ev-3"
+            ],
+            "confidence": "high",
+            "status": "detected"
+          },
+          {
+            "id": "mysql-database",
+            "type": "database",
+            "technology": "MySQL",
+            "evidence": [
+              "ev-4",
+              "ev-5",
+              "ev-6"
+            ],
+            "confidence": "high",
+            "status": "detected"
+          },
+          {
+            "id": "backend-api-alb",
+            "type": "api",
+            "technology": "ALB",
+            "evidence": [
+              "component Student Management System API (Spring Boot, Java) → Application Load Balancer recommendation"
+            ],
+            "confidence": "medium",
+            "status": "inferred"
+          }
+        ],
+        "relationships": [
+          {
+            "from": "backend-api",
+            "to": "mysql-database",
+            "type": "reads"
+          },
+          {
+            "from": "backend-api",
+            "to": "mysql-database",
+            "type": "writes"
+          },
+          {
+            "from": "backend-api-alb",
+            "to": "backend-api",
+            "type": "calls"
+          }
+        ],
+        "deploymentModel": [
+          {
+            "componentId": "backend-api",
+            "public": true,
+            "needsVpc": true,
+            "needsMultiAz": false,
+            "needsAutoscaling": true,
+            "source": "recommended",
+            "availabilityZones": 1,
+            "hasLoadBalancer": false,
+            "secretsManager": false,
+            "natGateway": false,
+            "thirdPartyIntegrations": []
+          },
+          {
+            "componentId": "mysql-database",
+            "public": false,
+            "needsVpc": true,
+            "needsMultiAz": true,
+            "needsAutoscaling": false,
+            "source": "recommended",
+            "notes": "Production DB → recommend Multi-AZ",
+            "availabilityZones": 1,
+            "hasLoadBalancer": false,
+            "secretsManager": false,
+            "natGateway": false,
+            "thirdPartyIntegrations": []
+          },
+          {
+            "componentId": "backend-api-alb",
+            "public": true,
+            "needsVpc": false,
+            "needsMultiAz": false,
+            "needsAutoscaling": false,
+            "source": "recommended",
+            "availabilityZones": 1,
+            "hasLoadBalancer": false,
+            "secretsManager": false,
+            "natGateway": false,
+            "thirdPartyIntegrations": []
+          }
+        ],
+        "awsMappings": [
+          {
+            "componentId": "backend-api",
+            "serviceId": "ECS",
+            "confidence": "low",
+            "evidence": "component Student Management System API (Spring Boot, Java) (possible container host, no container evidence)",
+            "fromPattern": false,
+            "category": "inference"
+          },
+          {
+            "componentId": "backend-api-alb",
+            "serviceId": "ALB",
+            "confidence": "medium",
+            "evidence": "component Student Management System API (Spring Boot, Java) → Application Load Balancer recommendation",
+            "fromPattern": false,
+            "category": "recommendation"
+          },
+          {
+            "componentId": "mysql-database",
+            "serviceId": "RDS",
+            "confidence": "high",
+            "evidence": "component MySQL Database (MySQL) → RDS (MySQL)",
+            "fromPattern": false,
+            "category": "repository-evidence"
+          }
+        ],
+        "detectedPattern": "generic",
+        "terminalState": "OK",
+        "metadata": {
+          "grounding": "repoFiles",
+          "truncated": false,
+          "parseErrors": [],
+          "dbEngine": "mysql"
+        },
+        "warnings": []
+      }
+    ]
+  }
+}

@@ -171,6 +171,52 @@ export function validateDiagram(plan: ServicePlan, elements: DiagramElements): D
     }
   }
 
+  // 2b. Spanning services land in every AZ: one LB node and (when
+  // present) one NAT node per public subnet.
+  const renderedAzNums = Object.keys(layout.containers)
+    .filter((id) => layout.containers[id] !== null && /^container-az-(\d+)$/.test(id))
+    .map((id) => Number(id.match(/^container-az-(\d+)$/)![1]));
+  const planHasLb = plan.awsMappings.some((m) => LB_SERVICES.has(m.serviceId));
+  const planHasNat = plan.awsMappings.some((m) => m.serviceId === "NATGateway");
+  for (const az of renderedAzNums) {
+    if (planHasLb) {
+      const lbHere = nodes.filter(
+        (n) => n.parent === `container-public-${az}` && LB_SERVICES.has(n.serviceId)
+      ).length;
+      if (lbHere < 1) {
+        failures.push(`AZ ${az} public subnet renders no load balancer node`);
+      }
+    }
+    if (planHasNat) {
+      const natHere = nodes.filter(
+        (n) => n.parent === `container-public-${az}` && n.serviceId === "NATGateway"
+      ).length;
+      if (natHere < 1) {
+        failures.push(`AZ ${az} public subnet renders no NAT node`);
+      }
+    }
+  }
+
+  // 2c. The generic Users node feeds the edge tier from the top.
+  const usersNodes = nodes.filter((n) => n.componentId === "users");
+  const edgeNodes = nodes.filter((n) => {
+    try {
+      return scopeOf(n.serviceId as ServiceId) === "global-edge";
+    } catch {
+      return false;
+    }
+  });
+  for (const u of usersNodes) {
+    if (u.parent !== "container-edge") {
+      failures.push(`Users node "${u.id}" is in "${u.parent}", not the edge tier`);
+    }
+    const feeds = routedEdges.some(
+      (e) => e.sourceId === u.id && edgeNodes.some((t) => t.id === e.targetId)
+    );
+    if (!feeds) {
+      failures.push(`Users node "${u.id}" has no edge into the edge tier`);
+    }
+  }
   // 3. AZ / compute fan-out must honour availabilityZones.
   const expectedAz = Math.max(1, ...plan.deploymentModel.map((d) => d.availabilityZones ?? 1));
   const renderedAzs = Object.keys(layout.containers).filter(

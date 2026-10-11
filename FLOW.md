@@ -126,6 +126,8 @@ evidence (RepoSignals | description)
     rules baseline.
 ```
 
+**Trait-gated policy (Decision 54, single choke point).** After the winning path produces a plan and before diagram/cost/CFT, runInference derives WorkloadTraits and runs pure applyInfraPolicy(plan, traits). Named predicates (LB on serving compute, secrets on secret material or sensitive-role egress, NAT on egress with compute, multi-AZ on relational DB, CDN+origin on static-only); injected services carry policy evidence at recommendation/low. Nothing added unless its predicate fires (Decision 52).
+
 **Schema + validation gate (flaw 5) — provider-agnostic:**
 - One fixed contract: the zod `ServicePlan` schema. Every provider runs through the *same* `generateObject(schema)`.
 - `generateObject` uses `LlmOutputSchema` (shape only, no `.refine()` guards) so retries are spent on shape errors, not semantics (I-8).
@@ -197,10 +199,12 @@ ServicePlan (components, awsMappings, relationships)
    │      - wrapServiceName: wraps labels >16 chars into balanced lines (width ≤100px).
    │
    ├─► Step 4.2: Tier Classification & Layout (computeLayout)
-   │      - Partitions services into 5 Well-Architected tiers:
-   │        edge (banner) | vpc_public (DMZ) | vpc_compute (private) | vpc_data (isolated) | external.
+   │      - Partitions services by SERVICE_SCOPE (global-edge | regional |
+   │        vpc-public | vpc-private | vpc-data | external), never by name.
+   │      - One AZ container per plan.availabilityZones; one compute node
+   │        per AZ; data subnet spanning AZs; regional row outside the VPC.
    │      - Dynamic bucketHeight(rows) computes container dimensions wrapping children with padding.
-   │      - Subnet columns: 4 for VPC subnets, 6 for edge, 2 for external.
+   │      - Subnet columns: 4 for VPC subnets, 6 for edge/regional, 1 for external.
    │
    ├─► Step 4.3: Mathematical Centering
    │      - Computes tight bounding box (minX, minY, maxX, maxY) of all containers & nodes.

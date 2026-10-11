@@ -488,7 +488,10 @@ export function nodeStyle(serviceId: string): string {
       "verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;fontSize=11;fontStyle=1;aspect=fixed;pointerEvents=1;spacingTop=4;"
     );
   }
-  console.warn(`[diagram] Missing AWS icon for serviceId: "${serviceId}". Using generic AWS Cloud fallback.`);
+  // Structural boxes (end users) are not AWS services: no warning.
+  if (serviceId !== USERS_SERVICE_ID) {
+    console.warn(`[diagram] Missing AWS icon for serviceId: "${serviceId}". Using generic AWS Cloud fallback.`);
+  }
   return FALLBACK_STYLE;
 }
 
@@ -787,6 +790,11 @@ export function azNodeKey(componentId: string, az: number, azCount: number): str
   return azCount > 1 ? `${componentId}##az${az}` : componentId;
 }
 
+/** Generic ingress node fed by end users at the top of the diagram. */
+export const USERS_COMPONENT_ID = "users";
+export const USERS_SERVICE_ID = "Users";
+export const USERS_LABEL = "Users / Internet";
+
 const STATIC_CONTAINER_LABELS: Record<string, string> = {
   [CID.aws]: "AWS Cloud",
   [CID.edge]: "Edge & Public Ingress",
@@ -1042,14 +1050,16 @@ export function validateDiagramSemantics(
   const safeNodes = Array.isArray(nodes) ? nodes : [];
   const safeEdges = Array.isArray(edges) ? edges : [];
 
-  // Third-party integration boxes are validated against the deployment
-  // model, not the service catalog.
+  // Third-party integration boxes and the generic Users node are validated
+  // against the deployment model / edge tier, not the service catalog.
   const integrationNames = new Set<string>();
   for (const dm of plan.deploymentModel ?? []) {
     for (const t of dm.thirdPartyIntegrations ?? []) integrationNames.add(t.name);
   }
   const isExtNode = (n: { componentId: string }): boolean =>
     n.componentId.startsWith("ext-");
+  const isUsersNode = (n: { componentId: string }): boolean =>
+    n.componentId === USERS_COMPONENT_ID;
   for (const n of safeNodes.filter(isExtNode)) {
     if (n.parent !== CID.external) {
       errors.push(
@@ -1064,7 +1074,16 @@ export function validateDiagramSemantics(
       );
     }
   }
-  const awsNodes = safeNodes.filter((n) => !isExtNode(n));
+  for (const n of safeNodes.filter(isUsersNode)) {
+    if (n.parent !== CID.edge) {
+      errors.push(
+        `Users node "${n.componentId}" is in "${n.parent}", expected "${CID.edge}"`
+      );
+    } else {
+      verifiedContainments++;
+    }
+  }
+  const awsNodes = safeNodes.filter((n) => !isExtNode(n) && !isUsersNode(n));
 
   // 2. Component Mapping & Service Identity Set Equality
   // STRICT GROUNDING RULE: Rendered AWS services MUST EXACTLY EQUAL Stage 1 awsMappings
@@ -1108,11 +1127,11 @@ export function validateDiagramSemantics(
   };
 
   // 2d. Node mapping & duplicate validation
-  const nodeMap = new Map<string, (typeof awsNodes)[number]>();
+  const nodeMap = new Map<string, (typeof safeNodes)[number]>();
+  for (const n of safeNodes) nodeMap.set(n.id, n);
   const seenComponentParents = new Map<string, Set<string>>();
 
   for (const n of awsNodes) {
-    nodeMap.set(n.id, n);
 
     const matchingMapping = plan.awsMappings.find(
       (m) => m.serviceId === n.serviceId && (m.componentId === n.componentId || n.componentId.includes(m.componentId))
@@ -1500,6 +1519,8 @@ export interface ComputeLayoutOptions {
   azCount?: number;
   /** Third-party integration boxes for the external column. */
   external?: Array<{ id: string; label: string }>;
+  /** Render the generic Users/Internet ingress node in the edge banner. */
+  users?: boolean;
 }
 
 export function computeLayout(
@@ -1567,15 +1588,28 @@ export function computeLayout(
   };
 
   // ---- Measure buckets -------------------------------------------------
-  const edgeH = buckets["global-edge"].length > 0
-    ? bucketHeight(Math.ceil(buckets["global-edge"].length / EDGE_COLS))
+  // The Users node feeds the edge tier from the top of the banner.
+  const edgeEntries: BucketEntry[] = [
+    ...(opts?.users ? [{ componentId: USERS_COMPONENT_ID, serviceId: USERS_SERVICE_ID }] : []),
+    ...buckets["global-edge"],
+  ];
+  const edgeH = edgeEntries.length > 0
+    ? bucketHeight(Math.ceil(edgeEntries.length / EDGE_COLS))
     : 0;
   const regionalH = buckets.regional.length > 0
     ? bucketHeight(Math.ceil(buckets.regional.length / REGIONAL_COLS))
     : 0;
-  const publicH = buckets["vpc-public"].length > 0
-    ? bucketHeight(Math.ceil(buckets["vpc-public"].length / SUBNET_COLS))
-    : 0;
+  // Load balancers and NAT gateways span every AZ (one node per AZ);
+  // other public services stay in AZ-1.
+  const isSpanningPublic = (e: BucketEntry): boolean =>
+    LB_SERVICES.has(e.serviceId) || e.serviceId === "NATGateway";
+  const pubRows = (az: number): BucketEntry[] =>
+    az === 1 ? buckets["vpc-public"] : buckets["vpc-public"].filter(isSpanningPublic);
+  const pubHFor = (az: number): number => {
+    const list = pubRows(az);
+    return list.length > 0 ? bucketHeight(Math.ceil(list.length / SUBNET_COLS)) : 0;
+  };
+  const publicH = pubHFor(1);
   const privateRows = buckets["vpc-private"].length > 0
     ? Math.ceil(buckets["vpc-private"].length / SUBNET_COLS)
     : 0;
@@ -1601,7 +1635,7 @@ export function computeLayout(
   const renderedAzs: number[] = [];
   if (hasVpcContent) {
     for (let i = 1; i <= azCount; i++) {
-      const hasPub = i === 1 && buckets["vpc-public"].length > 0;
+      const hasPub = pubRows(i).length > 0;
       const hasPriv = buckets["vpc-private"].length > 0;
       if (hasPub || hasPriv) renderedAzs.push(i);
     }
@@ -1614,9 +1648,9 @@ export function computeLayout(
   const hasAnyPriv = buckets["vpc-private"].length > 0;
   const pubRowH = hasAnyPub && hasAnyPriv ? publicH + VGAP : 0;
   const azHFor = (az: number): number => {
-    const hasPub = az === 1 && hasAnyPub;
+    const ph = pubHFor(az);
     let h = LABEL_H + PAD_TOP;
-    if (hasPub) h += publicH + (hasAnyPriv ? VGAP : 0);
+    if (ph > 0) h += ph + (hasAnyPriv ? VGAP : 0);
     else if (hasAnyPriv) h += pubRowH;
     if (hasAnyPriv) h += privateH;
     return h + PAD_BOTTOM;
@@ -1645,7 +1679,7 @@ export function computeLayout(
   if (edgeW > 0) {
     const edge: Rect = { x: MARGIN, y: cursorY, w: edgeW, h: edgeH };
     containers[CID.edge] = edge;
-    placeBucket(buckets["global-edge"], EDGE_COLS, edge, CID.edge);
+    placeBucket(edgeEntries, EDGE_COLS, edge, CID.edge);
     cursorY += edgeH + VGAP;
   }
   if (regionalW > 0) {
@@ -1664,11 +1698,29 @@ export function computeLayout(
       const h = azHFor(az);
       containers[azId(az)] = { x: azX, y: azY, w: azW, h };
       let subY = azY + LABEL_H + PAD_TOP;
-      if (az === 1 && hasAnyPub) {
-        const pub: Rect = { x: azX + PAD, y: subY, w: azSubnetW, h: publicH };
+      const pubList = pubRows(az);
+      if (pubList.length > 0) {
+        const pub: Rect = { x: azX + PAD, y: subY, w: azSubnetW, h: pubHFor(az) };
         containers[pubId(az)] = pub;
-        placeBucket(buckets["vpc-public"], SUBNET_COLS, pub, pubId(az));
-        subY += publicH + (hasAnyPriv ? VGAP : 0);
+        const actualCols = Math.min(pubList.length, SUBNET_COLS);
+        const contentPw = actualCols * CELL_W + (actualCols - 1) * GAP;
+        const offsetX = Math.max(0, Math.round((azSubnetW - 2 * PAD - contentPw) / 2));
+        for (let i = 0; i < pubList.length; i++) {
+          const e = pubList[i];
+          const col = i % SUBNET_COLS;
+          const row = Math.floor(i / SUBNET_COLS);
+          const x = pub.x + PAD + offsetX + col * (CELL_W + GAP);
+          const y = pub.y + LABEL_H + PAD_TOP + row * (CELL_H + GAP);
+          registerNode(
+            azNodeKey(e.componentId, az, azCount),
+            e.componentId,
+            e.serviceId,
+            x,
+            y,
+            pubId(az)
+          );
+        }
+        subY += pubHFor(az) + (hasAnyPriv ? VGAP : 0);
       } else if (hasAnyPriv) {
         subY += pubRowH;
       }
@@ -1815,11 +1867,15 @@ export interface RoleEdgeNode {
   serviceId: string;
   /** True for third-party integration boxes in the external column. */
   external: boolean;
+  /** True for the generic Users ingress node. */
+  users: boolean;
   /**
    * True when object storage has SDK/usage evidence (repository mapping or
    * SDK hint). compute→storage edges require it.
    */
   storageProven: boolean;
+  /** AZ number for AZ-indexed subnets, else null. */
+  az: number | null;
 }
 
 const ROLE_VERBS = {
@@ -1905,7 +1961,8 @@ export function deriveRoleEdges(
     out.push({ from: a, to: b, label });
   };
 
-  const aws = nodes.filter((n) => !n.external);
+  const aws = nodes.filter((n) => !n.external && !n.users);
+  const users = nodes.filter((n) => n.users);
   const edge = aws.filter((n) => isEdgeServiceId(n.serviceId));
   const lbs = aws.filter((n) => isLbServiceId(n.serviceId));
   const compute = aws.filter((n) => isComputeServiceId(n.serviceId));
@@ -1923,6 +1980,11 @@ export function deriveRoleEdges(
   const dns = edge.filter((n) => n.serviceId === "Route53");
   const gateways = edge.filter((n) => n.serviceId === "APIGateway");
 
+  // End users feed the edge tier over HTTPS.
+  for (const u of users) {
+    for (const target of edge) link(u.id, target.id, "HTTPS");
+  }
+
   // DNS entry points.
   for (const d of dns) {
     for (const target of [...cdn, ...lbs, ...gateways]) link(d.id, target.id, ROLE_VERBS.dns);
@@ -1937,7 +1999,10 @@ export function deriveRoleEdges(
         ? compute
         : data.filter((n) => SERVICE_CATEGORIES[n.serviceId as ServiceId] === "storage");
   for (const c of cdn) {
-    for (const o of origins) link(c.id, o.id, ROLE_VERBS.staticOrigin);
+    for (const o of origins) {
+      const isStatic = SERVICE_CATEGORIES[o.serviceId as ServiceId] === "storage";
+      link(c.id, o.id, isStatic ? ROLE_VERBS.staticOrigin : ROLE_VERBS.ingress);
+    }
   }
   // Gateways invoke compute; otherwise they front data-backed APIs.
   for (const g of gateways) {
@@ -1968,11 +2033,14 @@ export function deriveRoleEdges(
       }
     }
   }
-  // NAT chains compute egress to the outside world.
+  // NAT chains compute egress to the outside world. Only the last AZ's
+  // NAT links outward: it sits adjacent to the external column, so the hop
+  // crosses no foreign subnet.
   for (const c of compute) {
     for (const n of nat) link(c.id, n.id, ROLE_VERBS.egress);
   }
-  for (const n of nat) {
+  const lastNatAz = Math.max(0, ...nat.map((n) => n.az ?? 0));
+  for (const n of nat.filter((x) => (x.az ?? 0) === lastNatAz)) {
     for (const x of external) link(n.id, x.id, ROLE_VERBS.egress);
   }
   // Queue triggers reach compute when nothing else connects them.
@@ -2159,13 +2227,18 @@ function boxesOverlap(a: Rect, b: Rect): boolean {
  * Seats every labelled edge on a horizontal segment, clear of node label
  * boxes. The recorded offset is set to (seat − path middle) so renderers
  * and the validator agree exactly where the label sits.
+ *
+ * Returns the ids of edges whose label could not be seated clear of every
+ * node label box. Callers drop those only when the edge itself is a
+ * droppable hint; explicit evidence edges are always kept.
  */
 export function seatEdgeLabels(
   routed: RoutedEdge[],
   nodes: Array<{ id: string; label: string }>,
   nodeAbsGeo: Record<string, { x: number; y: number; w: number; h: number }>
-): void {
+): string[] {
   const labelOf = new Map(nodes.map((n) => [n.id, n.label]));
+  const blocked: string[] = [];
   for (const edge of routed) {
     if (!edge.label || edge.label.trim().length === 0) continue;
     const src = nodeAbsGeo[edge.sourceId];
@@ -2219,16 +2292,20 @@ export function seatEdgeLabels(
       blockers.push({ x: g.x, y: g.y, w: g.w, h: g.h });
     }
     let seat = candidates[0] ?? middle;
+    let seated = candidates.length === 0;
     for (const c of candidates) {
       const box = edgeLabelBox(c, edge.label);
       if (!blockers.some((b) => boxesOverlap(box, b))) {
         seat = c;
+        seated = true;
         break;
       }
     }
+    if (!seated) blocked.push(edge.id);
     edge.labelOffsetX = Math.round(seat.x - middle.x);
     edge.labelOffsetY = Math.round(seat.y - middle.y);
   }
+  return blocked;
 }
 
 /**
@@ -2249,7 +2326,15 @@ export function routeEdges(
      */
     droppable?: boolean;
   }>,
-  nodeAbsGeo: Record<string, { x: number; y: number; w: number; h: number }>
+  nodeAbsGeo: Record<string, { x: number; y: number; w: number; h: number }>,
+  opts?: {
+    /**
+     * Node ids in transit bands (edge/regional rows). Bypass detours
+     * never route around them: dodging a full-width band only creates
+     * longer crossings elsewhere.
+     */
+    transitIds?: Set<string>;
+  }
 ): RoutedEdge[] {
   const routed: RoutedEdge[] = [];
   let edgeCounter = 200;
@@ -2258,8 +2343,10 @@ export function routeEdges(
   const targetEdgeCount = new Map<string, number>();
   // Track gutter lane allocation so multiple horizontal lines do not stack
   const gutterEdgeCount = new Map<string, number>();
+  // Transit-band nodes never count as intermediates to bypass.
+  const transitIds = opts?.transitIds ?? new Set<string>();
 
-  const allNodeGeos = Object.values(nodeAbsGeo);
+  const allNodeEntries = Object.entries(nodeAbsGeo);
 
   for (const e of edgesToRoute) {
     const src = nodeAbsGeo[e.source];
@@ -2306,9 +2393,13 @@ export function routeEdges(
           // in the vertical band AND overlapping the horizontal strip
           // between the two endpoints. Nodes off to the side never count —
           // routing around them produces absurd cross-diagram detours.
-          const intermediateNodes = allNodeGeos.filter(
-            (n) => n !== src && n !== dst && inStrip(n) && n.y >= srcBot - 5 && n.y + n.h <= dstTop + 5
-          );
+          // Transit-band nodes never count either.
+          const intermediateNodes = allNodeEntries
+            .filter(([id]) => !transitIds.has(id))
+            .map(([, n]) => n)
+            .filter(
+              (n) => n !== src && n !== dst && inStrip(n) && n.y >= srcBot - 5 && n.y + n.h <= dstTop + 5
+            );
 
           if (srcBot < dstTop - 15) {
             // Allocate separate lane in this gutter
@@ -2348,9 +2439,12 @@ export function routeEdges(
           gutterEdgeCount.set(gutterKey, laneIdx + 1);
           const laneOffset = (laneIdx % 2 === 0 ? 1 : -1) * Math.ceil(laneIdx / 2) * 12;
 
-          const intermediateNodes = allNodeGeos.filter(
-            (n) => n !== src && n !== dst && inStrip(n) && n.y >= dst.y + dst.h - 5 && n.y + n.h <= src.y + 5
-          );
+          const intermediateNodes = allNodeEntries
+            .filter(([id]) => !transitIds.has(id))
+            .map(([, n]) => n)
+            .filter(
+              (n) => n !== src && n !== dst && inStrip(n) && n.y >= dst.y + dst.h - 5 && n.y + n.h <= src.y + 5
+            );
 
           if (intermediateNodes.length > 0) {
             const maxInterX = Math.max(...intermediateNodes.map((n) => n.x + n.w));
@@ -2693,8 +2787,20 @@ export function buildDiagramElements(
     Math.max(1, ...(plan.deploymentModel ?? []).map((d) => d.availabilityZones ?? 1))
   );
 
-  // 2. Compute layout geometry with mathematical centering
-  const layout = computeLayout(consolidatedMappings, { azCount, external: externalBoxes });
+  // 2. Compute layout geometry with mathematical centering.
+  // The generic Users node feeds the edge tier whenever edge nodes exist.
+  const hasEdgeTier = consolidatedMappings.some((m) => {
+    try {
+      return scopeOf(m.serviceId) === "global-edge";
+    } catch {
+      return false;
+    }
+  });
+  const layout = computeLayout(consolidatedMappings, {
+    azCount,
+    external: externalBoxes,
+    users: hasEdgeTier,
+  });
 
   // 3. Build node list
   const nodes: DiagramNode[] = [];
@@ -2819,20 +2925,30 @@ export function buildDiagramElements(
     }
   }
 
-  // External integration boxes (labelled, never blank).
-  for (const box of externalBoxes) {
+  // External integration boxes (labelled, never blank), plus the generic
+  // Users node when the edge tier exists.
+  const boxSpecs: Array<{ id: string; serviceId: string; label: string }> = [
+    ...externalBoxes.map((box) => ({ id: box.id, serviceId: box.label, label: wrapServiceName(box.label) })),
+  ];
+  if (hasEdgeTier) {
+    boxSpecs.push({ id: USERS_COMPONENT_ID, serviceId: USERS_SERVICE_ID, label: wrapServiceName(USERS_LABEL) });
+  }
+  for (const box of boxSpecs) {
     const found = placementsFor(box.id);
-    const label = wrapServiceName(box.label);
     if (found.length === 0) continue;
     for (const [, placement] of found) {
-      emitNode(placement, box.id, box.label, label);
+      emitNode(placement, box.id, box.serviceId, box.label);
     }
   }
 
   // All nodes are grounded by construction (mappings plus integration
-  // boxes); keep every node whose service is authoritative or external.
+  // boxes plus the generic Users node); keep every node whose service is
+  // authoritative or external.
   const groundedNodes = nodes.filter(
-    (n) => stage1ServiceIds.has(n.serviceId as ServiceId) || n.componentId.startsWith("ext-")
+    (n) =>
+      stage1ServiceIds.has(n.serviceId as ServiceId) ||
+      n.componentId.startsWith("ext-") ||
+      n.componentId === USERS_COMPONENT_ID
   );
 
   // 3b. Label collision resolution pass (clamped to parent container bounds).
@@ -2960,12 +3076,17 @@ export function buildDiagramElements(
     );
   };
   const roleEdges = deriveRoleEdges(
-    groundedNodes.map((n) => ({
-      id: n.id,
-      serviceId: n.serviceId,
-      external: n.componentId.startsWith("ext-") || externalComps.has(n.componentId),
-      storageProven: storageProvenFor(n),
-    })),
+    groundedNodes.map((n) => {
+      const azMatch = n.parent.match(/^container-(?:public|private)-(\d+)$/);
+      return {
+        id: n.id,
+        serviceId: n.serviceId,
+        external: n.componentId.startsWith("ext-") || externalComps.has(n.componentId),
+        users: n.componentId === USERS_COMPONENT_ID,
+        storageProven: storageProvenFor(n),
+        az: azMatch ? Number(azMatch[1]) : null,
+      };
+    }),
     connectedPairs
   );
 
@@ -3015,9 +3136,24 @@ export function buildDiagramElements(
   }
 
   // 5. Route edges with collision avoidance and label staggering,
-  // then seat every label on a clear horizontal run.
-  const routedEdges = routeEdges(rawEdges, nodeAbsGeo);
-  seatEdgeLabels(routedEdges, groundedNodes, nodeAbsGeo);
+  // then seat every label on a clear horizontal run. Transit-band nodes
+  // never trigger bypass detours. Inferred hints whose labels cannot seat
+  // clear are omitted; explicit evidence edges are always kept.
+  const transitIds = new Set(
+    groundedNodes
+      .filter((n) => n.parent === CID.edge || n.parent === CID.regional)
+      .map((n) => n.id)
+  );
+  let routedEdges = routeEdges(rawEdges, nodeAbsGeo, { transitIds });
+  const droppableByPair = new Map(
+    rawEdges.filter((r) => r.droppable).map((r) => [`${r.source}->${r.target}`, true])
+  );
+  const blockedSeats = new Set(seatEdgeLabels(routedEdges, groundedNodes, nodeAbsGeo));
+  if (blockedSeats.size > 0) {
+    routedEdges = routedEdges.filter(
+      (e) => !blockedSeats.has(e.id) || !droppableByPair.get(`${e.sourceId}->${e.targetId}`)
+    );
+  }
 
   return {
     layout,

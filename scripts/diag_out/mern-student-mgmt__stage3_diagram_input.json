@@ -1,0 +1,42 @@
+[
+  {
+    "componentId": "fe-react-storage",
+    "serviceId": "S3",
+    "confidence": "high",
+    "evidence": "component React Frontend (React) → static assets",
+    "fromPattern": false,
+    "category": "repository-evidence"
+  },
+  {
+    "componentId": "fe-react",
+    "serviceId": "CloudFront",
+    "confidence": "high",
+    "evidence": "component React Frontend (React) → CDN",
+    "fromPattern": false,
+    "category": "deployment-requirement"
+  },
+  {
+    "componentId": "be-express",
+    "serviceId": "ECS",
+    "confidence": "low",
+    "evidence": "component Express.js Backend (Express.js) (possible container host, no container evidence)",
+    "fromPattern": false,
+    "category": "inference"
+  },
+  {
+    "componentId": "be-express-alb",
+    "serviceId": "ALB",
+    "confidence": "medium",
+    "evidence": "component Express.js Backend (Express.js) → Application Load Balancer recommendation",
+    "fromPattern": false,
+    "category": "recommendation"
+  },
+  {
+    "componentId": "db-mongo",
+    "serviceId": "DocumentDB",
+    "confidence": "high",
+    "evidence": "component MongoDB Database (MongoDB)",
+    "fromPattern": false,
+    "category": "repository-evidence"
+  }
+]

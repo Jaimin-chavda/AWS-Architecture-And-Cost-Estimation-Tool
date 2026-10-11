@@ -1,0 +1,78 @@
+{
+  "languages": [
+    {
+      "name": "Node.js/TypeScript",
+      "evidence": "package.json",
+      "confidence": "high"
+    }
+  ],
+  "frameworks": [
+    {
+      "name": "Firebase",
+      "evidence": "package.json → dependencies.firebase",
+      "confidence": "high"
+    },
+    {
+      "name": "React",
+      "evidence": "package.json → dependencies.react",
+      "confidence": "high"
+    },
+    {
+      "name": "Vite",
+      "evidence": "package.json → devDependencies.vite",
+      "confidence": "high"
+    }
+  ],
+  "databases": [],
+  "infrastructure": [],
+  "entryPoints": [],
+  "awsUsage": [],
+  "deploymentHints": [],
+  "parseFailures": [],
+  "isIacOnly": false,
+  "isLibraryOrFramework": false,
+  "discoveredComponents": [],
+  "evidenceRegister": [
+    {
+      "id": "ev-1",
+      "kind": "manifest",
+      "sourcePath": "package.json",
+      "technology": "Node.js/TypeScript",
+      "detail": "Language/runtime detected: Node.js/TypeScript",
+      "confidence": "high"
+    },
+    {
+      "id": "ev-2",
+      "kind": "manifest",
+      "sourcePath": "package.json",
+      "technology": "Firebase",
+      "detail": "package.json → dependencies.firebase",
+      "confidence": "high"
+    },
+    {
+      "id": "ev-3",
+      "kind": "manifest",
+      "sourcePath": "package.json",
+      "technology": "React",
+      "detail": "package.json → dependencies.react",
+      "confidence": "high"
+    },
+    {
+      "id": "ev-4",
+      "kind": "manifest",
+      "sourcePath": "package.json",
+      "technology": "Vite",
+      "detail": "package.json → devDependencies.vite",
+      "confidence": "high"
+    }
+  ],
+  "workloadClassification": {
+    "primaryWorkload": "static-frontend",
+    "type": "static-frontend",
+    "confidence": "high",
+    "reasons": [
+      "Static frontend / client SPA without server backend"
+    ]
+  },
+  "summary": "Repository: m-ehab2/Yearbook\n\nDETECTED TECHNOLOGIES (extracted from repository files before inference):\n\nWORKLOAD CLASSIFICATION: static-frontend (high confidence)\n  - Static frontend / client SPA without server backend\n\nLanguages/Runtime: Node.js/TypeScript [package.json]\nFrameworks/Libraries:\n  - Firebase  [evidence: package.json → dependencies.firebase]\n  - React  [evidence: package.json → dependencies.react]\n  - Vite  [evidence: package.json → devDependencies.vite]\nExplicit AWS SDK Usage: none detected\n\nEVIDENCE INVENTORY (registered evidence from repository files):\n  [ev-1] (manifest: package.json) [Node.js/TypeScript] Language/runtime detected: Node.js/TypeScript\n  [ev-2] (manifest: package.json) [Firebase] package.json → dependencies.firebase\n  [ev-3] (manifest: package.json) [React] package.json → dependencies.react\n  [ev-4] (manifest: package.json) [Vite] package.json → devDependencies.vite\n\nCRITICAL EVIDENCE RULE: Every component in the architecture model MUST cite one or more valid Evidence IDs (e.g. ['ev-1']) from the EVIDENCE INVENTORY above. Do not invent evidence.\n\nThis structured analysis is the evidence base for building the application's architecture model. Use only the technologies above; do not invent technologies absent from this analysis."
+}

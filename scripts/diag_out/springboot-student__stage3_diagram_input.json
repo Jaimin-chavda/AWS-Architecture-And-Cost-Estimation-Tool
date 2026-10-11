@@ -1,0 +1,26 @@
+[
+  {
+    "componentId": "backend-api",
+    "serviceId": "ECS",
+    "confidence": "low",
+    "evidence": "component Student Management System API (Spring Boot, Java) (possible container host, no container evidence)",
+    "fromPattern": false,
+    "category": "inference"
+  },
+  {
+    "componentId": "backend-api-alb",
+    "serviceId": "ALB",
+    "confidence": "medium",
+    "evidence": "component Student Management System API (Spring Boot, Java) → Application Load Balancer recommendation",
+    "fromPattern": false,
+    "category": "recommendation"
+  },
+  {
+    "componentId": "mysql-database",
+    "serviceId": "RDS",
+    "confidence": "high",
+    "evidence": "component MySQL Database (MySQL) → RDS (MySQL)",
+    "fromPattern": false,
+    "category": "repository-evidence"
+  }
+]

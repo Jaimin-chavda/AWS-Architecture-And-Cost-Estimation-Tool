@@ -1,0 +1,470 @@
+{
+  "architectureModel": {
+    "appType": "full-stack-web",
+    "appName": "Student Information Management Application",
+    "description": "A student information management application with a React frontend, Express.js backend, and MongoDB database allowing CRUD operations on student records.",
+    "components": [
+      {
+        "id": "fe-react",
+        "name": "React Frontend",
+        "type": "frontend",
+        "technology": "React",
+        "details": "Provides a user-friendly interface to view, add, and delete student information.",
+        "evidence": [
+          "ev-1"
+        ],
+        "confidence": "medium"
+      },
+      {
+        "id": "be-express",
+        "name": "Express.js Backend",
+        "type": "api",
+        "technology": "Express.js",
+        "details": "Processes HTTP requests and communicates with MongoDB to perform CRUD operations on student data.",
+        "evidence": [
+          "ev-3"
+        ],
+        "confidence": "medium"
+      },
+      {
+        "id": "db-mongo",
+        "name": "MongoDB Database",
+        "type": "database",
+        "technology": "MongoDB",
+        "details": "Stores student information records.",
+        "evidence": [
+          "ev-2"
+        ],
+        "confidence": "medium"
+      }
+    ],
+    "languages": [],
+    "frameworks": [],
+    "databases": [],
+    "apis": [],
+    "externalServices": [],
+    "dependencies": [],
+    "buildConfig": [],
+    "relationships": [
+      {
+        "from": "fe-react",
+        "to": "be-express",
+        "type": "calls"
+      },
+      {
+        "from": "be-express",
+        "to": "db-mongo",
+        "type": "reads"
+      },
+      {
+        "from": "be-express",
+        "to": "db-mongo",
+        "type": "writes"
+      }
+    ]
+  },
+  "servicePlan": {
+    "inputKind": "github_url",
+    "components": [
+      {
+        "id": "fe-react",
+        "type": "frontend",
+        "technology": "React",
+        "evidence": [
+          "ev-1"
+        ],
+        "confidence": "medium",
+        "status": "detected"
+      },
+      {
+        "id": "be-express",
+        "type": "api",
+        "technology": "Express.js",
+        "evidence": [
+          "ev-3"
+        ],
+        "confidence": "medium",
+        "status": "detected"
+      },
+      {
+        "id": "db-mongo",
+        "type": "database",
+        "technology": "MongoDB",
+        "evidence": [
+          "ev-2"
+        ],
+        "confidence": "medium",
+        "status": "detected"
+      },
+      {
+        "id": "fe-react-storage",
+        "type": "object-storage",
+        "technology": "S3",
+        "evidence": [
+          "component React Frontend (React) → static assets"
+        ],
+        "confidence": "high",
+        "status": "detected"
+      },
+      {
+        "id": "be-express-alb",
+        "type": "api",
+        "technology": "ALB",
+        "evidence": [
+          "component Express.js Backend (Express.js) → Application Load Balancer recommendation"
+        ],
+        "confidence": "medium",
+        "status": "inferred"
+      }
+    ],
+    "relationships": [
+      {
+        "from": "fe-react",
+        "to": "be-express",
+        "type": "calls"
+      },
+      {
+        "from": "be-express",
+        "to": "db-mongo",
+        "type": "reads"
+      },
+      {
+        "from": "be-express",
+        "to": "db-mongo",
+        "type": "writes"
+      },
+      {
+        "from": "fe-react",
+        "to": "fe-react-storage",
+        "type": "reads/writes"
+      },
+      {
+        "from": "be-express-alb",
+        "to": "be-express",
+        "type": "calls"
+      }
+    ],
+    "deploymentModel": [
+      {
+        "componentId": "fe-react",
+        "public": true,
+        "needsVpc": false,
+        "needsMultiAz": false,
+        "needsAutoscaling": false,
+        "source": "recommended",
+        "availabilityZones": 1,
+        "hasLoadBalancer": false,
+        "secretsManager": false,
+        "natGateway": false,
+        "thirdPartyIntegrations": []
+      },
+      {
+        "componentId": "be-express",
+        "public": true,
+        "needsVpc": true,
+        "needsMultiAz": false,
+        "needsAutoscaling": true,
+        "source": "recommended",
+        "availabilityZones": 1,
+        "hasLoadBalancer": false,
+        "secretsManager": false,
+        "natGateway": false,
+        "thirdPartyIntegrations": []
+      },
+      {
+        "componentId": "db-mongo",
+        "public": false,
+        "needsVpc": true,
+        "needsMultiAz": true,
+        "needsAutoscaling": false,
+        "source": "recommended",
+        "notes": "Production DB → recommend Multi-AZ",
+        "availabilityZones": 1,
+        "hasLoadBalancer": false,
+        "secretsManager": false,
+        "natGateway": false,
+        "thirdPartyIntegrations": []
+      },
+      {
+        "componentId": "fe-react-storage",
+        "public": false,
+        "needsVpc": false,
+        "needsMultiAz": false,
+        "needsAutoscaling": false,
+        "source": "recommended",
+        "availabilityZones": 1,
+        "hasLoadBalancer": false,
+        "secretsManager": false,
+        "natGateway": false,
+        "thirdPartyIntegrations": []
+      },
+      {
+        "componentId": "be-express-alb",
+        "public": true,
+        "needsVpc": false,
+        "needsMultiAz": false,
+        "needsAutoscaling": false,
+        "source": "recommended",
+        "availabilityZones": 1,
+        "hasLoadBalancer": false,
+        "secretsManager": false,
+        "natGateway": false,
+        "thirdPartyIntegrations": []
+      }
+    ],
+    "awsMappings": [
+      {
+        "componentId": "fe-react-storage",
+        "serviceId": "S3",
+        "confidence": "high",
+        "evidence": "component React Frontend (React) → static assets",
+        "fromPattern": false,
+        "category": "repository-evidence"
+      },
+      {
+        "componentId": "fe-react",
+        "serviceId": "CloudFront",
+        "confidence": "high",
+        "evidence": "component React Frontend (React) → CDN",
+        "fromPattern": false,
+        "category": "deployment-requirement"
+      },
+      {
+        "componentId": "be-express",
+        "serviceId": "ECS",
+        "confidence": "low",
+        "evidence": "component Express.js Backend (Express.js) (possible container host, no container evidence)",
+        "fromPattern": false,
+        "category": "inference"
+      },
+      {
+        "componentId": "be-express-alb",
+        "serviceId": "ALB",
+        "confidence": "medium",
+        "evidence": "component Express.js Backend (Express.js) → Application Load Balancer recommendation",
+        "fromPattern": false,
+        "category": "recommendation"
+      },
+      {
+        "componentId": "db-mongo",
+        "serviceId": "DocumentDB",
+        "confidence": "high",
+        "evidence": "component MongoDB Database (MongoDB)",
+        "fromPattern": false,
+        "category": "repository-evidence"
+      }
+    ],
+    "detectedPattern": "full-stack-web",
+    "terminalState": "OK",
+    "metadata": {
+      "grounding": "repoFiles",
+      "truncated": false,
+      "parseErrors": [],
+      "dbEngine": "none"
+    },
+    "warnings": [],
+    "proposals": [
+      {
+        "inputKind": "github_url",
+        "components": [
+          {
+            "id": "fe-react",
+            "type": "frontend",
+            "technology": "React",
+            "evidence": [
+              "ev-1"
+            ],
+            "confidence": "medium",
+            "status": "detected"
+          },
+          {
+            "id": "be-express",
+            "type": "api",
+            "technology": "Express.js",
+            "evidence": [
+              "ev-3"
+            ],
+            "confidence": "medium",
+            "status": "detected"
+          },
+          {
+            "id": "db-mongo",
+            "type": "database",
+            "technology": "MongoDB",
+            "evidence": [
+              "ev-2"
+            ],
+            "confidence": "medium",
+            "status": "detected"
+          },
+          {
+            "id": "fe-react-storage",
+            "type": "object-storage",
+            "technology": "S3",
+            "evidence": [
+              "component React Frontend (React) → static assets"
+            ],
+            "confidence": "high",
+            "status": "detected"
+          },
+          {
+            "id": "be-express-alb",
+            "type": "api",
+            "technology": "ALB",
+            "evidence": [
+              "component Express.js Backend (Express.js) → Application Load Balancer recommendation"
+            ],
+            "confidence": "medium",
+            "status": "inferred"
+          }
+        ],
+        "relationships": [
+          {
+            "from": "fe-react",
+            "to": "be-express",
+            "type": "calls"
+          },
+          {
+            "from": "be-express",
+            "to": "db-mongo",
+            "type": "reads"
+          },
+          {
+            "from": "be-express",
+            "to": "db-mongo",
+            "type": "writes"
+          },
+          {
+            "from": "fe-react",
+            "to": "fe-react-storage",
+            "type": "reads/writes"
+          },
+          {
+            "from": "be-express-alb",
+            "to": "be-express",
+            "type": "calls"
+          }
+        ],
+        "deploymentModel": [
+          {
+            "componentId": "fe-react",
+            "public": true,
+            "needsVpc": false,
+            "needsMultiAz": false,
+            "needsAutoscaling": false,
+            "source": "recommended",
+            "availabilityZones": 1,
+            "hasLoadBalancer": false,
+            "secretsManager": false,
+            "natGateway": false,
+            "thirdPartyIntegrations": []
+          },
+          {
+            "componentId": "be-express",
+            "public": true,
+            "needsVpc": true,
+            "needsMultiAz": false,
+            "needsAutoscaling": true,
+            "source": "recommended",
+            "availabilityZones": 1,
+            "hasLoadBalancer": false,
+            "secretsManager": false,
+            "natGateway": false,
+            "thirdPartyIntegrations": []
+          },
+          {
+            "componentId": "db-mongo",
+            "public": false,
+            "needsVpc": true,
+            "needsMultiAz": true,
+            "needsAutoscaling": false,
+            "source": "recommended",
+            "notes": "Production DB → recommend Multi-AZ",
+            "availabilityZones": 1,
+            "hasLoadBalancer": false,
+            "secretsManager": false,
+            "natGateway": false,
+            "thirdPartyIntegrations": []
+          },
+          {
+            "componentId": "fe-react-storage",
+            "public": false,
+            "needsVpc": false,
+            "needsMultiAz": false,
+            "needsAutoscaling": false,
+            "source": "recommended",
+            "availabilityZones": 1,
+            "hasLoadBalancer": false,
+            "secretsManager": false,
+            "natGateway": false,
+            "thirdPartyIntegrations": []
+          },
+          {
+            "componentId": "be-express-alb",
+            "public": true,
+            "needsVpc": false,
+            "needsMultiAz": false,
+            "needsAutoscaling": false,
+            "source": "recommended",
+            "availabilityZones": 1,
+            "hasLoadBalancer": false,
+            "secretsManager": false,
+            "natGateway": false,
+            "thirdPartyIntegrations": []
+          }
+        ],
+        "awsMappings": [
+          {
+            "componentId": "fe-react-storage",
+            "serviceId": "S3",
+            "confidence": "high",
+            "evidence": "component React Frontend (React) → static assets",
+            "fromPattern": false,
+            "category": "repository-evidence"
+          },
+          {
+            "componentId": "fe-react",
+            "serviceId": "CloudFront",
+            "confidence": "high",
+            "evidence": "component React Frontend (React) → CDN",
+            "fromPattern": false,
+            "category": "deployment-requirement"
+          },
+          {
+            "componentId": "be-express",
+            "serviceId": "ECS",
+            "confidence": "low",
+            "evidence": "component Express.js Backend (Express.js) (possible container host, no container evidence)",
+            "fromPattern": false,
+            "category": "inference"
+          },
+          {
+            "componentId": "be-express-alb",
+            "serviceId": "ALB",
+            "confidence": "medium",
+            "evidence": "component Express.js Backend (Express.js) → Application Load Balancer recommendation",
+            "fromPattern": false,
+            "category": "recommendation"
+          },
+          {
+            "componentId": "db-mongo",
+            "serviceId": "DocumentDB",
+            "confidence": "high",
+            "evidence": "component MongoDB Database (MongoDB)",
+            "fromPattern": false,
+            "category": "repository-evidence"
+          }
+        ],
+        "detectedPattern": "full-stack-web",
+        "terminalState": "OK",
+        "metadata": {
+          "grounding": "repoFiles",
+          "truncated": false,
+          "parseErrors": [],
+          "dbEngine": "none"
+        },
+        "warnings": []
+      }
+    ]
+  }
+}

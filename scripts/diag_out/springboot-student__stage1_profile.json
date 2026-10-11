@@ -1,0 +1,95 @@
+{
+  "languages": [
+    {
+      "name": "Java/JVM",
+      "evidence": "pom.xml",
+      "confidence": "high"
+    }
+  ],
+  "frameworks": [
+    {
+      "name": "Spring Data JPA",
+      "evidence": "pom.xml → org.springframework.boot:spring-boot-starter-data-jpa",
+      "confidence": "high"
+    },
+    {
+      "name": "Spring Boot",
+      "evidence": "pom.xml → org.springframework.boot:spring-boot-starter-web",
+      "confidence": "high"
+    }
+  ],
+  "databases": [
+    {
+      "name": "MySQL",
+      "evidence": "pom.xml → com.mysql:mysql-connector-j",
+      "confidence": "high"
+    }
+  ],
+  "infrastructure": [],
+  "entryPoints": [],
+  "awsUsage": [],
+  "deploymentHints": [],
+  "parseFailures": [],
+  "isIacOnly": false,
+  "isLibraryOrFramework": false,
+  "discoveredComponents": [],
+  "evidenceRegister": [
+    {
+      "id": "ev-1",
+      "kind": "manifest",
+      "sourcePath": "pom.xml",
+      "technology": "Java/JVM",
+      "detail": "Language/runtime detected: Java/JVM",
+      "confidence": "high"
+    },
+    {
+      "id": "ev-2",
+      "kind": "manifest",
+      "sourcePath": "pom.xml",
+      "technology": "Spring Data JPA",
+      "detail": "pom.xml → org.springframework.boot:spring-boot-starter-data-jpa",
+      "confidence": "high"
+    },
+    {
+      "id": "ev-3",
+      "kind": "manifest",
+      "sourcePath": "pom.xml",
+      "technology": "Spring Boot",
+      "detail": "pom.xml → org.springframework.boot:spring-boot-starter-web",
+      "confidence": "high"
+    },
+    {
+      "id": "ev-4",
+      "kind": "manifest",
+      "sourcePath": "pom.xml",
+      "technology": "MySQL",
+      "detail": "pom.xml → com.mysql:mysql-connector-j",
+      "confidence": "high"
+    },
+    {
+      "id": "ev-5",
+      "kind": "readme",
+      "sourcePath": "readme.md",
+      "technology": "readme-evidence",
+      "detail": "2.  **MySQL Server** 🦈 (for the database)",
+      "confidence": "medium"
+    },
+    {
+      "id": "ev-6",
+      "kind": "readme",
+      "sourcePath": "readme.md",
+      "technology": "readme-evidence",
+      "detail": "* Ensure you have a database named `CollegeDB` set up in your MySQL server.",
+      "confidence": "medium"
+    }
+  ],
+  "workloadClassification": {
+    "primaryWorkload": "api",
+    "type": "api",
+    "confidence": "high",
+    "reasons": [
+      "Backend API service without frontend UI"
+    ]
+  },
+  "summary": "Repository: ankitkumar2020/StudentManagementSystem\n\nDETECTED TECHNOLOGIES (extracted from repository files before inference):\n\nWORKLOAD CLASSIFICATION: api (high confidence)\n  - Backend API service without frontend UI\n\nLanguages/Runtime: Java/JVM [pom.xml]\nFrameworks/Libraries:\n  - Spring Data JPA  [evidence: pom.xml → org.springframework.boot:spring-boot-starter-data-jpa]\n  - Spring Boot  [evidence: pom.xml → org.springframework.boot:spring-boot-starter-web]\nDatabases:\n  - MySQL  [evidence: pom.xml → com.mysql:mysql-connector-j]\nExplicit AWS SDK Usage: none detected\n\nEVIDENCE INVENTORY (registered evidence from repository files):\n  [ev-1] (manifest: pom.xml) [Java/JVM] Language/runtime detected: Java/JVM\n  [ev-2] (manifest: pom.xml) [Spring Data JPA] pom.xml → org.springframework.boot:spring-boot-starter-data-jpa\n  [ev-3] (manifest: pom.xml) [Spring Boot] pom.xml → org.springframework.boot:spring-boot-starter-web\n  [ev-4] (manifest: pom.xml) [MySQL] pom.xml → com.mysql:mysql-connector-j\n  [ev-5] (readme: readme.md) [readme-evidence] 2.  **MySQL Server** 🦈 (for the database)\n  [ev-6] (readme: readme.md) [readme-evidence] * Ensure you have a database named `CollegeDB` set up in your MySQL server.\n\nCRITICAL EVIDENCE RULE: Every component in the architecture model MUST cite one or more valid Evidence IDs (e.g. ['ev-1']) from the EVIDENCE INVENTORY above. Do not invent evidence.\n\nThis structured analysis is the evidence base for building the application's architecture model. Use only the technologies above; do not invent technologies absent from this analysis."
+}
