@@ -27,7 +27,7 @@ function getPool(): Promise<Pool> {
     const connectionString = process.env.DATABASE_URL;
     if (!connectionString) {
       throw new Error(
-        "DATABASE_URL is not set. Add it to .env.local (see .env.example)."
+        "DATABASE_URL is not set. Add it to .env.local."
       );
     }
     pool = new Pool({
@@ -78,12 +78,12 @@ export type Session = typeof auth.$Infer.Session;
 export function requireAuthEnv(): void {
   if (!process.env.DATABASE_URL) {
     throw new Error(
-      "DATABASE_URL is not set. Add it to .env.local (see .env.example)."
+      "DATABASE_URL is not set. Add it to .env.local."
     );
   }
   if (!process.env.BETTER_AUTH_SECRET) {
     throw new Error(
-      "BETTER_AUTH_SECRET is not set. Add it to .env.local (see .env.example)."
+      "BETTER_AUTH_SECRET is not set. Add it to .env.local."
     );
   }
 }

@@ -1049,6 +1049,11 @@ export function validateDiagramSemantics(
 
   const safeNodes = Array.isArray(nodes) ? nodes : [];
   const safeEdges = Array.isArray(edges) ? edges : [];
+  // Structural nodes (Users ingress, ext- integration boxes) are validated
+  // against the deployment model / edge tier, never counted as services.
+  // Metrics below report AWS service nodes only so diagram, cost and
+  // template agree on one service set.
+  let awsVerifiedContainments = 0;
 
   // Third-party integration boxes and the generic Users node are validated
   // against the deployment model / edge tier, not the service catalog.
@@ -1232,7 +1237,7 @@ export function validateDiagramSemantics(
         `Containment semantic mismatch: service "${n.serviceId}" is in "${n.parent}", expected "${expected!}"`
       );
     } else {
-      verifiedContainments++;
+      awsVerifiedContainments++;
     }
   }
 
@@ -1278,6 +1283,19 @@ export function validateDiagramSemantics(
       const forwardEdge = safeEdges.find((e) => e.sourceId === redir.src && e.targetId === redir.dst);
       const reverseEdge = safeEdges.find((e) => e.sourceId === redir.dst && e.targetId === redir.src);
 
+      // Third-party hosted stores are reached via the NAT egress chain,
+      // never a direct wire (mirrors the builder skip above). A
+      // compute -> NAT -> external chain satisfies the relationship.
+      const viaNatChain =
+        (srcMapping?.external === true || dstMapping?.external === true) &&
+        safeNodes.some(
+          (n) =>
+            n.serviceId === "NATGateway" &&
+            safeEdges.some((e) => e.sourceId === srcNode.id && e.targetId === n.id) &&
+            safeEdges.some((e) => e.sourceId === n.id && e.targetId === dstNode.id)
+        );
+      if (viaNatChain) continue;
+
       if (reverseEdge && !forwardEdge) {
         errors.push(
           `Reversed relationship direction: expected "${rel.from} -> ${rel.to}" (type: "${rel.type ?? ""}"), but edge is reversed from "${dstNode.serviceId}" to "${srcNode.serviceId}"`
@@ -1314,10 +1332,10 @@ export function validateDiagramSemantics(
     errors,
     metrics: {
       expectedServiceCount: plan.awsMappings.length,
-      renderedServiceCount: safeNodes.length,
+      renderedServiceCount: awsNodes.length,
       expectedRelationshipCount: expectedRelCount,
       renderedRelationshipCount: safeEdges.length,
-      verifiedContainments,
+      verifiedContainments: awsVerifiedContainments,
     },
   };
 }
@@ -2033,14 +2051,14 @@ export function deriveRoleEdges(
       }
     }
   }
-  // NAT chains compute egress to the outside world. Only the last AZ's
-  // NAT links outward: it sits adjacent to the external column, so the hop
-  // crosses no foreign subnet.
+  // NAT chains compute egress to the outside world. Every NAT links
+  // outward so each AZ keeps a complete compute -> NAT -> external chain.
+  // Routing (vpcExitKeys below) sends every hop through the top gutter
+  // and the VPC-exit corridor, never sideways across sibling subnets.
   for (const c of compute) {
     for (const n of nat) link(c.id, n.id, ROLE_VERBS.egress);
   }
-  const lastNatAz = Math.max(0, ...nat.map((n) => n.az ?? 0));
-  for (const n of nat.filter((x) => (x.az ?? 0) === lastNatAz)) {
+  for (const n of nat) {
     for (const x of external) link(n.id, x.id, ROLE_VERBS.egress);
   }
   // Queue triggers reach compute when nothing else connects them.
@@ -2334,6 +2352,22 @@ export function routeEdges(
      * longer crossings elsewhere.
      */
     transitIds?: Set<string>;
+    /**
+     * Gutter Y for VPC-exit edges: edges in vpcExitKeys leave the VPC
+     * for the regional row or external column via this horizontal lane
+     * (VPC header gap), never sideways across sibling AZ subnets.
+     */
+    vpcExitY?: number;
+    /** "source->target" keys routed via vpcExitY. */
+    vpcExitKeys?: Set<string>;
+    /**
+     * Vertical exit-corridor lane for external-bound hops, with its own
+     * key set. Corridor edges drop from the gutter through the gap
+     * between the VPC extent and the external column.
+     */
+    vpcExitX?: number;
+    /** "source->target" keys routed via the exit corridor. */
+    vpcCorridorKeys?: Set<string>;
   }
 ): RoutedEdge[] {
   const routed: RoutedEdge[] = [];
@@ -2383,7 +2417,32 @@ export function routeEdges(
       const stripMaxX = Math.max(srcCx, dstCx) + 8;
       const inStrip = (n: { x: number; y: number; w: number; h: number }): boolean =>
         n.x < stripMaxX && n.x + n.w > stripMinX;
-      if (Math.abs(dy) >= Math.abs(dx)) {
+      // VPC-exit edges leave through the top gutter lane, never sideways
+      // across a sibling AZ's subnets. Corridor edges additionally drop
+      // through the exit-corridor gap beside the VPC to reach the
+      // external column without entering any subnet.
+      const vpcExitY = opts?.vpcExitY;
+      const vpcExitX = opts?.vpcExitX;
+      const isVpcExit =
+        vpcExitY !== undefined && (opts?.vpcExitKeys?.has(`${e.source}->${e.target}`) ?? false);
+      const isCorridor =
+        vpcExitY !== undefined &&
+        vpcExitX !== undefined &&
+        (opts?.vpcCorridorKeys?.has(`${e.source}->${e.target}`) ?? false);
+      if (isCorridor && vpcExitY !== undefined && vpcExitX !== undefined) {
+        exitPort = srcCy > vpcExitY ? { x: 0.5, y: 0 } : { x: 0.5, y: 1 };
+        entryPort = dstCx >= vpcExitX ? { x: 0, y: 0.5 } : { x: 0.5, y: 0 };
+        waypoints.push({ x: srcCx, y: vpcExitY });
+        waypoints.push({ x: vpcExitX, y: vpcExitY });
+        if (Math.abs(dstCy - vpcExitY) > 4) {
+          waypoints.push({ x: vpcExitX, y: dstCy });
+        }
+      } else if (isVpcExit && vpcExitY !== undefined) {
+        exitPort = srcCy > vpcExitY ? { x: 0.5, y: 0 } : { x: 0.5, y: 1 };
+        entryPort = dstCy > vpcExitY ? { x: 0.5, y: 0 } : { x: 0.5, y: 1 };
+        waypoints.push({ x: srcCx, y: vpcExitY });
+        waypoints.push({ x: dstCx, y: vpcExitY });
+      } else if (Math.abs(dy) >= Math.abs(dx)) {
         if (dy >= 0) {
           // Downward vertical flow
           exitPort = { x: 0.5, y: 1 };
@@ -3013,9 +3072,17 @@ export function buildDiagramElements(
     .filter((n) => LB_SERVICES.has(n.serviceId))
     .map((n) => n.id);
   const svcByCompId = new Map(groundedNodes.map((n) => [n.componentId, n.serviceId]));
+  // Third-party hosted stores are reached via the NAT egress chain, never
+  // a direct wire: an explicit compute -> external-store relationship would
+  // cut sideways across sibling AZ subnets. The semantic check mirrors
+  // this by accepting the NAT chain as satisfaction.
+  const mappingByCompId = new Map(plan.awsMappings.map((m) => [m.componentId, m]));
   for (const rel of plan.relationships ?? []) {
     const mappedFrom = compIdRedirect[rel.from] ?? rel.from;
     const mappedTo = compIdRedirect[rel.to] ?? rel.to;
+    const srcMapping = mappingByCompId.get(rel.from) ?? mappingByCompId.get(mappedFrom);
+    const dstMapping = mappingByCompId.get(rel.to) ?? mappingByCompId.get(mappedTo);
+    if (srcMapping?.external === true || dstMapping?.external === true) continue;
     const srcNodeId = compIdToNodeId[mappedFrom] ?? serviceIdToNodeId[rel.from];
     const dstNodeId = compIdToNodeId[mappedTo] ?? serviceIdToNodeId[rel.to];
 
@@ -3122,6 +3189,12 @@ export function buildDiagramElements(
     const edgeLabel = protocol ?? def.label;
     const isPrimary = isPrimaryPathEdge(srcNode.serviceId, dstNode.serviceId, def.label);
     const flowStep = isPrimary ? primaryFlowCounter++ : undefined;
+    // The NAT egress chain is load-bearing topology (the only path to
+    // external stores), never a droppable hint — but only for real
+    // service mappings. Decorative ext- integration boxes stay droppable
+    // so node-crossing hints to them are omitted, not drawn through nodes.
+    const dstIsExternalMapping = externalComps.has(dstNode.componentId);
+    const isNatEgress = srcNode.serviceId === "NATGateway" && dstIsExternalMapping;
 
     rawEdges.push({
       source: def.from,
@@ -3130,7 +3203,7 @@ export function buildDiagramElements(
       style: confirmed ? "solid" : "dashed",
       tooltip: undefined,
       flowStep,
-      droppable: true,
+      droppable: !isNatEgress,
     });
     edgeKeys.add(forwardKey);
   }
@@ -3144,7 +3217,45 @@ export function buildDiagramElements(
       .filter((n) => n.parent === CID.edge || n.parent === CID.regional)
       .map((n) => n.id)
   );
-  let routedEdges = routeEdges(rawEdges, nodeAbsGeo, { transitIds });
+  // Egress exits through the top gutter and the VPC-exit corridor: any
+  // edge leaving the VPC for the regional row or the external column
+  // routes up through the VPC header gap, never sideways across a sibling
+  // AZ's subnets (validator 5b). External-bound hops additionally drop
+  // through the corridor gap between the last AZ and the external column.
+  const parentOf = new Map(groundedNodes.map((n) => [n.id, n.parent]));
+  const inAzSubnet = (parent: string | undefined): boolean =>
+    Boolean(parent && /^container-(public|private)-\d+$/.test(parent));
+  const outsideVpc = (parent: string | undefined): boolean =>
+    parent === CID.regional || parent === CID.edge || parent === CID.external;
+  const vpcRect = layout.containers[CID.vpc];
+  const extRect = layout.containers[CID.external];
+  const vpcExitY = vpcRect ? Math.round(vpcRect.y + LABEL_H + PAD_TOP / 2) : null;
+  // Corridor: vertical lane in the gap between the VPC extent and the
+  // external column. Falls back to the gutter-only path when absent.
+  const vpcExitX =
+    vpcRect && extRect ? Math.round(extRect.x - (extRect.x - (vpcRect.x + vpcRect.w)) / 2) : null;
+  const vpcExitKeys = new Set<string>();
+  const vpcCorridorKeys = new Set<string>();
+  if (vpcExitY !== null) {
+    for (const r of rawEdges) {
+      const sp = parentOf.get(r.source);
+      const dp = parentOf.get(r.target);
+      if ((inAzSubnet(sp) && outsideVpc(dp)) || (inAzSubnet(dp) && outsideVpc(sp))) {
+        if ((dp === CID.external || sp === CID.external) && vpcExitX !== null) {
+          vpcCorridorKeys.add(`${r.source}->${r.target}`);
+        } else {
+          vpcExitKeys.add(`${r.source}->${r.target}`);
+        }
+      }
+    }
+  }
+  let routedEdges = routeEdges(rawEdges, nodeAbsGeo, {
+    transitIds,
+    vpcExitY: vpcExitY ?? undefined,
+    vpcExitX: vpcExitX ?? undefined,
+    vpcExitKeys,
+    vpcCorridorKeys,
+  });
   const droppableByPair = new Map(
     rawEdges.filter((r) => r.droppable).map((r) => [`${r.source}->${r.target}`, true])
   );
@@ -3153,6 +3264,15 @@ export function buildDiagramElements(
     routedEdges = routedEdges.filter(
       (e) => !blockedSeats.has(e.id) || !droppableByPair.get(`${e.sourceId}->${e.targetId}`)
     );
+  }
+  // Renumber primary-flow badges contiguously after label seating drops.
+  // Flow steps are assigned pre-routing, so a dropped hint leaves a gap
+  // (e.g. 1,3,4) and the second visible badge reads 3, not 2.
+  {
+    let step = 1;
+    for (const e of routedEdges) {
+      if (e.flowStep !== undefined) e.flowStep = step++;
+    }
   }
 
   return {

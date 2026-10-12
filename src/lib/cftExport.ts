@@ -18,6 +18,7 @@
 
 import { stringify, parse } from "yaml";
 import type { ServicePlan, ServiceId } from "./schema.ts";
+import { readTopology } from "./topology.ts";
 
 // ---------------------------------------------------------------------------
 // Constants & Disclaimer
@@ -44,6 +45,8 @@ export interface CftContext {
   appName: string;
   environment: string;
   allServiceIds: Set<string>;
+  /** AZ count from readTopology: subnets and subnet refs scale with it. */
+  azCount: number;
 }
 
 export interface CftServiceSpec {
@@ -53,6 +56,17 @@ export interface CftServiceSpec {
   description: string;
   generateResources: (ctx: CftContext) => Record<string, any>;
   generateOutputs?: (ctx: CftContext) => Record<string, any>;
+}
+
+/**
+ * Public-subnet refs for the plan AZ count: one per AZ, matching the VPC
+ * spec below and the diagram AZ containers (all from readTopology).
+ */
+function publicSubnetRefs(ctx: CftContext): Array<{ Ref: string }> {
+  const n = Math.min(6, Math.max(1, Math.floor(ctx.azCount)));
+  const refs: Array<{ Ref: string }> = [];
+  for (let i = 1; i <= n; i++) refs.push({ Ref: `PublicSubnet${i}` });
+  return refs;
 }
 
 /**
@@ -413,7 +427,7 @@ export const CFT_SERVICE_RESOURCE_MAP: Record<string, CftServiceSpec> = {
         ? {
             AwsvpcConfiguration: {
               AssignPublicIp: "ENABLED",
-              Subnets: [{ Ref: "PublicSubnet1" }],
+              Subnets: publicSubnetRefs(ctx),
             },
           }
         : undefined;
@@ -547,9 +561,7 @@ export const CFT_SERVICE_RESOURCE_MAP: Record<string, CftServiceSpec> = {
     description: "Application Load Balancer with HTTP target group and listener",
     generateResources: (ctx) => {
       const hasVpc = ctx.allServiceIds.has("VPC");
-      const subnets = hasVpc
-        ? [{ Ref: "PublicSubnet1" }, { Ref: "PublicSubnet2" }]
-        : [];
+      const subnets = hasVpc ? publicSubnetRefs(ctx) : [];
 
       return {
         AlbTargetGroup: {
@@ -603,49 +615,47 @@ export const CFT_SERVICE_RESOURCE_MAP: Record<string, CftServiceSpec> = {
       "AWS::EC2::InternetGateway",
       "AWS::EC2::VPCGatewayAttachment",
     ],
-    description: "Amazon VPC with public subnets and internet gateway",
-    generateResources: () => ({
-      AppVpc: {
-        Type: "AWS::EC2::VPC",
-        Properties: {
-          CidrBlock: "10.0.0.0/16",
-          EnableDnsHostnames: true,
-          EnableDnsSupport: true,
-          Tags: [{ Key: "Name", Value: { "Fn::Sub": "${AppName}-${Environment}-vpc" } }],
+    description: "Amazon VPC with one public subnet per availability zone and internet gateway",
+    generateResources: (ctx) => {
+      const azCount = Math.min(6, Math.max(1, Math.floor(ctx.azCount)));
+      const resources: Record<string, any> = {
+        AppVpc: {
+          Type: "AWS::EC2::VPC",
+          Properties: {
+            CidrBlock: "10.0.0.0/16",
+            EnableDnsHostnames: true,
+            EnableDnsSupport: true,
+            Tags: [{ Key: "Name", Value: { "Fn::Sub": "${AppName}-${Environment}-vpc" } }],
+          },
         },
-      },
-      PublicSubnet1: {
-        Type: "AWS::EC2::Subnet",
-        Properties: {
-          VpcId: { Ref: "AppVpc" },
-          CidrBlock: "10.0.1.0/24",
-          MapPublicIpOnLaunch: true,
-          Tags: [{ Key: "Name", Value: { "Fn::Sub": "${AppName}-${Environment}-public-1" } }],
-        },
-      },
-      PublicSubnet2: {
-        Type: "AWS::EC2::Subnet",
-        Properties: {
-          VpcId: { Ref: "AppVpc" },
-          CidrBlock: "10.0.2.0/24",
-          MapPublicIpOnLaunch: true,
-          Tags: [{ Key: "Name", Value: { "Fn::Sub": "${AppName}-${Environment}-public-2" } }],
-        },
-      },
-      InternetGateway: {
+      };
+      for (let i = 1; i <= azCount; i++) {
+        resources[`PublicSubnet${i}`] = {
+          Type: "AWS::EC2::Subnet",
+          Properties: {
+            VpcId: { Ref: "AppVpc" },
+            CidrBlock: `10.0.${i}.0/24`,
+            AvailabilityZone: { "Fn::Select": [String(i - 1), { "Fn::GetAZs": "" }] },
+            MapPublicIpOnLaunch: true,
+            Tags: [{ Key: "Name", Value: { "Fn::Sub": "${AppName}-${Environment}-public-" + i } }],
+          },
+        };
+      }
+      resources.InternetGateway = {
         Type: "AWS::EC2::InternetGateway",
         Properties: {
           Tags: [{ Key: "Name", Value: { "Fn::Sub": "${AppName}-${Environment}-igw" } }],
         },
-      },
-      VpcGatewayAttachment: {
+      };
+      resources.VpcGatewayAttachment = {
         Type: "AWS::EC2::VPCGatewayAttachment",
         Properties: {
           VpcId: { Ref: "AppVpc" },
           InternetGatewayId: { Ref: "InternetGateway" },
         },
-      },
-    }),
+      };
+      return resources;
+    },
     generateOutputs: () => ({
       VpcId: {
         Description: "VPC ID",
@@ -667,7 +677,7 @@ export const CFT_SERVICE_RESOURCE_MAP: Record<string, CftServiceSpec> = {
           Type: "AWS::RDS::DBSubnetGroup",
           Properties: {
             DBSubnetGroupDescription: { "Fn::Sub": "Subnet group for ${AppName} (${Environment})" },
-            SubnetIds: [{ Ref: "PublicSubnet1" }, { Ref: "PublicSubnet2" }],
+            SubnetIds: publicSubnetRefs(ctx),
           },
         };
       }
@@ -741,6 +751,52 @@ export const CFT_SERVICE_RESOURCE_MAP: Record<string, CftServiceSpec> = {
           CacheNodeType: "cache.t3.micro",
           NumCacheNodes: 1,
         },
+      },
+    }),
+  },
+
+  DocumentDB: {
+    serviceId: "DocumentDB",
+    primaryType: "AWS::DocDB::DBCluster",
+    relatedTypes: ["AWS::DocDB::DBInstance", "AWS::DocDB::DBSubnetGroup"],
+    description: "Amazon DocumentDB cluster with one instance per availability zone",
+    generateResources: (ctx) => {
+      const hasVpc = ctx.allServiceIds.has("VPC");
+      const azCount = Math.min(6, Math.max(1, Math.floor(ctx.azCount)));
+      const resources: Record<string, any> = {};
+      if (hasVpc) {
+        resources.DocSubnetGroup = {
+          Type: "AWS::DocDB::DBSubnetGroup",
+          Properties: {
+            DBSubnetGroupDescription: { "Fn::Sub": "Subnet group for ${AppName} (${Environment})" },
+            SubnetIds: publicSubnetRefs(ctx),
+          },
+        };
+      }
+      resources.DocCluster = {
+        Type: "AWS::DocDB::DBCluster",
+        Properties: {
+          DBClusterIdentifier: { "Fn::Sub": "${AppName}-${Environment}-docdb" },
+          MasterUsername: "adminuser",
+          MasterUserPassword: "MustBeChanged123!",
+          ...(hasVpc ? { DBSubnetGroupName: { Ref: "DocSubnetGroup" } } : {}),
+        },
+      };
+      for (let i = 1; i <= azCount; i++) {
+        resources[`DocInstance${i}`] = {
+          Type: "AWS::DocDB::DBInstance",
+          Properties: {
+            DBClusterIdentifier: { Ref: "DocCluster" },
+            DBInstanceClass: "db.t3.medium",
+          },
+        };
+      }
+      return resources;
+    },
+    generateOutputs: () => ({
+      DocClusterEndpoint: {
+        Description: "DocumentDB cluster connection endpoint",
+        Value: { "Fn::GetAtt": ["DocCluster", "Endpoint"] },
       },
     }),
   },
@@ -959,27 +1015,6 @@ export const CFT_SERVICE_RESOURCE_MAP: Record<string, CftServiceSpec> = {
 };
 
 // ---------------------------------------------------------------------------
-// Pattern Canonical Defaults
-// ---------------------------------------------------------------------------
-
-/** Canonical service IDs for each of the 6 fixed patterns (plus variants) */
-export const PATTERN_CANONICAL_SERVICES: Record<string, string[]> = {
-  "serverless-rest-api": ["APIGateway", "Lambda", "DynamoDB", "CloudWatch"],
-  "serverless-api": ["APIGateway", "Lambda", "DynamoDB", "CloudWatch"],
-  "containerized-web-app": ["ALB", "ECS", "ECR", "VPC", "RDS", "CloudWatch"],
-  "containerised-app": ["ALB", "ECS", "ECR", "VPC", "RDS", "CloudWatch"],
-  "static-site-cdn": ["CloudFront", "S3", "Route53"],
-  "static-site": ["CloudFront", "S3", "Route53"],
-  "event-driven-pipeline": ["EventBridge", "SQS", "Lambda", "DynamoDB", "CloudWatch"],
-  "event-driven": ["EventBridge", "SQS", "Lambda", "DynamoDB", "CloudWatch"],
-  "full-stack-serverless": ["CloudFront", "S3", "APIGateway", "Lambda", "DynamoDB", "Cognito"],
-  "worker-queue": ["SQS", "Lambda", "DynamoDB", "CloudWatch"],
-  "data-pipeline": ["Kinesis", "S3", "Redshift", "CloudWatch"],
-  "ml-pipeline": ["SageMaker", "S3", "CloudWatch"],
-  generic: ["Lambda", "S3", "CloudWatch"],
-};
-
-// ---------------------------------------------------------------------------
 // Main CFT Generator
 // ---------------------------------------------------------------------------
 
@@ -987,6 +1022,8 @@ export interface CftGeneratorOptions {
   appName?: string;
   environment?: string;
   patternOverride?: string;
+  /** AZ count for subnet synthesis (plan-driven callers use readTopology). */
+  azCount?: number;
 }
 
 /**
@@ -1029,10 +1066,13 @@ export function generateSingleCftYaml(
   const environment = options?.environment || "dev";
   const rawPattern = options?.patternOverride || plan.detectedPattern || "generic";
   const pattern = rawPattern.toLowerCase().trim();
+  // One topology reader: subnets and counts follow the same flags the
+  // diagram lays out and cost prices.
+  const topo = readTopology(plan);
 
-  // Collect unique services present in the plan's awsMappings.
-  // External (third-party hosted) mappings follow the same hosting field:
-  // no AWS resource is emitted for them.
+  // Resources come from the plan's own mappings only — never a
+  // pattern service list. External (third-party hosted) mappings follow
+  // the same hosting field: no AWS resource is emitted for them.
   const mappedServices = new Set<string>();
   for (const m of plan.awsMappings) {
     if (m.external === true) continue;
@@ -1041,17 +1081,20 @@ export function generateSingleCftYaml(
     }
   }
 
-  // If no services were mapped, fall back to canonical services for the pattern
+  // Empty mapping set degrades to the generic S3 floor, never a pattern
+  // guess: the template must agree with the diagram and cost, which
+  // render exactly the mapped services.
   if (mappedServices.size === 0) {
-    const canonical = PATTERN_CANONICAL_SERVICES[pattern] || PATTERN_CANONICAL_SERVICES.generic;
-    for (const id of canonical) {
-      if (CFT_SERVICE_RESOURCE_MAP[id]) {
-        mappedServices.add(id);
-      }
-    }
+    mappedServices.add("S3");
   }
 
-  return buildTemplateYaml(Array.from(mappedServices), pattern, appName, environment);
+  return buildTemplateYaml(
+    Array.from(mappedServices),
+    pattern,
+    appName,
+    environment,
+    options?.azCount ?? topo.availabilityZones
+  );
 }
 
 /**
@@ -1066,13 +1109,13 @@ export function generateCftFromServices(
   const environment = options?.environment || "dev";
   const safePattern = pattern.toLowerCase().trim();
 
-  // If service list is empty, use canonical pattern defaults
-  let services = serviceIds.filter((id) => CFT_SERVICE_RESOURCE_MAP[id]);
+  // Services drive the template; an empty list degrades to the S3 floor.
+  const services = serviceIds.filter((id) => CFT_SERVICE_RESOURCE_MAP[id]);
   if (services.length === 0) {
-    services = PATTERN_CANONICAL_SERVICES[safePattern] || PATTERN_CANONICAL_SERVICES.generic;
+    services.push("S3");
   }
 
-  return buildTemplateYaml(services, safePattern, appName, environment);
+  return buildTemplateYaml(services, safePattern, appName, environment, options?.azCount ?? 2);
 }
 
 /**
@@ -1082,10 +1125,11 @@ function buildTemplateYaml(
   serviceIds: string[],
   pattern: string,
   appName: string,
-  environment: string
+  environment: string,
+  azCount: number
 ): string {
   const allServiceIds = new Set(serviceIds);
-  const ctx: CftContext = { appName, environment, allServiceIds };
+  const ctx: CftContext = { appName, environment, allServiceIds, azCount };
 
   // 1. Top-level metadata
   const doc: Record<string, any> = {

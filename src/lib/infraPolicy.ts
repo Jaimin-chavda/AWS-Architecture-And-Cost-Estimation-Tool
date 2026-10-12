@@ -20,8 +20,10 @@ import type {
   ServiceId,
   AwsServiceMapping,
   DiscoveredComponent,
+  ThirdPartyIntegration,
 } from "./schema.ts";
 import { serviceTypeFromId } from "./ruleEngine.ts";
+import { matchIntegration } from "./integrationRegistry.ts";
 import type { WorkloadTraits } from "./workloadTraits.ts";
 
 export type PolicyRuleName =
@@ -154,6 +156,62 @@ function isRelationalComponent(plan: ServicePlan, componentId: string): boolean 
   return false;
 }
 
+/**
+ * Registry role -> deployment-model integration category. Roles without a
+ * dedicated category fall back to analytics (egress record, not a store).
+ */
+function roleToCategory(role: string): ThirdPartyIntegration["category"] {
+  switch (role) {
+    case "data-store":
+      return "database";
+    case "auth":
+      return "auth";
+    case "payment":
+      return "payment";
+    case "email":
+      return "email";
+    case "storage":
+      return "storage";
+    default:
+      return "analytics";
+  }
+}
+
+/**
+ * Records trait egress targets on every deployment model as labelled
+ * third-party integrations (diagram external boxes, NAT justification).
+ * Resolved through the registry per label — no names live here.
+ */
+function egressIntegrations(traits: WorkloadTraits): ThirdPartyIntegration[] {
+  const out: ThirdPartyIntegration[] = [];
+  const seen = new Set<string>();
+  for (const label of traits.egressTargets) {
+    const hit = matchIntegration(label);
+    if (!hit || seen.has(hit.label)) continue;
+    seen.add(hit.label);
+    out.push({
+      name: hit.label,
+      purpose: `External ${hit.role} integration over ${hit.protocol}`,
+      protocol: hit.protocol,
+      category: roleToCategory(hit.role),
+    });
+  }
+  return out;
+}
+
+function computeTierFor(model: WorkloadTraits["computeModel"]): "ECS_FARGATE" | "EC2" | "LAMBDA" | "NONE" {
+  switch (model) {
+    case "container":
+      return "ECS_FARGATE";
+    case "vm":
+      return "EC2";
+    case "serverless":
+      return "LAMBDA";
+    case "none":
+      return "NONE";
+  }
+}
+
 export function applyInfraPolicy(
   plan: ServicePlan,
   traits: WorkloadTraits
@@ -281,6 +339,16 @@ export function applyInfraPolicy(
       "staticOnly",
       "static frontend without backend"
     );
+  }
+
+  // Record trait-derived topology on every deployment model: egress
+  // integrations (external boxes + NAT justification) and the compute
+  // tier. Single writer: no other module sets these flags.
+  const integrations = egressIntegrations(traits);
+  const computeTier = computeTierFor(traits.computeModel);
+  for (const dm of gated.deploymentModel) {
+    dm.thirdPartyIntegrations = integrations;
+    dm.computeTier = computeTier;
   }
 
   return gated;

@@ -927,6 +927,11 @@ export function mapArchitectureModelToServicePlan(
       needsAutoscaling: Boolean(isCompute && (mapped === "ECS" || mapped === "EC2" || mapped === "EKS")),
       source: "recommended" as const,
       notes: isDatabase ? "Production DB → recommend Multi-AZ" : undefined,
+      availabilityZones: 1,
+      hasLoadBalancer: false,
+      secretsManager: false,
+      natGateway: false,
+      thirdPartyIntegrations: [],
     };
   });
 

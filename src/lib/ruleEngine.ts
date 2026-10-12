@@ -22,10 +22,9 @@ import type {
 import type { ProjectProfile } from "./repoAnalyzer.ts";
 import { type PatternId, deduplicateAwsMappings } from "./architecture.ts";
 import { buildAlternateProposal } from "./patternAlternates.ts";
-import { enforceProductionReadiness, extractProductionSignals, type ProductionSignals } from "./productionReadiness.ts";
+import { deriveTraits } from "./workloadTraits.ts";
 import { matchTechLabel } from "./integrationRegistry.ts";
 import type { IntegrationHosting } from "./integrationRegistry.ts";
-import { deriveTraits } from "./workloadTraits.ts";
 import { applyInfraPolicy } from "./infraPolicy.ts";
 
 // ---------------------------------------------------------------------------
@@ -438,7 +437,8 @@ function driverEvidenceDirs(profile?: ProjectProfile): string[] {
   const dirs: string[] = [];
   for (const d of profile.databases) {
     if (/postgres|mysql|mariadb/i.test(d.name)) {
-      dirs.push(dirOfEvidence(d.evidence));
+      const dir = dirOfEvidence(d.evidence);
+      if (dir !== null) dirs.push(dir);
     }
   }
   return dirs;
@@ -474,7 +474,8 @@ function familyOrmCorroborated(
   if (profile) {
     for (const f of [...profile.frameworks, ...profile.databases]) {
       if (Object.values(FAMILY_ORMS).some((res) => res.some((re) => re.test(f.name)))) {
-        ormDirs.add(dirOfEvidence(f.evidence));
+        const dir = dirOfEvidence(f.evidence);
+        if (dir !== null) ormDirs.add(dir);
       }
     }
   }
@@ -1293,6 +1294,11 @@ export function buildServicePlan(
       needsAutoscaling: isCompute && ["ECS", "EC2", "EKS", "AppRunner"].includes(c.technology),
       source: "recommended" as const,
       notes: isDatabase ? "Production DB → recommend Multi-AZ" : undefined,
+      availabilityZones: 1,
+      hasLoadBalancer: false,
+      secretsManager: false,
+      natGateway: false,
+      thirdPartyIntegrations: [],
     };
   });
 
@@ -1377,9 +1383,8 @@ export function buildServicePlan(
     return floor;
   }
 
-  // Apply production readiness enforcement (flags only; service injection
-  // is owned by infraPolicy.ts). Traits gate every predicate so nothing is
-  // injected unless its rule fired.
+  // Single policy layer: trait-gated infraPolicy owns every injection
+  // and deployment-model flag. Nothing is added unless its predicate fired.
   const combined = [input.description, input.fileContent].join("\n");
   const traits = deriveTraits({
     profile: input.profile,
@@ -1388,9 +1393,7 @@ export function buildServicePlan(
     combinedText: combined,
     evidenceTexts: planServices.map((s) => s.evidence),
   });
-  const prodSignals = extractProductionSignals(combined, input.fileNames, input.profile);
-  const flaggedPlan = enforceProductionReadiness(check.data, prodSignals, traits);
-  const finalPlan = applyInfraPolicy(flaggedPlan, traits);
+  const finalPlan = applyInfraPolicy(check.data, traits);
 
   return finalPlan;
 }

@@ -19,6 +19,8 @@
     "@aws-sdk/client-pricing": "^3.1129.0",
     "@better-auth/kysely-adapter": "^1.7.7",
     "@openrouter/ai-sdk-provider": "^3.0.0",
+    "@supabase/ssr": "^0.12.7",
+    "@supabase/supabase-js": "^2.117.3",
     "ai": "^7.0.97",
     "better-auth": "^1.7.7",
     "dotenv": "^17.4.2",

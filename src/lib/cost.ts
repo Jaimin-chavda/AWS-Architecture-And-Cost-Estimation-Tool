@@ -23,9 +23,30 @@ import { getUnitPrice, getPriceSourceMode } from "./prices.ts";
 import type { PriceSourceMode } from "./prices.ts";
 import { getServiceDefaults, BASE_USER_COUNT, FIXED_COST_SERVICES } from "./SERVICE_DEFAULTS.ts";
 import type { RdsEngineLabel } from "./SERVICE_DEFAULTS.ts";
+import { readTopology } from "./topology.ts";
+import { scopeOf } from "./diagram.ts";
 
 /** Cognito User Pools free tier: first 50k MAU free. */
 const COGNITO_FREE_TIER_MAU = 50_000;
+
+/** Task-based compute: priced per running task, replicated across AZs. */
+const TASK_COMPUTE_SERVICES: ReadonlySet<string> = new Set([
+  "ECS",
+  "Fargate",
+  "AppRunner",
+  "Batch",
+]);
+
+/** Instance-based stores: a Multi-AZ standby doubles the instance hours. */
+const DB_INSTANCE_SERVICES: ReadonlySet<string> = new Set([
+  "RDS",
+  "Aurora",
+  "ElastiCache",
+  "DocumentDB",
+  "MemoryDB",
+  "Neptune",
+  "Redshift",
+]);
 
 // ---------------------------------------------------------------------------
 // Output types
@@ -82,6 +103,9 @@ export async function computeCostRows(
 
   const userScaleFactor = Math.max(userCount, 1) / BASE_USER_COUNT;
   const dbEngine = (plan.metadata?.dbEngine ?? "none") as RdsEngineLabel;
+  // One topology reader for cost, diagram and template: quantities below
+  // follow the same flags the diagram lays out and the CFT provisions.
+  const topo = readTopology(plan);
 
   // ECS/Fargate defence in depth: Fix 1 folds Fargate into ECS upstream, but
   // if both survive into the final plan, price only the richer ECS row.
@@ -102,15 +126,33 @@ export async function computeCostRows(
       });
       return null;
     }
-    const defaults = getServiceDefaults(mapping.serviceId, dbEngine);
+    const baseline = getServiceDefaults(mapping.serviceId, dbEngine);
 
-    if (!defaults) {
+    if (!baseline) {
       unpricedRows.push({
         serviceId: mapping.serviceId,
         componentId: mapping.componentId,
         note: `No pricing baseline configured for "${mapping.serviceId}".`,
       });
       return null;
+    }
+
+    // Topology-adjusted baseline: tasks across AZs, standby replicas,
+    // per-AZ NAT hours, ALB + LCU, one price per secret.
+    const defaults = { ...baseline };
+    if (TASK_COMPUTE_SERVICES.has(mapping.serviceId)) {
+      const tasks = Math.max(topo.computeTasks, 2) * topo.availabilityZones / 2;
+      defaults.baseQuantity = 360 * tasks;
+      defaults.annotation = `${baseline.annotation}; scaled: ${tasks} tasks × 0.5 vCPU across ${topo.availabilityZones} AZ(s)`;
+    } else if (DB_INSTANCE_SERVICES.has(mapping.serviceId) && topo.multiAz) {
+      defaults.baseQuantity = baseline.baseQuantity * 2;
+      defaults.annotation = `${baseline.annotation}; Multi-AZ standby included (×2)`;
+    } else if (mapping.serviceId === "NATGateway") {
+      defaults.baseQuantity = 720 * topo.availabilityZones;
+      defaults.unitLabel = "NAT Gateway-hours/mo + data processing";
+      defaults.annotation = `${baseline.annotation}; ${topo.availabilityZones} AZ(s) × 720 h, plus data-processing per GB (see Assumptions)`;
+    } else if (mapping.serviceId === "ALB" || mapping.serviceId === "NLB" || mapping.serviceId === "GLB") {
+      defaults.annotation = `${baseline.annotation}; plus LCU charges per evaluated rule (see Assumptions)`;
     }
 
     const { price, source } = await getUnitPrice(
@@ -150,6 +192,40 @@ export async function computeCostRows(
   for (const result of results) {
     if (result !== null) {
       rows.push(result);
+    }
+  }
+
+  // Every diagram node gets a cost row or an explicit free note. Mappings
+  // are covered above; the structural Users ingress marker and the
+  // third-party integration boxes are free by construction.
+  const pricedIds = new Set([
+    ...rows.map((r) => `${r.serviceId}|${r.componentId}`),
+    ...unpricedRows.map((r) => `${r.serviceId}|${r.componentId}`),
+  ]);
+  const hasEdgeTier = plan.awsMappings.some((m) => {
+    try {
+      return scopeOf(m.serviceId) === "global-edge";
+    } catch {
+      return false;
+    }
+  });
+  if (hasEdgeTier && !pricedIds.has("Users|users")) {
+    unpricedRows.push({
+      serviceId: "Users",
+      componentId: "users",
+      note: "Structural ingress marker — not a billable AWS resource (free).",
+    });
+  }
+  const seenInteg = new Set<string>();
+  for (const dm of plan.deploymentModel ?? []) {
+    for (const t of dm.thirdPartyIntegrations ?? []) {
+      if (seenInteg.has(t.name)) continue;
+      seenInteg.add(t.name);
+      unpricedRows.push({
+        serviceId: t.name,
+        componentId: `ext-${t.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+        note: "External third-party integration — not billed as an AWS resource (free).",
+      });
     }
   }
 

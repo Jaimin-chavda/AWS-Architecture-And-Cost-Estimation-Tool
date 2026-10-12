@@ -28,7 +28,6 @@ import {
   generateCftFromDiagramXml,
   validateCloudFormationTemplate,
   CFT_SERVICE_RESOURCE_MAP,
-  PATTERN_CANONICAL_SERVICES,
   CFT_DISCLAIMER_TEXT,
 } from "../cftExport.ts";
 import type { ServicePlan, ServiceId } from "../schema.ts";
@@ -91,23 +90,36 @@ describe("CFT Export — Resource Mapping Table", () => {
     }
   });
 
-  it("provides canonical service definitions for all 6 patterns", () => {
-    const patterns = [
-      "serverless-rest-api",
-      "containerized-web-app",
-      "static-site-cdn",
-      "event-driven-pipeline",
-      "full-stack-serverless",
-      "worker-queue",
+  it("derives resources from the plan mappings only, never a pattern list", () => {
+    // A plan mapping VPC + ECS with 2 AZs synthesizes one subnet per AZ.
+    const plan = makePlanForPattern("containerized-web-app", ["ECS", "VPC"]);
+    plan.deploymentModel = [
+      {
+        componentId: "c-0",
+        public: false,
+        needsVpc: true,
+        needsMultiAz: false,
+        needsAutoscaling: false,
+        source: "recommended",
+        availabilityZones: 2,
+        hasLoadBalancer: false,
+        secretsManager: false,
+        natGateway: false,
+        thirdPartyIntegrations: [],
+      },
     ];
+    const yaml = generateCftYaml(plan);
+    const doc = parse(yaml);
+    assert.ok(doc.Resources.AppVpc, "VPC resource present");
+    assert.ok(doc.Resources.PublicSubnet1, "subnet for AZ 1 present");
+    assert.ok(doc.Resources.PublicSubnet2, "subnet for AZ 2 present");
+    assert.ok(!doc.Resources.PublicSubnet3, "no subnet beyond the AZ count");
 
-    for (const pat of patterns) {
-      const services = PATTERN_CANONICAL_SERVICES[pat];
-      assert.ok(services && services.length > 0, `Missing canonical services for ${pat}`);
-      for (const s of services) {
-        assert.ok(CFT_SERVICE_RESOURCE_MAP[s], `Canonical service ${s} not in resource map`);
-      }
-    }
+    // An empty mapping set degrades to the S3 floor, not a pattern guess.
+    const empty = makePlanForPattern("serverless-api", []);
+    const emptyYaml = generateCftYaml(empty);
+    const emptyDoc = parse(emptyYaml);
+    assert.ok(emptyDoc.Resources.AppBucket, "empty plan degrades to S3 floor");
   });
 });
 

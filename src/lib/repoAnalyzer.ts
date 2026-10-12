@@ -390,7 +390,7 @@ export const NPM_FRAMEWORK_MAP: Record<string, { label: string; category: "frame
   "express-fileupload": { label: "File Upload (S3)", category: "framework" },
   multer: { label: "File Upload (S3)", category: "framework" },
   formidable: { label: "File Upload (S3)", category: "framework" },
-  // Firebase (serverless backend-as-a-service; labels feed productionReadiness detection)
+  // Firebase (serverless backend-as-a-service; labels feed trait derivation)
   firebase: { label: "Firebase", category: "framework" },
   "firebase-admin": { label: "Firebase Admin", category: "framework" },
   "firebase-functions": { label: "Firebase Functions", category: "framework" },

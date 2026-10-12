@@ -17,7 +17,7 @@ import pg from "pg";
 const { Pool } = pg;
 
 const here = dirname(fileURLToPath(import.meta.url));
-const root = join(here, "..", "..", "..");
+const root = join(here, "..");
 
 // Next.js loads .env.local for the app, not for this script.
 for (const f of [".env.local", ".env"]) {
@@ -31,7 +31,7 @@ for (const f of [".env.local", ".env"]) {
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
-  console.error("DATABASE_URL is not set. See .env.example.");
+  console.error("DATABASE_URL is not set. Add it to .env.local.");
   process.exit(1);
 }
 
