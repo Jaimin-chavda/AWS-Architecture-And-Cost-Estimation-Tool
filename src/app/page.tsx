@@ -13,12 +13,14 @@
  * - Region price updates via POST /api/prices
  */
 
-import React, { useState, useCallback, useRef } from "react";
+import React, { useState, useCallback, useRef, useEffect } from "react";
 import type { CostResult } from "@/lib/cost";
 import type { ServicePlan, Grounding } from "@/lib/schema";
 import type { ProjectProfile } from "@/lib/repoAnalyzer";
 import type { ArchitectureModel } from "@/lib/architecture";
+import { HISTORY_OPEN_KEY } from "@/lib/history-model";
 
+import { SiteHeader } from "@/components/SiteHeader";
 import { AnalysisVisualizer } from "@/components/AnalysisVisualizer";
 import { DiagramViewer } from "@/components/DiagramViewer";
 import { CostCalculator } from "@/components/CostCalculator";
@@ -37,7 +39,6 @@ import {
   RefreshCw,
   Layers,
   DollarSign,
-  Compass,
   CheckCircle,
   HelpCircle,
   Code,
@@ -45,7 +46,16 @@ import {
   Download,
   Copy,
   Check,
+  FolderOpen as FolderOpenIcon,
 } from "lucide-react";
+
+function formatOpenedDate(iso: string): string {
+  try {
+    return new Date(iso).toLocaleString();
+  } catch {
+    return iso;
+  }
+}
 
 function GithubIcon({ className = "h-4 w-4" }: { className?: string }) {
   return (
@@ -196,6 +206,69 @@ export default function Home() {
   // Keep track of what was submitted for the visualizer
   const submittedValueRef = useRef("");
 
+  // Title + timestamp when the result came from saved history (not fresh)
+  const [openedFromHistory, setOpenedFromHistory] = useState<{
+    title: string;
+    createdAt: string;
+  } | null>(null);
+
+  // Open a saved analysis stashed by /history (no re-analysis, no fetch).
+  // The stash is read synchronously; applying it is deferred so the effect
+  // body itself performs no synchronous setState.
+  useEffect(() => {
+    let raw: string | null = null;
+    try {
+      raw = sessionStorage.getItem(HISTORY_OPEN_KEY);
+      sessionStorage.removeItem(HISTORY_OPEN_KEY);
+    } catch {
+      return;
+    }
+    if (!raw) return;
+    const t = setTimeout(() => {
+      let item: {
+        title?: string;
+        created_at?: string;
+        diagram_xml?: string | null;
+        plan_json?: {
+          service_plan?: ServicePlan;
+          cost_rows?: CostResult | null;
+          warnings?: string[];
+          input_kind?: "github_url" | "description";
+          grounding?: Grounding;
+        };
+      };
+      try {
+        item = JSON.parse(raw as string) as typeof item;
+      } catch {
+        return; // Corrupt stash — ignore, stay on the input view.
+      }
+      const bundle = item.plan_json;
+      if (!bundle?.service_plan) return;
+      const plan = bundle.service_plan;
+      const diagramXml = item.diagram_xml ?? null;
+      const costRows = bundle.cost_rows ?? null;
+      setResult({
+        input_kind: bundle.input_kind ?? "description",
+        grounding: bundle.grounding ?? "description",
+        service_plan: plan,
+        service_plans: [plan],
+        diagram_xml: diagramXml,
+        diagram_xmls: [diagramXml],
+        cost_rows: costRows,
+        cost_rows_list: [costRows],
+        warnings: bundle.warnings ?? [],
+      });
+      setOpenedFromHistory({
+        title: item.title ?? "Saved analysis",
+        createdAt: item.created_at ?? "",
+      });
+      setAnalysisComplete(true);
+      setShowResults(true);
+      setResultTab("diagram");
+    }, 0);
+    return () => clearTimeout(t);
+  }, []);
+
   // Submission handler
   const handleSubmit = useCallback(
     async (e?: React.FormEvent) => {
@@ -205,6 +278,7 @@ export default function Home() {
       setInsufficientSignal(null);
       setAnalysisComplete(false);
       setShowResults(false);
+      setOpenedFromHistory(null);
       setLoading(true);
 
       const targetValue = activeTab === "github" ? githubUrl.trim() : description.trim();
@@ -276,6 +350,7 @@ export default function Home() {
     setInsufficientSignal(null);
     setLoading(false);
     setAnalysisComplete(false);
+    setOpenedFromHistory(null);
   }, []);
 
   // Switch to description tab and prefill from insufficient signal
@@ -293,44 +368,19 @@ export default function Home() {
   return (
     <div className="relative flex min-h-screen flex-col font-sans">
       {/* Top Ambient Navigation Bar */}
-      <header className="sticky top-0 z-40 border-b border-border/40 bg-background/70 backdrop-blur-xl">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3.5 sm:px-6">
-          <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-gradient-to-tr from-accent to-indigo-500 text-on-accent shadow-[0_0_20px_rgba(167,139,250,0.35)]">
-              <Compass className="h-5 w-5" />
-            </div>
-            <div>
-              <span className="font-semibold tracking-tight text-foreground sm:text-base">
-                AWS Architect
-              </span>
-              <span className="ml-2 hidden rounded-full border border-accent/25 bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent sm:inline">
-                SGP Cloud Modeler
-              </span>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3">
-            {showResults && (
-              <button
-                onClick={handleReset}
-                className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-4 py-1.5 text-xs font-medium text-muted transition-all hover:border-accent/40 hover:text-foreground active:scale-95"
-              >
-                <RefreshCw className="h-3 w-3" />
-                <span>New Analysis</span>
-              </button>
-            )}
-            <a
-              href="https://github.com"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 rounded-full border border-border/80 bg-surface-2/60 px-3.5 py-1.5 text-xs font-medium text-muted transition-all hover:border-accent/40 hover:text-foreground"
+      <SiteHeader
+        actions={
+          showResults ? (
+            <button
+              onClick={handleReset}
+              className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-4 py-1.5 text-xs font-medium text-muted transition-all hover:border-accent/40 hover:text-foreground active:scale-95"
             >
-              <GithubIcon className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">GitHub</span>
-            </a>
-          </div>
-        </div>
-      </header>
+              <RefreshCw className="h-3 w-3" />
+              <span>New Analysis</span>
+            </button>
+          ) : undefined
+        }
+      />
 
       {/* Main Content Area */}
       <main
@@ -440,6 +490,19 @@ export default function Home() {
             {/* Grounding & Warnings Banners */}
             <GroundingBanner grounding={result.grounding} />
             <WarningsBanner warnings={result.warnings} />
+            {openedFromHistory && (
+              <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-accent/25 bg-accent/10 px-4 py-2.5 text-xs text-accent-light">
+                <FolderOpenIcon className="h-4 w-4 shrink-0 text-accent" />
+                <span>
+                  Opened from history: <span className="font-semibold">{openedFromHistory.title}</span>
+                  {openedFromHistory.createdAt && (
+                    <span className="text-muted">
+                      {" "}· saved {formatOpenedDate(openedFromHistory.createdAt)}
+                    </span>
+                  )}
+                </span>
+              </div>
+            )}
 
             {/* Tab Views */}
             <div className="flex flex-1 flex-col min-h-[500px]">

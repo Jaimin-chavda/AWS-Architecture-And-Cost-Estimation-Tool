@@ -16,7 +16,7 @@ Paste a GitHub repo URL or describe a project idea, get back an AWS architecture
 - Next.js 16 (App Router) + React 19 + TypeScript
 - Vercel AI SDK v7 (`generateObject`) + zod 4, providers: DeepSeek → Google Gemini Flash → Groq
 - `@aws-sdk/client-pricing` for the optional SDK pricing path
-- `better-auth` + `better-sqlite3` for optional login and saved-history (guest usage requires neither)
+- `better-auth` (email/password) + Supabase Postgres via `pg` for optional login and saved-history (guest usage requires neither)
 - draw.io iframe embed for diagram rendering/editing
 
 ## Getting started
@@ -37,6 +37,12 @@ GROQ_API_KEY=...
 ```
 
 Optional: `GITHUB_TOKEN` raises the GitHub REST rate limit from 60/hr to 5,000/hr. `PRICE_SOURCE=sdk` (plus AWS IAM credentials) switches the cost engine from the public bulk-pricing JSON to the official `@aws-sdk/client-pricing` API.
+
+To enable login + saved history, copy `.env.example` to `.env.local`, set `DATABASE_URL` (Supabase Transaction pooler string, port 6543), `BETTER_AUTH_SECRET`, and `BETTER_AUTH_URL`, then create the tables:
+
+```bash
+npm run db:migrate
+```
 
 ## Testing
 

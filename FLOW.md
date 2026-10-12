@@ -305,13 +305,13 @@ Error paths:
 
 ### Save
 ```
-logged-in, "Save analysis"
-  → POST /api/history
-     { input_kind, input, grounding, service_plan, diagram_xml, cost_snapshot }
-  → cost_snapshot = frozen { region, generated_at,
-        services:[{code, unitPrice, quantityFormula, monthly}], grandTotal }
-  → INSERT analyses(id, user_id, input_kind, input, grounding,
-                    service_plan, diagram_xml, cost_snapshot, created_at)
+logged-in, analysis succeeds
+  → POST /api/analyze saves server-side (fire-and-forget, never fails response)
+     { title, source_type, source_input, region, user_count,
+       plan_json: { service_plan, cost_rows, warnings, input_kind, grounding },
+       diagram_xml }
+  → INSERT analysis_history(id, user_id, title, source_type, source_input,
+                            region, user_count, plan_json, diagram_xml, created_at)
 ```
 
 ### Reopen (flaw 7 — frozen, never recomputed)
@@ -323,7 +323,7 @@ logged-in, "Save analysis"
 ```
 
 ### Auth
-- `better-auth` email/password; sessions in SQLite; guest generation totally unchanged (Phase 6 adds zero to the core loop).
+- `better-auth` email/password; sessions in Postgres (Supabase pooler via `pg`); guest generation totally unchanged (Phase 6 adds zero to the core loop).
 
 ---
 

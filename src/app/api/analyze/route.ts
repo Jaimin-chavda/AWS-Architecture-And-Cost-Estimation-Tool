@@ -24,6 +24,8 @@ import { analyzeProject } from "@/lib/repoAnalyzer";
 import { runInference, deriveGrounding } from "@/lib/inference";
 import { generateDiagramXml } from "@/lib/diagram";
 import { computeCostRows } from "@/lib/cost";
+import { getSessionUser } from "@/lib/auth";
+import { buildHistoryTitle, historyStore } from "@/lib/history";
 import type { RuleInput } from "@/lib/ruleEngine";
 import type { ProjectProfile } from "@/lib/repoAnalyzer";
 import type { Diagnostic, Grounding, ServicePlan } from "@/lib/schema";
@@ -346,6 +348,33 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const costRows = costRowsList[0] ?? null;
   if (!costRows) {
     warnings.push("Cost estimation failed — estimates unavailable.");
+  }
+
+  // ── History: save for logged-in users, never fail the analysis ──────────
+  // Guests generate with no login and nothing is saved for them. A save
+  // failure must not break the response — it is caught and logged only.
+  const savedBy = await getSessionUser();
+  if (savedBy) {
+    try {
+      await historyStore.save({
+        userId: savedBy.id,
+        title: buildHistoryTitle(kind, value),
+        sourceType: kind === "github_url" ? "repo" : "idea",
+        sourceInput: value.slice(0, 8000),
+        region,
+        userCount,
+        planJson: {
+          service_plan: cleanPlanForSerialization(servicePlan),
+          cost_rows: costRows,
+          warnings,
+          input_kind: kind,
+          grounding,
+        },
+        diagramXml,
+      });
+    } catch (err) {
+      console.warn("[analyze] History save failed (response unaffected):", err);
+    }
   }
 
   // ── Response ─────────────────────────────────────────────────────────────
